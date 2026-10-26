@@ -21,6 +21,19 @@ export interface CrmAdapter {
   readProperties(): Promise<ImportedProperty[]>;
   readEngagements(): Promise<ImportedEngagement[]>;
   readServiceRequests(): Promise<ImportedServiceRequest[]>;
+  readSupplierInvoices(): Promise<ImportedSupplierInvoice[]>;
+}
+
+export interface ImportedSupplierInvoice {
+  planfixTaskId: number;
+  invoiceNumber: string | null;
+  invoiceDate: string | null;
+  amountNet: number | null;
+  amountVat: number | null;
+  amountTotal: number | null;
+  handling: string | null;
+  supplier: ContactRef | null;
+  engagement: { planfixTaskId: number; name: string } | null;
 }
 
 export interface ImportedServiceRequest {
@@ -313,6 +326,27 @@ export class PlanfixAdapter implements CrmAdapter {
   async readServiceRequests(): Promise<ImportedServiceRequest[]> {
     const tasks = await this.listByTemplate(TEMPLATE.serviceRequest, [], ["status"]);
     return tasks.map((t) => ({ planfixTaskId: t.id, statusId: readTaskId(t.status) }));
+  }
+
+  // Supplier invoices (template 22). Reading these fields through task/list was
+  // verified read-only on maglardsand (8 tasks, 325-328 checked by hand).
+  async readSupplierInvoices(): Promise<ImportedSupplierInvoice[]> {
+    const f = FIELD.supplierInvoice;
+    const tasks = await this.listByTemplate(TEMPLATE.supplierInvoice, Object.values(f));
+    return tasks.map((t) => {
+      const eng = fieldOf(t, f.engagement) as { id?: unknown; name?: unknown } | null;
+      return {
+        planfixTaskId: t.id,
+        invoiceNumber: readText(fieldOf(t, f.invoiceNumber)),
+        invoiceDate: readDate(fieldOf(t, f.invoiceDate)),
+        amountNet: readNumber(fieldOf(t, f.amountNet)),
+        amountVat: readNumber(fieldOf(t, f.amountVat)),
+        amountTotal: readNumber(fieldOf(t, f.amountTotal)),
+        handling: readText(fieldOf(t, f.handling)),
+        supplier: readContact(fieldOf(t, f.supplier)),
+        engagement: typeof eng?.id === "number" ? { planfixTaskId: eng.id, name: String(eng.name ?? "") } : null,
+      };
+    });
   }
 
   // Filter type 51 = task template (verified read-only on maglardsand: 55 tasks

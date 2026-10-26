@@ -194,6 +194,16 @@ service request cannot be archived. An admin can delete a card only when it
 was opened by mistake: nothing links to it and it never reached Planfix,
 where nothing is deleted. The audit log keeps the name of what was deleted.
 
+## Supplier invoices and monthly accounts
+
+A supplier invoice is entered from its service request or straight from the
+supplier invoices screen, and is pushed to Planfix (template 22). Invoices
+entered directly in Planfix are read back on every readback (or with
+"רענון מ-Planfix") and listed by their details only, read only; nothing is
+written back. The supplier card shows a monthly account: the month's invoices
+from both sides, the totals, and when each is due under the supplier's
+payment terms ("שוטף+30" is the end of the invoice month plus 30 days).
+
 ## Files
 
 Photos and documents (JPEG, PNG, WebP, HEIC, PDF, Word, Excel, up to 10MB)

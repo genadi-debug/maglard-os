@@ -968,7 +968,8 @@ async function suppliersView(params) {
   clickableRows();
 }
 
-async function supplierView(id) {
+async function supplierView(id, params) {
+  const month = /^\d{4}-\d{2}$/.test(params.get("month") || "") ? params.get("month") : today().slice(0, 7);
   const [s, c] = await Promise.all([api("GET", `/suppliers/${id}`), api("GET", `/contacts/${id}`)]);
   view.innerHTML = `
     <p><a href="#/suppliers">→ כל הספקים</a></p>
@@ -981,11 +982,15 @@ async function supplierView(id) {
       <div><span>דירות שעבד בהן</span><b>${s.properties.length}</b></div>
     </div>
     ${contactSection(c)}
+    ${allowed("invoices.view") ? `<div id="statement">${await statementSection(id, month)}</div>` : ""}
     <h2>קריאות שירות</h2>${requestsTable(s.requests)}
     ${invoicesTable(s.invoices)}
     <h2>דירות</h2>
     ${s.properties.length ? `<ul>${s.properties.map((p) => `<li><a href="#/properties/${p.id}">${esc(p.address)}</a> · ${p.jobs} קריאות</li>`).join("")}</ul>` : `<div class="empty">עדיין לא</div>`}`;
   wireContact(c);
+  view.querySelector("#statement-month")?.addEventListener("change", (e) => {
+    if (e.target.value) location.hash = `#/suppliers/${id}?month=${e.target.value}`;
+  });
 }
 
 async function notificationsView() {
@@ -1013,21 +1018,104 @@ async function notificationsView() {
   );
 }
 
+// Values of Planfix field 9978 "אופן טיפול בהוצאה" seen on maglardsand invoices.
+const HANDLING = ["לחיוב", "כללי"];
+
+async function invoiceDialog() {
+  const [engagements, supplier] = await Promise.all([api("GET", "/engagements"), contactField("supplier", "ספק", "supplier")]);
+  if (!engagements.length) return toast("קודם צריך לקלוט דירה");
+  dialog(
+    "קליטת חשבונית ספק",
+    `<label class="full">דירה<select name="engagementId" required>${engagements
+      .map((e) => `<option value="${e.id}">${esc(e.apartment_code)} — ${esc(e.address)}</option>`)
+      .join("")}</select></label>` +
+      supplier.html +
+      field("invoiceNumber", "מספר חשבונית", "required") +
+      field("invoiceDate", "תאריך חשבונית", `type="date" required value="${today()}"`) +
+      field("amountNet", "סכום לפני מע״מ", 'type="number" required min="0" step="0.01"') +
+      field("amountVat", "מע״מ", 'type="number" required min="0" step="0.01"') +
+      `<label>אופן טיפול בהוצאה<select name="handling">${options(HANDLING.map((h) => [h, h]), HANDLING[0])}</select></label>`,
+    async (v) => {
+      const net = Number(v.amountNet);
+      const vat = Number(v.amountVat);
+      await api("POST", "/supplier-invoices", {
+        engagementId: v.engagementId,
+        supplier: supplier.resolve(v.supplier),
+        invoiceNumber: v.invoiceNumber,
+        invoiceDate: v.invoiceDate,
+        amountNet: net,
+        amountVat: vat,
+        amountTotal: Math.round((net + vat) * 100) / 100,
+        handling: v.handling,
+      });
+      toast("החשבונית נקלטה ונשלחת ל-Planfix");
+      route();
+    },
+    "קליטה",
+  );
+}
+
+// Where an invoice came from: made here (with its sync state), or entered in Planfix and shown read only.
+const invoiceSource = (i) =>
+  i.source === "planfix"
+    ? `${pill(["נקלטה ב-Planfix", ""])} <small>#${i.planfix_task_id}</small>`
+    : `${pill(SYNC[i.sync])}${i.planfix_task_id ? ` <small>#${i.planfix_task_id}</small>` : ""}`;
+const supplierLink = (i) => (i.supplier_id ? `<a href="#/suppliers/${i.supplier_id}">${esc(i.supplier_name)}</a>` : esc(i.supplier_name || "—"));
+
 async function invoicesView() {
   const rows = await api("GET", "/supplier-invoices");
   view.innerHTML = `
-    <h1>חשבוניות ספק</h1><p class="sub">חשבוניות שנקלטו, ומצב הסנכרון שלהן ל-Planfix.</p>
+    <div class="head"><div><h1>חשבוניות ספק</h1><p class="sub">חשבוניות שנקלטו כאן ומצב הסנכרון שלהן, וחשבוניות שנקלטו ישירות ב-Planfix (לקריאה בלבד).</p></div>
+    <div class="actions" style="margin:0">
+      ${allowed("invoices.create") ? `<button class="btn primary" id="add">קליטת חשבונית</button>` : ""}
+      <button class="btn" id="refresh">רענון מ-Planfix</button>
+    </div></div>
     ${
       rows.length
         ? `<div class="wrap"><table class="table"><thead><tr><th>מספר</th><th>ספק</th><th>דירה</th><th>תאריך</th>
           <th>לפני מע״מ</th><th>סה״כ</th><th>אופן טיפול</th><th>Planfix</th></tr></thead><tbody>${rows
             .map(
-              (i) => `<tr><td>${esc(i.invoice_number)}</td><td>${esc(i.supplier_name)}</td><td>${esc(i.apartment_code)}</td>
+              (i) => `<tr><td>${esc(i.invoice_number || "—")}</td><td>${supplierLink(i)}</td><td>${esc(i.apartment_code || "—")}</td>
               <td>${date(i.invoice_date)}</td><td>${money(i.amount_net)}</td><td>${money(i.amount_total)}</td>
-              <td>${esc(i.handling)}</td><td>${pill(SYNC[i.sync])}${i.planfix_task_id ? ` <small>#${i.planfix_task_id}</small>` : ""}</td></tr>`,
+              <td>${esc(i.handling || "")}</td><td>${invoiceSource(i)}</td></tr>`,
             )
             .join("")}</tbody></table></div>`
         : `<div class="empty">אין חשבוניות</div>`
+    }`;
+  view.querySelector("#add")?.addEventListener("click", invoiceDialog);
+  view.querySelector("#refresh").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      const r = await api("POST", "/supplier-invoices/refresh");
+      toast(`נקראו ${r.read} חשבוניות מ-Planfix`);
+      route();
+    } catch (err) {
+      toast(err.message);
+      e.target.disabled = false;
+    }
+  });
+}
+
+// The supplier's monthly account: the month's invoices, totals and due dates.
+async function statementSection(supplierId, month) {
+  const st = await api("GET", `/suppliers/${supplierId}/statement?month=${month}`);
+  return `
+    <div class="head" style="align-items:end"><h2 style="margin:16px 0 0">חשבון חודשי</h2>
+      <label>חודש <input type="month" id="statement-month" value="${month}"></label></div>
+    <p class="sub">תנאי תשלום: ${esc(st.supplier.payment_terms || "לא נקבעו")}${st.supplier.payment_terms ? "" : " (בלי תנאי תשלום אין תאריך לתשלום)"}</p>
+    ${
+      st.invoices.length
+        ? `<div class="wrap"><table class="table"><thead><tr><th>מספר</th><th>דירה</th><th>תאריך</th><th>לפני מע״מ</th><th>מע״מ</th>
+          <th>סה״כ</th><th>לתשלום עד</th><th>מקור</th></tr></thead><tbody>${st.invoices
+            .map(
+              (i) => `<tr><td>${esc(i.invoice_number || "—")}</td><td>${esc(i.apartment_code || "—")}</td><td>${date(i.invoice_date)}</td>
+              <td>${money(i.amount_net)}</td><td>${money(i.amount_vat)}</td><td>${money(i.amount_total)}</td>
+              <td>${i.due_on ? date(i.due_on) : "—"}</td><td>${invoiceSource(i)}</td></tr>`,
+            )
+            .join("")}
+            <tr><td colspan="3"><b>סה״כ לחודש</b></td><td><b>${money(st.totals.net)}</b></td><td><b>${money(st.totals.vat)}</b></td>
+            <td><b>${money(st.totals.total)}</b></td><td colspan="2"></td></tr></tbody></table></div>`
+        : `<div class="empty">אין חשבוניות בחודש הזה</div>`
     }`;
 }
 
@@ -1565,7 +1653,7 @@ async function route() {
     else if (section === "requests" && id) await requestView(id);
     else if (section === "requests") await requestsView();
     else if (section === "invoices") await invoicesView();
-    else if (section === "suppliers" && id) await supplierView(id);
+    else if (section === "suppliers" && id) await supplierView(id, params);
     else if (section === "owners" && id) await ownerView(id);
     else if (section === "owners") await ownersView(params);
     else if (section === "suppliers") await suppliersView(params);

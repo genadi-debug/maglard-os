@@ -6,6 +6,7 @@ import { z, ZodError } from "zod";
 import * as auth from "../auth.js";
 import * as archive from "../domain/archive.js";
 import * as files from "../domain/attachments.js";
+import * as invoices from "../domain/invoices.js";
 import * as contacts from "../domain/contacts.js";
 import { ForbiddenError } from "../domain/common.js";
 import * as notifications from "../domain/notifications.js";
@@ -19,6 +20,7 @@ import * as tasks from "../domain/tasks.js";
 import { createIntake, createSupplierInvoice, NotFoundError } from "../domain/services.js";
 import type { CrmAdapter } from "../planfix/adapter.js";
 import { importFromCrm } from "../sync/importer.js";
+import { refreshPlanfixInvoices } from "../sync/planfixInvoices.js";
 import * as readback from "../sync/readback.js";
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "public");
@@ -59,6 +61,8 @@ const ROUTES: Record<string, Permission | null> = {
   "POST /service-requests/:id/invoice": "invoices.create",
   "GET /supplier-invoices": "invoices.view",
   "POST /supplier-invoices": "invoices.create",
+  "POST /supplier-invoices/refresh": "invoices.view",
+  "GET /suppliers/:id/statement": "invoices.view",
   "GET /sync/status": "sync.view",
   "POST /sync/:id/retry": "sync.retry",
   "GET /users": "users.manage",
@@ -293,7 +297,16 @@ export function buildServer(
     const role = req.user!.role;
     return { ...card, invoices: can(role, "invoices.view") ? hideAmounts(role, card.invoices) : [] };
   });
-  app.get("/supplier-invoices", async () => q.listSupplierInvoices(db));
+  app.get("/supplier-invoices", async () => invoices.listSupplierInvoices(db));
+  // Read the invoices entered in Planfix now, instead of at the next readback.
+  app.post("/supplier-invoices/refresh", async (_req, reply) => {
+    if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
+    return refreshPlanfixInvoices(db, opts.crm);
+  });
+  app.get<{ Params: { id: string }; Querystring: { month?: string } }>("/suppliers/:id/statement", async (req) => {
+    const month = z.string().regex(/^\d{4}-\d{2}$/, "חודש בפורמט YYYY-MM").parse(req.query.month ?? new Date().toISOString().slice(0, 7));
+    return invoices.supplierStatement(db, req.params.id, month);
+  });
   app.get("/work-center", async (req) => q.workCenter(db, req.user!));
 
   // Saved locally first; Planfix sync happens in the background ("saved, waiting for sync").

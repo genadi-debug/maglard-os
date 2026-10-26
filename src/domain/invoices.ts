@@ -1,0 +1,76 @@
+import type { Db } from "../db/pool.js";
+import { NotFoundError } from "./common.js";
+
+// Supplier invoices from both sides: the ones made in MAGLARD OS, and the ones
+// entered directly in Planfix, read back by their details only.
+
+// When an invoice is due under the supplier's payment terms. "שוטף+30" is the
+// end of the invoice month plus 30 days; "שוטף" is the end of the month.
+export function dueDate(invoiceDate: string | null, terms: string | null): string | null {
+  if (!invoiceDate || !terms) return null;
+  if (terms === "מיידי") return invoiceDate;
+  const m = /^שוטף(?:\s*\+\s*(\d+))?$/.exec(terms.trim());
+  if (!m) return null;
+  const [y, mo] = invoiceDate.split("-").map(Number);
+  const due = new Date(Date.UTC(y, mo, 0)); // last day of the invoice month
+  due.setUTCDate(due.getUTCDate() + Number(m[1] ?? 0));
+  return due.toISOString().slice(0, 10);
+}
+
+const syncState = `
+  CASE
+    WHEN i.planfix_task_id IS NOT NULL THEN 'synced'
+    WHEN EXISTS (SELECT 1 FROM outbox o WHERE o.entity_id = i.id AND o.status = 'failed') THEN 'failed'
+    ELSE 'pending'
+  END`;
+
+// One row shape for both sources. source: 'maglard' (made here) or 'planfix'
+// (entered in Planfix, read only). The apartment code of a Planfix invoice is
+// its engagement's, or the start of the engagement task's name.
+const BOTH = `
+  SELECT i.id::text, 'maglard' AS source, i.invoice_number, to_char(i.invoice_date, 'YYYY-MM-DD') AS invoice_date, i.amount_net, i.amount_vat,
+         i.amount_total, i.handling, e.apartment_code, p.address, s.id AS supplier_id, s.name AS supplier_name,
+         i.planfix_task_id, ${syncState} AS sync, i.created_at AS sort_at
+    FROM supplier_invoices i
+    JOIN engagements e ON e.id = i.engagement_id
+    JOIN properties p ON p.id = e.property_id
+    JOIN contacts s ON s.id = i.supplier_id
+  UNION ALL
+  SELECT 'planfix:' || f.planfix_task_id, 'planfix', f.invoice_number, to_char(f.invoice_date, 'YYYY-MM-DD'), f.amount_net, f.amount_vat,
+         f.amount_total, f.handling, coalesce(e.apartment_code, nullif(split_part(f.engagement_name, ' — ', 1), '')),
+         p.address, s.id, coalesce(s.name, f.supplier_name), f.planfix_task_id, 'synced', f.invoice_date::timestamptz
+    FROM planfix_invoices f
+    LEFT JOIN engagements e ON e.planfix_task_id = f.engagement_task_id
+    LEFT JOIN properties p ON p.id = e.property_id
+    LEFT JOIN contacts s ON s.planfix_id = f.supplier_planfix_id AND s.kind = 'supplier'`;
+
+const strip = ({ sort_at: _, ...row }: Record<string, unknown>) => row;
+
+export async function listSupplierInvoices(db: Db) {
+  const { rows } = await db.query(`SELECT * FROM (${BOTH}) x ORDER BY sort_at DESC NULLS LAST`);
+  return rows.map(strip);
+}
+
+// The supplier's monthly account: every invoice dated in the month, the
+// totals, and when each is due under the supplier's payment terms.
+export async function supplierStatement(db: Db, supplierId: string, month: string) {
+  const s = await db.query("SELECT id, name, payment_terms FROM contacts WHERE id = $1 AND kind = 'supplier'", [
+    supplierId,
+  ]);
+  if (!s.rows[0]) throw new NotFoundError(`supplier ${supplierId} not found`);
+  const terms = s.rows[0].payment_terms as string | null;
+  const { rows } = await db.query(
+    `SELECT * FROM (${BOTH}) x
+      WHERE x.supplier_id = $1 AND x.invoice_date LIKE $2 || '-%'
+      ORDER BY x.invoice_date, x.invoice_number`,
+    [supplierId, month],
+  );
+  const invoices = rows.map((r) => ({ ...strip(r), due_on: dueDate(r.invoice_date, terms) }));
+  const sum = (k: string) => Math.round(invoices.reduce((t, i) => t + Number(i[k as keyof typeof i] ?? 0), 0) * 100) / 100;
+  return {
+    supplier: s.rows[0],
+    month,
+    invoices,
+    totals: { net: sum("amount_net"), vat: sum("amount_vat"), total: sum("amount_total") },
+  };
+}
