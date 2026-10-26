@@ -5,10 +5,11 @@ import Fastify from "fastify";
 import { z, ZodError } from "zod";
 import * as auth from "../auth.js";
 import * as archive from "../domain/archive.js";
+import * as billing from "../domain/billing.js";
 import * as files from "../domain/attachments.js";
 import * as invoices from "../domain/invoices.js";
 import * as contacts from "../domain/contacts.js";
-import { ForbiddenError } from "../domain/common.js";
+import { ForbiddenError, isoDate } from "../domain/common.js";
 import * as notifications from "../domain/notifications.js";
 import type { Db } from "../db/pool.js";
 import { can, isRole, permissionsOf, ROLES, type Permission } from "../permissions.js";
@@ -82,6 +83,14 @@ const ROUTES: Record<string, Permission | null> = {
   "POST /contacts/:id/delete": "records.delete",
   "POST /properties/:id/archive": "records.archive",
   "POST /properties/:id/delete": "records.delete",
+  "GET /clients/:id/billing": "billing.view",
+  "GET /clients/:id/bills": "billing.view",
+  "POST /clients/:id/bills": "billing.manage",
+  "GET /bills/:id": "billing.view",
+  "POST /bills/:id/cancel": "billing.manage",
+  "POST /clients/:id/charges": "billing.manage",
+  "POST /clients/:id/charges/:chargeId/remove": "billing.manage",
+  "POST /engagements/:id/terms": "billing.manage",
   "GET /owners": "apartments.view",
   "GET /owners/:id": "apartments.view",
   "GET /suppliers": "requests.view",
@@ -213,7 +222,7 @@ export function buildServer(
   // Read models for the screens.
   app.get<{ Querystring: { kind?: string } }>("/contacts", async (req) => q.listContacts(db, req.query.kind));
   // Rent and invoice amounts, removed for roles that may not see them.
-  const AMOUNTS = ["monthly_rent", "amount_total", "amount_net", "amount_vat"];
+  const AMOUNTS = ["monthly_rent", "client_rent", "setup_fee", "management_fee", "amount_total", "amount_net", "amount_vat"];
   const hideAmounts = <T extends object>(role: auth.User["role"], rows: T[]): T[] =>
     can(role, "amounts.view")
       ? rows
@@ -255,7 +264,7 @@ export function buildServer(
     return reply.status(201).send(await contacts.createContact(db, input));
   });
   app.get<IdParams>("/contacts/:id", async (req) => ({
-    ...(await contacts.getContact(db, req.params.id, bankOf(req))),
+    ...hideAmounts(req.user!.role, [await contacts.getContact(db, req.params.id, bankOf(req))])[0],
     deletable: await archive.canDelete(db, "contact", req.params.id),
   }));
   app.post<IdParams>("/contacts/:id", async (req) =>
@@ -267,6 +276,27 @@ export function buildServer(
   app.post<{ Params: { id: string; personId: string } }>("/contacts/:id/people/:personId/remove", async (req) =>
     contacts.removePerson(db, req.params.id, req.params.personId),
   );
+  // The client's bill: a preview up to a date, issued bills, hand-entered lines.
+  const untilOf = (req: { query: { until?: string } }) => isoDate.parse(req.query.until ?? new Date().toISOString().slice(0, 10));
+  type BillingReq = { Params: { id: string }; Querystring: { until?: string } };
+  app.get<BillingReq>("/clients/:id/billing", async (req) => billing.previewBill(db, req.params.id, untilOf(req)));
+  app.get<IdParams>("/clients/:id/bills", async (req) => billing.listBills(db, req.params.id));
+  app.post<IdParams>("/clients/:id/bills", async (req, reply) => {
+    const { until } = z.object({ until: isoDate }).parse(req.body);
+    return reply.status(201).send(await billing.issueBill(db, req.user!.id, req.params.id, until));
+  });
+  app.get<IdParams>("/bills/:id", async (req) => billing.getBill(db, req.params.id));
+  app.post<IdParams>("/bills/:id/cancel", async (req) => billing.cancelBill(db, req.params.id));
+  app.post<IdParams>("/clients/:id/charges", async (req, reply) =>
+    reply.status(201).send(await billing.addCharge(db, req.user!.id, req.params.id, billing.chargeInput.parse(req.body))),
+  );
+  app.post<{ Params: { id: string; chargeId: string } }>("/clients/:id/charges/:chargeId/remove", async (req) =>
+    billing.removeCharge(db, req.params.id, req.params.chargeId),
+  );
+  app.post<IdParams>("/engagements/:id/terms", async (req) =>
+    billing.setTerms(db, req.params.id, billing.termsInput.parse(req.body)),
+  );
+
   // Archive and restore; delete only what was opened by mistake.
   const archiveInput = z.object({ archived: z.boolean() });
   for (const type of ["contact", "property"] as const) {

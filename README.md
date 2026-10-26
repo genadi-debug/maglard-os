@@ -204,6 +204,27 @@ written back. The supplier card shows a monthly account: the month's invoices
 from both sides, the totals, and when each is due under the supplier's
 payment terms ("שוטף+30" is the end of the invoice month plus 30 days).
 
+## Client bill
+
+On the client card, a bill up to a chosen date holds everything not charged
+on an earlier bill, by kind and period:
+
+- rent charged to the client (which can differ from the rent paid to the
+  owner) and the client's fixed monthly management fee, per apartment, by
+  calendar month from the engagement start (a partial month by its days);
+- the brokerage / setup fee set at intake;
+- supplier invoices marked "לחיוב", made here or entered in Planfix: utilities
+  (supplier type electricity, water, gas, internet) are left off an apartment
+  whose agreement includes everything;
+- lines entered by hand (owner settlements, claims, gas, anything else; a
+  credit is a negative amount).
+
+The preview saves nothing. Issuing a bill locks its lines to it; cancelling
+releases them to the next bill. A client can have several bills a month.
+"חויב לפני המערכת עד" on the client card keeps periods billed before MAGLARD
+OS off. VAT is 18% (setting `vat_rate`); rent carries VAT only for a client
+marked "מע״מ על שכירות". Admin, management and finance issue bills.
+
 ## Files
 
 Photos and documents (JPEG, PNG, WebP, HEIC, PDF, Word, Excel, up to 10MB)

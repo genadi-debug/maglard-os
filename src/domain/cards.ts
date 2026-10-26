@@ -34,7 +34,7 @@ export async function listClients(db: Db, archived = false) {
 }
 
 const ENGAGEMENTS = `
-  SELECT e.id, e.property_id, e.apartment_code, e.starts_on, e.ends_on, e.move_in_on, e.monthly_rent,
+  SELECT e.id, e.property_id, e.apartment_code, e.starts_on, e.ends_on, e.move_in_on, e.monthly_rent, e.client_rent, e.setup_fee, e.all_inclusive,
          e.planfix_task_id, p.address, p.base_number, o.id AS owner_id, o.name AS owner_name,
          c.id AS client_id, c.name AS client_name, (${ACTIVE}) AS active
     FROM engagements e

@@ -4,7 +4,12 @@ const view = document.getElementById("view");
 
 const esc = (v) =>
   String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-const money = (n) => (n == null ? "" : `₪${Number(n).toLocaleString("he-IL", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`);
+const money = (n) => {
+  if (n == null) return "";
+  const v = Number(n);
+  const digits = Number.isInteger(v) ? 0 : 2;
+  return `₪${v.toLocaleString("he-IL", { minimumFractionDigits: digits, maximumFractionDigits: 2 })}`;
+};
 const date = (d) => (d ? new Date(d).toLocaleDateString("he-IL") : "");
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -168,7 +173,9 @@ async function intakeDialog() {
   dialog(
     "קליטת דירה חדשה",
     field("baseNumber", "מספר בסיס דירה", 'type="number" required min="1"') +
-      field("monthlyRent", "שכר דירה חודשי", 'type="number" required min="0" step="0.01"') +
+      field("monthlyRent", "שכ״ד לבעל הדירה", 'type="number" required min="0" step="0.01"') +
+      field("clientRent", "שכ״ד מהלקוח", 'type="number" min="0" step="0.01"') +
+      field("setupFee", "דמי תיווך / הקמה", 'type="number" min="0" step="0.01"') +
       field("address", "כתובת מלאה", "required", true) +
       owner.html +
       client.html +
@@ -185,6 +192,8 @@ async function intakeDialog() {
         endsOn: v.endsOn,
         moveInOn: v.moveInOn,
         monthlyRent: Number(v.monthlyRent),
+        clientRent: v.clientRent === "" ? undefined : Number(v.clientRent),
+        setupFee: v.setupFee === "" ? undefined : Number(v.setupFee),
       });
       toast("הדירה נשמרה. הסנכרון ל-Planfix רץ ברקע.");
       route();
@@ -728,6 +737,13 @@ function contactFields(kind) {
       ["withholdingRate", "withholding_rate", "שיעור ניכוי במקור (%)", "number", false],
       ["ledgerCard", "ledger_card", "מספר כרטיס", "text", true],
     );
+    // Shown and changed only by roles that see amounts.
+    if (allowed("amounts.view")) {
+      f.push(
+        ["managementFee", "management_fee", "דמי ניהול לדירה לחודש (₪)", "money", false],
+        ["billedThrough", "billed_through", "חויב לפני המערכת עד", "date", false],
+      );
+    }
   }
   if (kind === "owner") {
     f.push(
@@ -777,7 +793,10 @@ function contactDialog(kind, c, onSaved) {
       )}</select></label>`;
     }
     if (type === "textarea") return `<label class="full">${esc(label)}<textarea name="${key}" rows="2">${esc(v ?? "")}</textarea></label>`;
-    const attrs = `type="${type}" value="${esc(v ?? "")}" ${key === "name" ? "required" : ""} ${type === "number" ? 'step="0.01" min="0" max="100"' : ""}`;
+    const attrs =
+      type === "money"
+        ? `type="number" step="0.01" min="0" value="${esc(v ?? "")}"`
+        : `type="${type}" value="${esc(v ?? "")}" ${key === "name" ? "required" : ""} ${type === "number" ? 'step="0.01" min="0" max="100"' : ""}`;
     return `<label>${esc(label + mark)}<input name="${key}" ${attrs}></label>`;
   };
   const fields = contactFields(kind);
@@ -790,7 +809,7 @@ function contactDialog(kind, c, onSaved) {
         const raw = v[key];
         if (raw === undefined) continue;
         if (type === "bool" || type === "company") body[key] = raw === "" ? null : raw === "true";
-        else if (type === "number") body[key] = raw === "" ? null : Number(raw);
+        else if (type === "number" || type === "money") body[key] = raw === "" ? null : Number(raw);
         else body[key] = raw.trim() === "" ? null : raw.trim();
       }
       if (c) {
@@ -862,7 +881,7 @@ function wireRecordActions(type, rec, back) {
 function contactSection(c) {
   const shown = contactFields(c.kind).filter(([key]) => key !== "name" && key !== "notes");
   const value = ([, col, , type]) =>
-    type === "bool" ? yesNo(c[col]) : type === "company" ? (c[col] ? "תאגיד" : "פרטי") : type === "date" ? date(c[col]) || "—" : esc(c[col] ?? "—");
+    type === "bool" ? yesNo(c[col]) : type === "company" ? (c[col] ? "תאגיד" : "פרטי") : type === "date" ? date(c[col]) || "—" : type === "money" ? (c[col] == null ? "—" : money(c[col])) : esc(c[col] ?? "—");
   const edit = allowed("contacts.manage");
   return `
     ${recordActions(c)}
@@ -1336,6 +1355,144 @@ function missingFor(e) {
   return gaps;
 }
 
+// ---------- client bill ----------
+
+const BILL_KIND = {
+  rent: "דמי שכירות",
+  management: "דמי ניהול",
+  setup: "דמי תיווך / הקמה",
+  operations: "תפעול ואחזקה",
+  utilities: "הוצאות שוטפות",
+  other: "אחר",
+};
+const periodOf = (l) => (l.period_from === l.period_to ? date(l.period_from) : `${date(l.period_from)}–${date(l.period_to)}`);
+
+// Lines grouped by kind, with a subtotal for each and the bill's totals.
+function billLines(b, removable = false) {
+  if (!b.groups.length) return `<div class="empty">אין מה לחייב</div>`;
+  return `<div class="wrap"><table class="table"><thead><tr><th>פירוט</th><th>תקופה</th><th>לפני מע״מ</th><th>מע״מ</th><th>סה״כ</th>${
+    removable ? "<th></th>" : ""
+  }</tr></thead><tbody>${b.groups
+    .map(
+      (g) => `<tr><td colspan="${removable ? 6 : 5}"><b>${esc(g.label)}</b> · ${money(g.total)}</td></tr>${g.lines
+        .map(
+          (l) => `<tr><td>${esc(l.description)}${l.manual ? ` ${pill(["ידני", ""])}` : ""}</td><td>${periodOf(l)}</td>
+          <td>${money(l.amount_net)}</td><td>${money(l.amount_vat)}</td><td>${money(l.amount_total)}</td>${
+            removable ? `<td>${l.manual ? `<button class="btn" data-remove-charge="${l.id}">הסרה</button>` : ""}</td>` : ""
+          }</tr>`,
+        )
+        .join("")}`,
+    )
+    .join("")}
+    <tr><td colspan="2"><b>סה״כ לחשבון</b></td><td><b>${money(b.totals.net)}</b></td><td><b>${money(b.totals.vat)}</b></td>
+    <td><b>${money(b.totals.total)}</b></td>${removable ? "<td></td>" : ""}</tr></tbody></table></div>`;
+}
+
+async function billingSection(clientId, until) {
+  const [preview, bills] = await Promise.all([
+    api("GET", `/clients/${clientId}/billing?until=${until}`),
+    api("GET", `/clients/${clientId}/bills`),
+  ]);
+  const manage = allowed("billing.manage");
+  return `
+    <div class="head" style="align-items:end"><h2 style="margin:16px 0 0">חשבון ללקוח</h2>
+      <div class="actions" style="margin:0"><label>עד תאריך <input type="date" id="bill-until" value="${until}"></label>
+      ${manage ? `<button class="btn" id="add-charge">שורת חיוב ידנית</button>
+      <button class="btn primary" id="issue-bill" ${preview.groups.length ? "" : "disabled"}>הפקת חשבון</button>` : ""}</div></div>
+    <p class="sub">כל מה שעוד לא חויב בחשבון קודם, עד התאריך. טיוטה: שום דבר לא נשמר עד ההפקה.</p>
+    ${billLines(preview, manage)}
+    ${
+      bills.length
+        ? `<h3>חשבונות קודמים</h3><ul>${bills
+            .map(
+              (b) => `<li><a href="#/bills/${b.id}">חשבון ${b.number}</a> · ${date(b.bill_date)} · ${
+                b.status === "cancelled" ? pill(["בוטל", "bad"]) : money(b.total)
+              }</li>`,
+            )
+            .join("")}</ul>`
+        : ""
+    }`;
+}
+
+function wireBilling(clientId, engagements) {
+  view.querySelector("#bill-until")?.addEventListener("change", (e) => {
+    if (e.target.value) location.hash = `#/clients/${clientId}?until=${e.target.value}`;
+  });
+  view.querySelector("#issue-bill")?.addEventListener("click", async (e) => {
+    const until = view.querySelector("#bill-until").value;
+    e.target.disabled = true;
+    try {
+      const b = await api("POST", `/clients/${clientId}/bills`, { until });
+      toast(`חשבון ${b.number} הופק`);
+      location.hash = `#/bills/${b.id}`;
+    } catch (err) {
+      toast(err.message);
+      e.target.disabled = false;
+    }
+  });
+  view.querySelectorAll("[data-remove-charge]").forEach((b) => {
+    b.onclick = async () => {
+      try {
+        await api("POST", `/clients/${clientId}/charges/${b.dataset.removeCharge}/remove`);
+        toast("השורה הוסרה");
+      } catch (err) {
+        toast(err.message);
+      }
+      route();
+    };
+  });
+  view.querySelector("#add-charge")?.addEventListener("click", () =>
+    dialog(
+      "שורת חיוב ידנית",
+      `<label>סוג<select name="kind">${options(Object.entries(BILL_KIND), "other")}</select></label>
+      <label>דירה<select name="engagementId"><option value="">— כללי —</option>${engagements
+        .map((e) => `<option value="${e.id}">${esc(e.apartment_code)} — ${esc(e.address)}</option>`)
+        .join("")}</select></label>` +
+        field("description", "פירוט (למשל: התחשבנות עם בעל הדירה, תביעה, בלון גז)", "required", true) +
+        field("periodFrom", "מתאריך", `type="date" required value="${today()}"`) +
+        field("periodTo", "עד תאריך", `type="date" required value="${today()}"`) +
+        field("amountNet", "סכום לפני מע״מ (זיכוי: סכום שלילי)", 'type="number" required step="0.01"') +
+        field("amountVat", "מע״מ (ריק: לפי שיעור המע״מ)", 'type="number" step="0.01"'),
+      async (v) => {
+        await api("POST", `/clients/${clientId}/charges`, {
+          kind: v.kind,
+          engagementId: v.engagementId || null,
+          description: v.description,
+          periodFrom: v.periodFrom,
+          periodTo: v.periodTo,
+          amountNet: Number(v.amountNet),
+          amountVat: v.amountVat === "" ? undefined : Number(v.amountVat),
+        });
+        toast("השורה נוספה");
+        route();
+      },
+      "הוספה",
+    ),
+  );
+}
+
+async function billView(id) {
+  const b = await api("GET", `/bills/${id}`);
+  const cancelled = b.status === "cancelled";
+  view.innerHTML = `
+    <p><a href="#/clients/${b.client_id}">→ ${esc(b.client_name)}</a></p>
+    <div class="head"><div><h1>חשבון ${b.number}</h1>
+      <p class="sub">${esc(b.client_name)} · עד ${date(b.bill_date)} ${cancelled ? pill(["בוטל", "bad"]) : ""}</p></div>
+    <div class="actions" style="margin:0">
+      <button class="btn" id="print">הדפסה</button>
+      ${allowed("billing.manage") && !cancelled ? `<button class="btn" id="cancel-bill">ביטול חשבון</button>` : ""}
+    </div></div>
+    ${cancelled ? `<div class="missing">החשבון בוטל ב־${date(b.cancelled_at)}. השורות שלו חזרו לחיוב בחשבון הבא.</div>` : billLines(b)}`;
+  view.querySelector("#print").onclick = () => window.print();
+  view.querySelector("#cancel-bill")?.addEventListener("click", () =>
+    dialog("ביטול חשבון", `<p class="full">לבטל את חשבון ${b.number}? השורות שלו יחזרו לחיוב בחשבון הבא.</p>`, async () => {
+      await api("POST", `/bills/${id}/cancel`);
+      toast("החשבון בוטל");
+      route();
+    }, "ביטול החשבון"),
+  );
+}
+
 async function clientsView(params) {
   const archived = params.get("archived") === "1";
   const rows = await api("GET", `/clients${archived ? "?archived=1" : ""}`);
@@ -1357,7 +1514,8 @@ async function clientsView(params) {
   clickableRows();
 }
 
-async function clientView(id) {
+async function clientView(id, params) {
+  const until = /^\d{4}-\d{2}-\d{2}$/.test(params.get("until") || "") ? params.get("until") : today();
   const [c, details] = await Promise.all([api("GET", `/clients/${id}`), api("GET", `/contacts/${id}`)]);
   const active = c.engagements.filter((e) => e.active);
   const openReqs = c.requests.filter((r) => r.status !== "closed");
@@ -1387,12 +1545,14 @@ async function clientView(id) {
             .join("")}</tbody></table></div>`
         : `<div class="empty">אין דירות</div>`
     }
+    ${allowed("billing.view") ? await billingSection(id, until) : ""}
     <h2>קריאות שירות</h2>${requestsTable(c.requests)}
     ${invoicesTable(c.invoices)}`;
   view.querySelector("#new-req")?.addEventListener("click", () =>
     newRequestDialog(active.length === 1 ? active[0].id : undefined),
   );
   wireContact(details);
+  wireBilling(id, c.engagements);
 }
 
 async function propertyView(id) {
@@ -1407,6 +1567,7 @@ async function propertyView(id) {
     <div class="actions" style="margin:0">
       ${allowed("requests.manage") && current && !p.archived_at ? `<button class="btn primary" id="new-req">פתיחת קריאת שירות</button>` : ""}
       ${current && !p.archived_at ? `<button class="btn" id="new-task">משימה לדירה</button>` : ""}
+      ${current && allowed("billing.manage") ? `<button class="btn" id="terms">תנאי חיוב</button>` : ""}
     </div></div>
     ${recordActions(p)}
     ${gaps.length && !p.archived_at ? `<div class="missing"><b>מה חסר:</b> ${esc(gaps.join(" · "))}</div>` : ""}
@@ -1415,7 +1576,10 @@ async function propertyView(id) {
       ${current ? `<div><span>לקוח</span><b><a href="#/clients/${current.client_id}">${esc(current.client_name)}</a></b></div>
       <div><span>תקופת התקשרות</span><b>${period(current)}</b></div>
       <div><span>כניסה</span><b>${current.move_in_on ? date(current.move_in_on) : "—"}</b></div>
-      ${allowed("amounts.view") ? `<div><span>שכ״ד חודשי</span><b>${current.monthly_rent == null ? "—" : money(current.monthly_rent)}</b></div>` : ""}` : ""}
+      ${allowed("amounts.view") ? `<div><span>שכ״ד לבעל הדירה</span><b>${current.monthly_rent == null ? "—" : money(current.monthly_rent)}</b></div>
+      <div><span>שכ״ד מהלקוח</span><b>${current.client_rent == null ? "—" : money(current.client_rent)}</b></div>
+      <div><span>דמי תיווך / הקמה</span><b>${current.setup_fee == null ? "—" : money(current.setup_fee)}</b></div>` : ""}
+      <div><span>הכל כלול (חשמל, מים, גז, אינטרנט)</span><b>${current.all_inclusive ? "כן" : "לא"}</b></div>` : ""}
     </div>
     <h2>קריאות שירות</h2>${requestsTable(p.requests)}
     ${invoicesTable(p.invoices)}
@@ -1432,6 +1596,23 @@ async function propertyView(id) {
     }`;
   wireFiles();
   wireRecordActions("property", p, "#/apartments");
+  view.querySelector("#terms")?.addEventListener("click", () =>
+    dialog(
+      "תנאי חיוב ללקוח",
+      field("clientRent", "שכ״ד מהלקוח לחודש", `type="number" min="0" step="0.01" value="${current.client_rent ?? ""}"`) +
+        field("setupFee", "דמי תיווך / הקמה", `type="number" min="0" step="0.01" value="${current.setup_fee ?? ""}"`) +
+        `<label>הכל כלול<select name="allInclusive">${options([["false", "לא"], ["true", "כן: בלי חשמל, מים, גז ואינטרנט בחשבון"]], String(current.all_inclusive))}</select></label>`,
+      async (v) => {
+        await api("POST", `/engagements/${current.id}/terms`, {
+          clientRent: v.clientRent === "" ? null : Number(v.clientRent),
+          setupFee: v.setupFee === "" ? null : Number(v.setupFee),
+          allInclusive: v.allInclusive === "true",
+        });
+        toast("תנאי החיוב נשמרו");
+        route();
+      },
+    ),
+  );
   view.querySelector("#new-req")?.addEventListener("click", () => newRequestDialog(current.id));
   view.querySelector("#new-task")?.addEventListener("click", () => newTaskDialog({ engagementId: current.id }));
 }
@@ -1657,7 +1838,8 @@ async function route() {
     else if (section === "apartments") await apartmentsView(params);
     else if (section === "tasks" && id) await taskView(id);
     else if (section === "tasks") await tasksView(params);
-    else if (section === "clients" && id) await clientView(id);
+    else if (section === "clients" && id) await clientView(id, params);
+    else if (section === "bills" && id) await billView(id);
     else if (section === "clients") await clientsView(params);
     else if (section === "properties" && id) await propertyView(id);
     else if (section === "requests" && id) await requestView(id);

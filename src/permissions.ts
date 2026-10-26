@@ -35,6 +35,9 @@ export const PERMISSIONS = {
   "bank.view": ["admin", "management", "finance"],
   "invoices.view": ["admin", "management", "dept_manager", "finance"],
   "invoices.create": ["admin", "management", "finance", "operations"],
+  // The client's bill: see it, and issue or cancel bills and add charge lines.
+  "billing.view": ["admin", "management", "dept_manager", "finance"],
+  "billing.manage": ["admin", "management", "finance"],
   "tasks.use": ALL,
   // See and reassign everyone's tasks; see team workload.
   "tasks.manage_all": ["admin", "management", "dept_manager"],

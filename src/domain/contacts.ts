@@ -76,6 +76,10 @@ export const contactInput = z
     vatOnRent: z.boolean().nullable().optional(),
     withholdingTax: z.boolean().nullable().optional(),
     withholdingRate: z.number().min(0).max(100).nullable().optional(),
+    // Client: management fee per apartment per month.
+    managementFee: z.number().nonnegative().multipleOf(0.01).nullable().optional(),
+    // Client: billed before MAGLARD OS up to this date.
+    billedThrough: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
     licensedDealer: z.boolean().nullable().optional(),
     withholdingCertUntil: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
     bankName: text,
@@ -112,6 +116,8 @@ const COLUMN: Record<string, string> = {
   vatOnRent: "vat_on_rent",
   withholdingTax: "withholding_tax",
   withholdingRate: "withholding_rate",
+  managementFee: "management_fee",
+  billedThrough: "billed_through",
   licensedDealer: "licensed_dealer",
   withholdingCertUntil: "withholding_cert_until",
   bankName: "bank_name",

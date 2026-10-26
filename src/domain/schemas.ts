@@ -11,6 +11,9 @@ export const intakeInput = z
     endsOn: isoDate,
     moveInOn: isoDate,
     monthlyRent: money,
+    // Charged to the client; can differ from the rent paid to the owner.
+    clientRent: money.optional(),
+    setupFee: money.optional(),
   })
   .refine((v) => v.endsOn > v.startsOn, { message: "endsOn must be after startsOn", path: ["endsOn"] });
 

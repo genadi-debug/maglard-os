@@ -30,8 +30,9 @@ export async function createIntake(db: Db, input: IntakeInput) {
     );
     const engagement = await tx.query(
       `INSERT INTO engagements
-         (property_id, apartment_code, owner_id, client_id, starts_on, ends_on, move_in_on, monthly_rent)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+         (property_id, apartment_code, owner_id, client_id, starts_on, ends_on, move_in_on, monthly_rent,
+          client_rent, setup_fee)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
       [
         property.rows[0].id,
         `${input.baseNumber}.00`,
@@ -41,6 +42,8 @@ export async function createIntake(db: Db, input: IntakeInput) {
         input.endsOn,
         input.moveInOn,
         input.monthlyRent,
+        input.clientRent ?? null,
+        input.setupFee ?? null,
       ],
     );
     await enqueue(tx, "engagement.push", engagement.rows[0].id);
