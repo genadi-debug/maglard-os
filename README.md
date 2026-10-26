@@ -23,6 +23,18 @@ This first slice covers two flows end to end:
 
 `GET /sync/status` shows the sync queue.
 
+## Screens
+
+`npm run dev` serves the Hebrew, right-to-left app at `http://localhost:3000/`.
+It is plain HTML and an ES module in `public/`, with no build step. It has
+five screens:
+
+- **Work center:** open service requests with their next step, plus sync failures.
+- **Apartments:** the apartment list, each with its Planfix sync state, and an intake form.
+- **Service requests:** a list, and a detail page with one next-action button and the request's history.
+- **Supplier invoices:** amounts, handling and sync state.
+- **Planfix sync:** the queue, with a resend button on failed jobs.
+
 ## Running
 
 ```bash

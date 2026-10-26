@@ -114,7 +114,7 @@ export async function recordClientApproval(db: Db, id: string, input: z.infer<ty
       [id, input.reference],
     );
     if (sr.status === "triage" && sr.supplier_id && sr.charge_to === "client") {
-      await move(tx, sr, "with_supplier", "client approved");
+      await move(tx, sr, "with_supplier", "אישור הלקוח נרשם");
       return { status: "with_supplier" };
     }
     return { status: sr.status };
@@ -143,7 +143,7 @@ export async function addSupplierInvoice(db: Db, id: string, input: z.infer<type
       ],
     );
     await tx.query("UPDATE service_requests SET supplier_invoice_id = $2 WHERE id = $1", [id, rows[0].id]);
-    await move(tx, sr, "awaiting_resolution", `invoice ${input.invoiceNumber}`);
+    await move(tx, sr, "awaiting_resolution", `חשבונית ${input.invoiceNumber}`);
     await enqueue(tx, "supplier_invoice.push", rows[0].id);
     return { status: "awaiting_resolution", invoiceId: rows[0].id as string };
   });
