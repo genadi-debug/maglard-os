@@ -115,6 +115,11 @@ input,select,textarea{border:1px solid var(--line);border-radius:8px;padding:8px
   .rail .me{margin:0;border:0;white-space:nowrap}
   .grid{grid-template-columns:1fr}
 }
+@media print{
+  .rail,.top,.no-print,.toast{display:none!important}
+  .app{display:block}
+  body{background:#fff}
+}
 </style>
 </head>
 <body>

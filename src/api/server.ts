@@ -68,6 +68,8 @@ const ROUTES: Record<string, Permission | null> = {
   "GET /clients/:id/billing": "billing.view",
   "POST /billing/refresh": "billing.view",
   "POST /clients/:id/charges": "billing.manage",
+  "POST /clients/:id/bills": "billing.manage",
+  "GET /clients/:id/bills/:billId": "billing.view",
   "GET /sync/status": "sync.view",
   "POST /sync/:id/retry": "sync.retry",
   "GET /users": "users.manage",
@@ -324,6 +326,14 @@ export function buildServer(
     const input = billing.chargeInput.parse(req.body);
     return reply.status(201).send(await billing.createCharge(db, opts.crm, req.user?.id || null, req.params.id, input));
   });
+  app.post<IdParams>("/clients/:id/bills", async (req, reply) => {
+    if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
+    const input = billing.billInput.parse(req.body);
+    return reply.status(201).send(await billing.issueBill(db, opts.crm, req.user?.id || null, req.params.id, input));
+  });
+  app.get<{ Params: { id: string; billId: string } }>("/clients/:id/bills/:billId", async (req) =>
+    billing.getBill(db, req.params.id, Number(req.params.billId)),
+  );
   app.get("/work-center", async (req) => q.workCenter(db, req.user!));
 
   // Saved locally first; Planfix sync happens in the background ("saved, waiting for sync").

@@ -29,6 +29,7 @@ export class FakeCrm implements CrmAdapter {
   createSupplierInvoice = (i: any) => this.record("createSupplierInvoice", i);
   createServiceRequest = (i: any) => this.record("createServiceRequest", i);
   createCharge = (i: any) => this.record("createCharge", i);
+  createBill = (i: any) => this.record("createBill", i);
   // Planfix auto-created intake tasks, by property task id.
   autoEngagements = new Map<number, number[]>();
   findEngagementTasks = async (propertyTaskId: number) => this.autoEngagements.get(propertyTaskId) ?? [];

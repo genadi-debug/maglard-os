@@ -209,3 +209,71 @@ export async function createCharge(
   await refreshPlanfixBilling(db, crm).catch(() => undefined);
   return { planfixTaskId, name, split };
 }
+
+export const billInput = z
+  .object({
+    periodFrom: isoDate,
+    periodTo: isoDate,
+    // Planfix task ids of the charges the bill gathers.
+    charges: z.array(z.number().int().positive()).min(1, "צריך לבחור לפחות חיוב אחד"),
+  })
+  .refine((v) => v.periodTo >= v.periodFrom, { message: "התקופה מסתיימת לפני שהיא מתחילה", path: ["periodTo"] });
+
+// Issues an accumulated bill in Planfix (template 23) over charges that are not
+// on a bill yet. Planfix sums them and links each charge back; submitting the
+// bill to the client stays a step in Planfix.
+export async function issueBill(
+  db: Db,
+  crm: CrmAdapter,
+  userId: string | null,
+  clientId: string,
+  input: z.infer<typeof billInput>,
+) {
+  const b = await clientBilling(db, clientId);
+  const pf = b.client.planfix_id as number | null;
+  if (!pf) throw new RuleError("הלקוח עוד לא נשלח ל־Planfix. אפשר להפיק חשבון אחרי הסנכרון.");
+  const open = new Set(b.unbilled.map((c) => c.planfix_task_id as number));
+  const wrong = input.charges.filter((id) => !open.has(id));
+  if (wrong.length) throw new RuleError(`חיובים שכבר בחשבון או שאינם של הלקוח: ${wrong.join(", ")}. כדאי לרענן מ־Planfix.`);
+  const [y, m] = input.periodTo.split("-");
+  const name = `חשבון מצטבר — ${b.client.name} — ${m}/${y}`;
+  const planfixTaskId = await crm.createBill({
+    name,
+    ref: `bill for client ${clientId}`,
+    clientPlanfixId: pf,
+    periodFrom: input.periodFrom,
+    periodTo: input.periodTo,
+    chargeTaskIds: [...new Set(input.charges)],
+  });
+  await db.query("INSERT INTO audit_log (user_id, action, entity_id, ok, detail) VALUES ($1, 'bill.created', $2, true, $3)", [
+    userId,
+    clientId,
+    { planfixTaskId, name, charges: input.charges },
+  ]);
+  await refreshPlanfixBilling(db, crm).catch(() => undefined);
+  return { planfixTaskId, name };
+}
+
+// One bill as the client receives it: the client's details, the charges on it
+// by apartment, and Planfix's totals.
+export async function getBill(db: Db, clientId: string, billTaskId: number) {
+  const b = await clientBilling(db, clientId);
+  const bill = b.bills.find((x) => x.planfix_task_id === billTaskId);
+  if (!bill) throw new NotFoundError(`bill ${billTaskId} not found for this client`);
+  const linked = await db.query(
+    `SELECT x.planfix_task_id FROM planfix_charges x
+      WHERE $1 = ANY (x.bill_task_ids)
+         OR x.planfix_task_id = ANY (SELECT unnest(charge_task_ids) FROM planfix_bills WHERE planfix_task_id = $1)`,
+    [billTaskId],
+  );
+  const ids = new Set(linked.rows.map((r) => r.planfix_task_id));
+  const charges = b.billed.filter((c) => ids.has(c.planfix_task_id));
+  const card = await db.query("SELECT name, id_number, address, ledger_card FROM contacts WHERE id = $1", [clientId]);
+  const sum = (k: string) => Math.round(charges.reduce((t, c) => t + Number(c[k] ?? 0), 0) * 100) / 100;
+  return {
+    client: card.rows[0],
+    bill,
+    charges,
+    totals: { net: sum("amount_net"), vat: sum("amount_vat"), total: sum("amount_total"), balance: sum("balance") },
+  };
+}

@@ -264,6 +264,38 @@ describe.skipIf(!url)("the client's billing, read from Planfix", () => {
     expect((await call("POST", `/clients/${other}/charges`, body)).statusCode).toBe(404);
   });
 
+  it("issues a bill in Planfix over charges not yet on one", async () => {
+    const issue = (charges: number[]) =>
+      call("POST", `/clients/${ids.client}/bills`, { periodFrom: "2026-10-01", periodTo: "2026-10-31", charges });
+    const res = await issue([7102]);
+    expect(res.statusCode).toBe(201);
+    expect(crm.calls.at(-1)).toMatchObject({
+      method: "createBill",
+      input: {
+        name: "חשבון מצטבר — לקוח MOS-TEST — 10/2026",
+        clientPlanfixId: ids.clientPf,
+        periodFrom: "2026-10-01",
+        periodTo: "2026-10-31",
+        chargeTaskIds: [7102],
+      },
+    });
+    const log = await db.query("SELECT detail FROM audit_log WHERE action = 'bill.created'");
+    expect(log.rows[0].detail).toMatchObject({ planfixTaskId: res.json().planfixTaskId, charges: [7102] });
+    // Already on a bill, or another client's.
+    expect((await issue([7101])).statusCode).toBe(409);
+    expect((await issue([7103])).statusCode).toBe(409);
+    expect((await issue([])).statusCode).toBe(400);
+  });
+
+  it("shows one bill with its charges and Planfix's totals", async () => {
+    const b = (await call("GET", `/clients/${ids.client}/bills/7201`)).json();
+    expect(b.client.name).toBe("לקוח MOS-TEST");
+    expect(b.bill).toMatchObject({ planfix_task_id: 7201, computed_total: "708.00" });
+    expect(b.charges.map((c: any) => c.planfix_task_id)).toEqual([7101]);
+    expect(b.totals).toEqual({ net: 600, vat: 108, total: 708, balance: 708 });
+    expect((await call("GET", `/clients/${ids.client}/bills/9999`)).statusCode).toBe(404);
+  });
+
   it("replaces the mirror on every read", async () => {
     crm.billing = { contracts: [], charges: [], bills: [] };
     await call("POST", "/billing/refresh");
