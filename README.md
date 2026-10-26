@@ -13,7 +13,27 @@ This first slice covers two flows end to end:
 - **Supplier invoice** (`POST /supplier-invoices`) creates the supplier when
   needed and an invoice (template 22) linked to the engagement.
 
+- **Paid service request** (`/service-requests`) moves through the Planfix
+  "מוקד" statuses: new → triage → with supplier → awaiting resolution → closed.
+  When a request is assigned, staff choose the supplier and who pays: the
+  owner, MAGLARD or the client. Work the client pays for stays in triage until
+  the client's approval is recorded. The supplier invoice is attached to the
+  request and queued for Planfix. Its handling is set from who pays: לחיוב,
+  בעלים or נספג.
+
 `GET /sync/status` shows the sync queue.
+
+## Screens
+
+`npm run dev` serves the Hebrew, right-to-left app at `http://localhost:3000/`.
+It is plain HTML and an ES module in `public/`, with no build step. It has
+five screens:
+
+- **Work center:** open service requests with their next step, plus sync failures.
+- **Apartments:** the apartment list, each with its Planfix sync state, and an intake form.
+- **Service requests:** a list, and a detail page with one next-action button and the request's history.
+- **Supplier invoices:** amounts, handling and sync state.
+- **Planfix sync:** the queue, with a resend button on failed jobs.
 
 ## Running
 
@@ -65,3 +85,7 @@ TEST_DATABASE_URL=postgres://maglard:maglard@localhost:5432/maglard_test npm tes
 - So far sync runs one way only, MAGLARD OS to Planfix. Reading changes back
   and handling conflicts come next.
 - There is no authentication or permission layer yet.
+- Service requests are not pushed to Planfix yet, because the template id of
+  the "מוקד" task is still unknown. Their supplier invoices are pushed.
+- The mapping of owner → בעלים and MAGLARD → נספג for field 9978 is an
+  assumption that still needs confirmation.
