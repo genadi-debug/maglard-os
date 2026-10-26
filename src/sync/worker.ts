@@ -1,6 +1,7 @@
 import { withTx, type Db } from "../db/pool.js";
 import type { CrmAdapter } from "../planfix/adapter.js";
 import { PlanfixError } from "../planfix/client.js";
+import { CATEGORY, URGENCY } from "../domain/serviceRequests.js";
 
 export const MAX_ATTEMPTS = 5;
 
@@ -181,6 +182,8 @@ async function syncServiceRequest(db: Db, crm: CrmAdapter, id: string): Promise<
       subject: r.subject,
       description: r.description,
       reportedBy: r.reported_by,
+      urgency: URGENCY[r.urgency as keyof typeof URGENCY],
+      category: CATEGORY[r.category as keyof typeof CATEGORY],
     }),
   );
   // Read the state after creating, so the update reflects the latest change.

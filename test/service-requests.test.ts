@@ -52,6 +52,7 @@ describe.skipIf(!url)("paid service request", () => {
     const assigned = await call("POST", `/service-requests/${id}/assign`, {
       supplier: { name: "אינסטלטור" },
       chargeTo: "client",
+      estimatedCost: 800,
     });
     expect(assigned.json().status).toBe("triage");
 
@@ -85,7 +86,7 @@ describe.skipIf(!url)("paid service request", () => {
       ["maglard", "נספג"],
     ]) {
       const id = await open();
-      const res = await call("POST", `/service-requests/${id}/assign`, { supplier: { name: "ספק" }, chargeTo });
+      const res = await call("POST", `/service-requests/${id}/assign`, { supplier: { name: "ספק" }, chargeTo, estimatedCost: 500 });
       expect(res.json().status).toBe("with_supplier");
       const inv = await call("POST", `/service-requests/${id}/invoice`, { ...invoice, invoiceNumber: chargeTo });
       const row = (await db.query("SELECT handling FROM supplier_invoices WHERE id = $1", [inv.json().invoiceId]))
@@ -97,14 +98,14 @@ describe.skipIf(!url)("paid service request", () => {
   it("accepts the client's approval before a supplier is chosen", async () => {
     const id = await open();
     await call("POST", `/service-requests/${id}/client-approval`, { reference: "אישור טלפוני" });
-    const res = await call("POST", `/service-requests/${id}/assign`, { supplier: { name: "ספק" }, chargeTo: "client" });
+    const res = await call("POST", `/service-requests/${id}/assign`, { supplier: { name: "ספק" }, chargeTo: "client", estimatedCost: 500 });
     expect(res.json().status).toBe("with_supplier");
   });
 
   it("refuses out-of-order steps and bad input", async () => {
     const id = await open();
     expect((await call("POST", `/service-requests/${id}/close`)).statusCode).toBe(409);
-    expect((await call("POST", `/service-requests/${id}/assign`, { supplier: { name: "x" }, chargeTo: "x" })).statusCode).toBe(400);
+    expect((await call("POST", `/service-requests/${id}/assign`, { supplier: { name: "x" }, chargeTo: "x", estimatedCost: 500 })).statusCode).toBe(400);
     expect((await call("GET", "/service-requests/not-a-uuid")).statusCode).toBe(400);
     expect((await call("GET", "/service-requests/00000000-0000-0000-0000-000000000000")).statusCode).toBe(404);
     expect(
@@ -130,7 +131,7 @@ describe.skipIf(!url)("paid service request", () => {
     const updates = () => crm.calls.filter((c) => c.method === "updateServiceRequest").map((c) => c.input);
     expect(updates().at(-1)).toEqual({ taskId, status: "new", supplierPlanfixId: null, chargeTo: null });
 
-    await call("POST", `/service-requests/${id}/assign`, { supplier: { name: "ספק" }, chargeTo: "owner" });
+    await call("POST", `/service-requests/${id}/assign`, { supplier: { name: "ספק" }, chargeTo: "owner", estimatedCost: 500 });
     await drain();
     expect(crm.count("createServiceRequest")).toBe(1);
     expect(updates().at(-1)).toMatchObject({ taskId, status: "with_supplier", chargeTo: "owner" });
@@ -153,7 +154,7 @@ describe.skipIf(!url)("paid service request", () => {
     crm.updateServiceRequest = async (taskId: number, i: any) => {
       if (!changed) {
         changed = true;
-        await call("POST", `/service-requests/${id}/assign`, { supplier: { name: "ספק" }, chargeTo: "maglard" });
+        await call("POST", `/service-requests/${id}/assign`, { supplier: { name: "ספק" }, chargeTo: "maglard", estimatedCost: 500 });
       }
       return original(taskId, i);
     };

@@ -29,12 +29,19 @@ This first slice covers two flows end to end:
 It is plain HTML and an ES module in `public/`, with no build step. Each user
 sees only the screens and buttons their role allows. The screens are:
 
-- **Work center:** open service requests with their next step, plus sync failures.
-- **Apartments:** the apartment list, each with its Planfix sync state, and an intake form.
-- **Service requests:** a list, and a detail page with one next-action button and the request's history.
+- **Work center:** the user's tasks for today, overdue and urgent, open service requests with their next step, and sync failures. Managers also see each person's workload and requests that have not moved in 3 days. Admin and management also see company figures: active properties and clients, and contracts ending within 90 days.
+- **Tasks:** tasks of my own, overdue, urgent, all and done. A task can be linked to an apartment or a service request, and it has an assignee, a due date and a notes thread. Each status change or handover writes a note. A user sees only tasks assigned to or created by them, unless they are a manager.
+- **Search** (top of every screen, Ctrl+K): clients, owners, suppliers, addresses, base numbers, apartment codes, service requests and invoice numbers.
+- **Apartments:** the apartment list, each with its Planfix sync state, and an intake form. Each address opens the property card: owner, client, contract period, what is missing, service requests, invoices and suppliers who worked there.
+- **Clients:** the client list, and a client card with its apartments (active and past), open requests, invoices and what is missing.
+- **Service requests:** a list, and a detail page with one next-action button, photos and documents, and the request's history. Each request has a fault type and an urgency; emergencies come first and notify the managers.
+- **Approvals** (admin, management, department manager): service requests whose estimated cost is above the approval threshold. The supplier starts only after a manager approves, and nobody approves their own request.
+- **Suppliers:** each supplier's open and closed jobs, average days to close, the apartments they worked in, and their invoices (for roles that see invoices).
+- **Notifications:** a task given to me, an approval to decide or decided, an emergency request.
 - **Supplier invoices:** amounts, handling and sync state.
 - **Planfix sync:** the queue, with a resend button on failed jobs.
-- **Users** (admin): add users, change roles, block, set a new password.
+- **Import from Planfix** (admin, on the sync screen): a dry run that reports what would be imported and skipped, then the real import.
+- **Users** (admin): add users, change roles, block, set a new password, and set the approval threshold.
 - **Audit log** (admin, management): every change and login attempt, including refused ones.
 
 ## Roles
@@ -141,6 +148,33 @@ is safe but wasteful.
 - If a record changes while its sync job is running, the job runs again
   (`request_seq`), so Planfix always ends on the latest state.
 
+## Cost approval
+
+Assigning a supplier needs an estimated cost. Above the approval threshold
+(₪1,500 until an admin changes it), the employee must write why, and the
+request waits in triage for a manager. A rejection needs a reason and sends
+the request back for a new estimate. Work the client pays for also still
+needs the client's approval: the supplier starts once both are in.
+
+## Files
+
+Photos and documents (JPEG, PNG, WebP, HEIC, PDF, Word, Excel, up to 10MB)
+can be added to a service request, task, property or supplier invoice. They
+are stored in Postgres, so they survive redeploys without a disk. Who may
+see or add a file follows who may see or work on its record. Images are
+served with a sandbox policy, and nothing is served as HTML or SVG.
+
+## Import from Planfix
+
+`src/sync/importer.ts` reads the property (11) and intake (12) tasks and
+their owners and clients, and upserts them by Planfix id. Running it again
+updates the same rows. Imported rows carry their Planfix ids, so the worker
+never pushes them back. A record that misses required data or clashes with
+another (same base number or apartment code) is skipped and listed in the
+report. A dry run on maglardsand (2026-10-26): 58 contacts, 55 properties,
+54 of 59 engagements, 5 skipped. Contracts (82/83) and supplier invoices are
+not imported yet.
+
 ## Known gaps
 
 - Suppose the process dies after Planfix created a task but before its id was
@@ -153,6 +187,11 @@ is safe but wasteful.
 - Roles limit actions, not records: every role sees every client and
   property it may see at all. Scopes come after the Planfix import.
 - No two-factor login yet.
+- Urgency and fault type reach Planfix in the task description only:
+  template 20 has no verified fields for them. The estimated cost and the
+  approval stay in MAGLARD OS until the "חריג" fields (10154–10160) are
+  verified on a template.
+- Notifications are in the app only: no email or WhatsApp yet.
 - While a record is being created in Planfix, its row stays locked. Staff
   edits to that same record wait for the Planfix call to finish, which takes
   up to a few seconds.
