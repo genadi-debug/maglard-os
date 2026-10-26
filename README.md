@@ -30,7 +30,9 @@ It is plain HTML and an ES module in `public/`, with no build step. Each user
 sees only the screens and buttons their role allows. The screens are:
 
 - **Work center:** open service requests with their next step, plus sync failures.
-- **Apartments:** the apartment list, each with its Planfix sync state, and an intake form.
+- **Search** (top of every screen, Ctrl+K): clients, owners, suppliers, addresses, base numbers, apartment codes, service requests and invoice numbers.
+- **Apartments:** the apartment list, each with its Planfix sync state, and an intake form. Each address opens the property card: owner, client, contract period, what is missing, service requests, invoices and suppliers who worked there.
+- **Clients:** the client list, and a client card with its apartments (active and past), open requests, invoices and what is missing.
 - **Service requests:** a list, and a detail page with one next-action button and the request's history.
 - **Supplier invoices:** amounts, handling and sync state.
 - **Planfix sync:** the queue, with a resend button on failed jobs.

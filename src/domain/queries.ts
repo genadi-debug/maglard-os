@@ -21,7 +21,7 @@ export async function listContacts(db: Db, kind?: string) {
 
 export async function listEngagements(db: Db) {
   const { rows } = await db.query(
-    `SELECT e.id, e.apartment_code, p.address, o.name AS owner_name, c.name AS client_name,
+    `SELECT e.id, e.property_id, e.client_id, e.apartment_code, p.address, o.name AS owner_name, c.name AS client_name,
             e.starts_on, e.ends_on, e.monthly_rent, e.planfix_task_id, ${syncState("e")} AS sync
        FROM engagements e
        JOIN properties p ON p.id = e.property_id

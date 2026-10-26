@@ -30,7 +30,19 @@ button,input,select,textarea{font:inherit;color:inherit}
 .nav:hover{background:var(--rail-active)}
 .nav[aria-current="page"]{background:var(--rail-active);color:#fff;font-weight:600}
 .nav .cnt{margin-inline-start:auto;background:rgba(255,255,255,.14);border-radius:20px;padding:0 8px;font-size:12px}
-main{min-width:0;padding:24px clamp(16px,3vw,32px) 48px;max-width:1180px}
+.main{min-width:0}
+main{min-width:0;padding:8px clamp(16px,3vw,32px) 48px;max-width:1180px}
+.top{position:relative;padding:16px clamp(16px,3vw,32px) 0;max-width:1180px}
+.top input{width:100%;background:var(--surface)}
+.hits{position:absolute;inset-inline:clamp(16px,3vw,32px);top:100%;margin-top:4px;background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:5;max-height:60vh;overflow:auto}
+.hits a{display:flex;justify-content:space-between;gap:12px;padding:10px 14px;color:var(--ink);text-decoration:none;border-bottom:1px solid var(--line)}
+.hits a:last-child{border-bottom:0}
+.hits a:hover,.hits a.on{background:var(--sunk)}
+.hits small{color:var(--muted)}
+.missing{background:var(--warn-soft);color:var(--warn);border-radius:10px;padding:10px 14px;margin:12px 0}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:12px 0}
+.facts div{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
+.facts span{display:block;color:var(--muted);font-size:13px}
 h1{font-size:26px;margin:0 0 4px}
 h2{font-size:17px;margin:24px 0 10px}
 .sub{color:var(--muted);margin:0 0 20px}
@@ -97,13 +109,20 @@ input,select,textarea{border:1px solid var(--line);border-radius:8px;padding:8px
     <div class="brand">MAGLARD OS<small>ניהול דירות ותפעול</small></div>
     <a class="nav" href="#/">מרכז עבודה <span class="cnt" id="cnt-work"></span></a>
     <a class="nav" href="#/apartments" data-perm="apartments.view">דירות</a>
+    <a class="nav" href="#/clients" data-perm="apartments.view">לקוחות</a>
     <a class="nav" href="#/requests" data-perm="requests.view">קריאות שירות <span class="cnt" id="cnt-req"></span></a>
     <a class="nav" href="#/invoices" data-perm="invoices.view">חשבוניות ספק</a>
     <a class="nav" href="#/sync" data-perm="sync.view">סנכרון Planfix <span class="cnt" id="cnt-sync"></span></a>
     <a class="nav" href="#/users" data-perm="users.manage">משתמשים</a>
     <a class="nav" href="#/audit" data-perm="audit.view">יומן פעולות</a>
   </nav>
-  <main id="view" tabindex="-1"></main>
+  <div class="main">
+    <div class="top" role="search">
+      <input id="search" type="search" placeholder="חיפוש לקוח, בעל דירה, ספק, כתובת, קוד דירה, קריאה או חשבונית (Ctrl+K)" aria-label="חיפוש" autocomplete="off">
+      <div id="hits" class="hits" hidden></div>
+    </div>
+    <main id="view" tabindex="-1"></main>
+  </div>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script type="module" src="/app.js"></script>

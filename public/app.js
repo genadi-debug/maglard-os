@@ -148,13 +148,13 @@ async function intakeDialog() {
   );
 }
 
-async function newRequestDialog() {
+async function newRequestDialog(engagementId) {
   const engagements = await api("GET", "/engagements");
   if (!engagements.length) return toast("קודם צריך לקלוט דירה");
   dialog(
     "פתיחת קריאת שירות",
     `<label class="full">דירה<select name="engagementId" required>${engagements
-      .map((e) => `<option value="${e.id}">${esc(e.apartment_code)} — ${esc(e.address)}</option>`)
+      .map((e) => `<option value="${e.id}" ${e.id === engagementId ? "selected" : ""}>${esc(e.apartment_code)} — ${esc(e.address)}</option>`)
       .join("")}</select></label>` +
       field("subject", "נושא התקלה", "required", true) +
       field("reportedBy", "פותח הקריאה", "required") +
@@ -269,8 +269,8 @@ async function apartmentsView() {
         ? `<div class="wrap"><table class="table"><thead><tr><th>קוד</th><th>כתובת</th><th>בעל דירה</th><th>לקוח</th>
           <th>תקופה</th>${allowed("amounts.view") ? "<th>שכ״ד</th>" : ""}<th>Planfix</th></tr></thead><tbody>${rows
             .map(
-              (e) => `<tr><td>${esc(e.apartment_code)}</td><td>${esc(e.address)}</td><td>${esc(e.owner_name)}</td>
-              <td>${esc(e.client_name)}</td><td>${date(e.starts_on)}–${date(e.ends_on)}</td>${allowed("amounts.view") ? `<td>${money(e.monthly_rent)}</td>` : ""}
+              (e) => `<tr><td>${esc(e.apartment_code)}</td><td><a href="#/properties/${e.property_id}">${esc(e.address)}</a></td><td>${esc(e.owner_name)}</td>
+              <td><a href="#/clients/${e.client_id}">${esc(e.client_name)}</a></td><td>${date(e.starts_on)}–${date(e.ends_on)}</td>${allowed("amounts.view") ? `<td>${money(e.monthly_rent)}</td>` : ""}
               <td>${pill(SYNC[e.sync])}${e.planfix_task_id ? ` <small>#${e.planfix_task_id}</small>` : ""}</td></tr>`,
             )
             .join("")}</tbody></table></div>`
@@ -296,7 +296,7 @@ async function requestsView() {
             .join("")}</tbody></table></div>`
         : `<div class="empty">אין קריאות</div>`
     }`;
-  view.querySelector("#add")?.addEventListener("click", newRequestDialog);
+  view.querySelector("#add")?.addEventListener("click", () => newRequestDialog());
   view.querySelectorAll("tr.click").forEach((tr) => {
     const go = () => (location.hash = `#/requests/${tr.dataset.id}`);
     tr.onclick = go;
@@ -444,6 +444,196 @@ function showLogin() {
   });
 }
 
+
+// ---------- clients and properties ----------
+
+const period = (e) => `${date(e.starts_on)} עד ${date(e.ends_on)}`;
+const activePill = (e) => (e.active ? pill(["בתוקף", "good"]) : pill([new Date(e.ends_on) < new Date() ? "הסתיים" : "עתידי", ""]));
+
+function requestsTable(rows) {
+  if (!rows.length) return `<div class="empty">אין קריאות שירות</div>`;
+  return `<div class="wrap"><table class="table"><thead><tr><th>נושא</th><th>דירה</th><th>סטטוס</th><th>ספק</th><th>נפתחה</th></tr></thead><tbody>${rows
+    .map(
+      (r) => `<tr><td><a href="#/requests/${r.id}">${esc(r.subject)}</a></td><td>${esc(r.apartment_code)}</td>
+      <td>${pill(STATUS[r.status])}</td><td>${esc(r.supplier_name || "")}</td><td>${date(r.created_at)}</td></tr>`,
+    )
+    .join("")}</tbody></table></div>`;
+}
+
+function invoicesTable(rows) {
+  if (!allowed("invoices.view")) return "";
+  return `<h2>חשבוניות ספק</h2>${
+    rows.length
+      ? `<div class="wrap"><table class="table"><thead><tr><th>מספר</th><th>ספק</th><th>דירה</th><th>תאריך</th>${
+          allowed("amounts.view") ? "<th>סה״כ</th>" : ""
+        }<th>אופן טיפול</th></tr></thead><tbody>${rows
+          .map(
+            (i) => `<tr><td>${esc(i.invoice_number)}</td><td>${esc(i.supplier_name)}</td><td>${esc(i.apartment_code)}</td>
+            <td>${date(i.invoice_date)}</td>${allowed("amounts.view") ? `<td>${money(i.amount_total)}</td>` : ""}<td>${esc(i.handling)}</td></tr>`,
+          )
+          .join("")}</tbody></table></div>`
+      : `<div class="empty">אין חשבוניות</div>`
+  }`;
+}
+
+// What an engagement still lacks, in the words an employee would use.
+function missingFor(e) {
+  const gaps = [];
+  if (!e.move_in_on) gaps.push("תאריך כניסה");
+  if (allowed("amounts.view") && e.monthly_rent == null) gaps.push("שכר דירה");
+  return gaps;
+}
+
+async function clientsView() {
+  const rows = await api("GET", "/clients");
+  view.innerHTML = `
+    <h1>לקוחות</h1><p class="sub">התאגידים שמגלארד מנהלת עבורם דירות.</p>
+    ${
+      rows.length
+        ? `<div class="wrap"><table class="table"><thead><tr><th>לקוח</th><th>דירות בתוקף</th><th>כל הדירות</th><th>קריאות פתוחות</th></tr></thead><tbody>${rows
+            .map(
+              (c) => `<tr class="click" data-href="#/clients/${c.id}" tabindex="0"><td>${esc(c.name)}</td><td>${c.active_apartments}</td>
+              <td>${c.apartments}</td><td>${c.open_requests || ""}</td></tr>`,
+            )
+            .join("")}</tbody></table></div>`
+        : `<div class="empty">אין לקוחות עדיין</div>`
+    }`;
+  clickableRows();
+}
+
+async function clientView(id) {
+  const c = await api("GET", `/clients/${id}`);
+  const active = c.engagements.filter((e) => e.active);
+  const openReqs = c.requests.filter((r) => r.status !== "closed");
+  const gaps = active.flatMap((e) => missingFor(e).map((g) => `${e.apartment_code}: ${g}`));
+  view.innerHTML = `
+    <p><a href="#/clients">→ כל הלקוחות</a></p>
+    <div class="head"><div><h1>${esc(c.name)}</h1><p class="sub">לקוח${c.planfix_id ? ` · איש קשר ${c.planfix_id} ב-Planfix` : ""}</p></div>
+    ${allowed("requests.manage") && active.length ? `<button class="btn primary" id="new-req">פתיחת קריאת שירות</button>` : ""}</div>
+    ${gaps.length ? `<div class="missing"><b>מה חסר:</b> ${esc(gaps.join(" · "))}</div>` : ""}
+    <div class="facts">
+      <div><span>דירות בתוקף</span><b>${active.length}</b></div>
+      <div><span>קריאות פתוחות</span><b>${openReqs.length}</b></div>
+      ${allowed("amounts.view") ? `<div><span>שכ״ד חודשי בדירות בתוקף</span><b>${money(active.reduce((t, e) => t + Number(e.monthly_rent || 0), 0))}</b></div>` : ""}
+    </div>
+    <h2>דירות</h2>
+    ${
+      c.engagements.length
+        ? `<div class="wrap"><table class="table"><thead><tr><th>קוד</th><th>כתובת</th><th>בעל דירה</th><th>תקופה</th>${
+            allowed("amounts.view") ? "<th>שכ״ד</th>" : ""
+          }<th></th></tr></thead><tbody>${c.engagements
+            .map(
+              (e) => `<tr><td>${esc(e.apartment_code)}</td><td><a href="#/properties/${e.property_id}">${esc(e.address)}</a></td>
+              <td>${esc(e.owner_name)}</td><td>${period(e)}</td>${allowed("amounts.view") ? `<td>${money(e.monthly_rent)}</td>` : ""}
+              <td>${activePill(e)}</td></tr>`,
+            )
+            .join("")}</tbody></table></div>`
+        : `<div class="empty">אין דירות</div>`
+    }
+    <h2>קריאות שירות</h2>${requestsTable(c.requests)}
+    ${invoicesTable(c.invoices)}`;
+  view.querySelector("#new-req")?.addEventListener("click", () =>
+    newRequestDialog(active.length === 1 ? active[0].id : undefined),
+  );
+}
+
+async function propertyView(id) {
+  const p = await api("GET", `/properties/${id}`);
+  const current = p.engagements.find((e) => e.active) || p.engagements[0];
+  const gaps = current ? missingFor(current) : ["התקשרות"];
+  view.innerHTML = `
+    <p><a href="#/apartments">→ כל הדירות</a></p>
+    <div class="head"><div><h1>${esc(p.address)}</h1>
+      <p class="sub">דירה ${p.base_number} · ${current ? activePill(current) : pill(["אין התקשרות", "warn"])}
+      ${p.planfix_task_id ? ` · משימה ${p.planfix_task_id} ב-Planfix` : ""}</p></div>
+    ${allowed("requests.manage") && current ? `<button class="btn primary" id="new-req">פתיחת קריאת שירות</button>` : ""}</div>
+    ${gaps.length ? `<div class="missing"><b>מה חסר:</b> ${esc(gaps.join(" · "))}</div>` : ""}
+    <div class="facts">
+      <div><span>בעל הדירה</span><b>${esc(p.owner_name)}</b></div>
+      ${current ? `<div><span>לקוח</span><b><a href="#/clients/${current.client_id}">${esc(current.client_name)}</a></b></div>
+      <div><span>תקופת התקשרות</span><b>${period(current)}</b></div>
+      <div><span>כניסה</span><b>${current.move_in_on ? date(current.move_in_on) : "—"}</b></div>
+      ${allowed("amounts.view") ? `<div><span>שכ״ד חודשי</span><b>${current.monthly_rent == null ? "—" : money(current.monthly_rent)}</b></div>` : ""}` : ""}
+    </div>
+    <h2>קריאות שירות</h2>${requestsTable(p.requests)}
+    ${invoicesTable(p.invoices)}
+    <h2>ספקים שעבדו בדירה</h2>
+    ${p.suppliers.length ? `<ul>${p.suppliers.map((s) => `<li>${esc(s.name)} · ${s.jobs} קריאות</li>`).join("")}</ul>` : `<div class="empty">עדיין לא</div>`}
+    ${
+      p.engagements.length > 1
+        ? `<h2>התקשרויות קודמות</h2><ul>${p.engagements
+            .filter((e) => e !== current)
+            .map((e) => `<li>${esc(e.client_name)} · ${period(e)}</li>`)
+            .join("")}</ul>`
+        : ""
+    }`;
+  view.querySelector("#new-req")?.addEventListener("click", () => newRequestDialog(current.id));
+}
+
+function clickableRows() {
+  view.querySelectorAll("tr[data-href]").forEach((tr) => {
+    const go = () => (location.hash = tr.dataset.href);
+    tr.onclick = go;
+    tr.onkeydown = (e) => e.key === "Enter" && go();
+  });
+}
+
+// ---------- global search ----------
+
+const HIT_LINK = {
+  client: (id) => `#/clients/${id}`,
+  property: (id) => `#/properties/${id}`,
+  request: (id) => `#/requests/${id}`,
+  invoice: () => "#/invoices",
+  supplier: () => null, // supplier cards come with the suppliers module
+};
+
+function wireSearch() {
+  const input = document.getElementById("search");
+  const box = document.getElementById("hits");
+  let timer;
+  let seq = 0;
+  const close = () => (box.hidden = true);
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const mine = ++seq;
+      const q = input.value.trim();
+      if (q.length < 2) return close();
+      const { hits } = await api("GET", `/search?q=${encodeURIComponent(q)}`).catch(() => ({ hits: [] }));
+      if (mine !== seq) return; // a newer search is on its way
+      box.innerHTML = hits.length
+        ? hits
+            .map((h) => {
+              const href = HIT_LINK[h.type](h.id);
+              return href
+                ? `<a href="${href}"><span>${esc(h.title)}</span><small>${esc(h.detail)}</small></a>`
+                : `<a aria-disabled="true"><span>${esc(h.title)}</span><small>${esc(h.detail)}</small></a>`;
+            })
+            .join("")
+        : `<a aria-disabled="true"><small>לא נמצא דבר עבור "${esc(q)}"</small></a>`;
+      box.hidden = false;
+    }, 200);
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") close();
+    if (e.key === "Enter") box.querySelector("a[href]")?.click();
+  });
+  box.addEventListener("click", () => {
+    input.value = "";
+    close();
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".top")) close();
+  });
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      input.focus();
+    }
+  });
+}
+
 // ---------- users and audit (admin) ----------
 
 async function usersView() {
@@ -571,12 +761,16 @@ async function route() {
   const [, section, id] = hash.split("/");
   document.querySelectorAll(".nav").forEach((a) => {
     const target = a.getAttribute("href").replace(/^#/, "").split("/")[1];
-    a.toggleAttribute("aria-current", target === (section || ""));
-    if (target === (section || "")) a.setAttribute("aria-current", "page");
+    const current = section === "properties" ? "apartments" : section || "";
+    a.toggleAttribute("aria-current", target === current);
+    if (target === current) a.setAttribute("aria-current", "page");
   });
   try {
     if (!section) await workCenterView();
     else if (section === "apartments") await apartmentsView();
+    else if (section === "clients" && id) await clientView(id);
+    else if (section === "clients") await clientsView();
+    else if (section === "properties" && id) await propertyView(id);
     else if (section === "requests" && id) await requestView(id);
     else if (section === "requests") await requestsView();
     else if (section === "invoices") await invoicesView();
@@ -597,6 +791,7 @@ async function start() {
     return; // not signed in: api() has shown the login form
   }
   showUser();
+  wireSearch();
   window.addEventListener("hashchange", route);
   route();
 }
