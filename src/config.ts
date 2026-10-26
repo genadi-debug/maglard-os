@@ -12,4 +12,6 @@ export const config = {
   // Set COOKIE_SECURE=false only for plain-http local development.
   secureCookie: () => process.env.COOKIE_SECURE !== "false",
   syncPollMs: () => Number(process.env.SYNC_POLL_MS ?? 2000),
+  // How often to read changes back from Planfix; 0 switches it off.
+  readbackMinutes: () => Number(process.env.PLANFIX_READBACK_MINUTES ?? 10),
 };

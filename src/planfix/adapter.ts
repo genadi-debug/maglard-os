@@ -15,9 +15,23 @@ export interface CrmAdapter {
   createSupplierInvoice(input: SupplierInvoicePush): Promise<number>;
   createServiceRequest(input: ServiceRequestPush): Promise<number>;
   updateServiceRequest(taskId: number, input: ServiceRequestUpdate): Promise<void>;
-  // Read side, for the one-off import of what already lives in the CRM.
+  updateProperty(taskId: number, input: PropertyUpdate): Promise<void>;
+  // Read side: the import of what already lives in the CRM, and the periodic
+  // check for changes made directly in Planfix.
   readProperties(): Promise<ImportedProperty[]>;
   readEngagements(): Promise<ImportedEngagement[]>;
+  readServiceRequests(): Promise<ImportedServiceRequest[]>;
+}
+
+export interface ImportedServiceRequest {
+  planfixTaskId: number;
+  statusId: number | null;
+}
+
+export interface PropertyUpdate {
+  baseNumber: number;
+  address: string;
+  ownerPlanfixId: number;
 }
 
 export interface ContactRef {
@@ -86,8 +100,9 @@ export interface EngagementPush {
   clientName: string;
   startsOn: string;
   endsOn: string;
-  moveInOn: string;
-  monthlyRent: number;
+  // Required by Planfix on a new intake; an imported engagement may lack them.
+  moveInOn: string | null;
+  monthlyRent: number | null;
 }
 
 export interface SupplierInvoicePush {
@@ -113,7 +128,11 @@ const task = (id: number) => ({ id });
 export const pfDate = (iso: string) => ({ date: iso.split("-").reverse().join("-") });
 
 // Reading values back, in the shapes maglardsand returns (seen on tasks 113-347).
-type RawTask = { id: number; parent?: { id: number }; customFieldData?: { field: { id: number }; value: unknown }[] };
+type RawTask = {
+  id: number;
+  parent?: { id: number };
+  status?: { id: number };
+  customFieldData?: { field: { id: number }; value: unknown }[] };
 const fieldOf = (t: RawTask, id: number) => t.customFieldData?.find((c) => c.field.id === id)?.value;
 const readText = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
 const readNumber = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
@@ -141,8 +160,8 @@ function engagementFields(e: EngagementPush): FieldValue[] {
     { field: { id: f.client }, value: contact(e.clientPlanfixId) },
     { field: { id: f.startsOn }, value: pfDate(e.startsOn) },
     { field: { id: f.endsOn }, value: pfDate(e.endsOn) },
-    { field: { id: f.moveInOn }, value: pfDate(e.moveInOn) },
-    { field: { id: f.monthlyRent }, value: e.monthlyRent },
+    ...(e.moveInOn ? [{ field: { id: f.moveInOn }, value: pfDate(e.moveInOn) }] : []),
+    ...(e.monthlyRent === null ? [] : [{ field: { id: f.monthlyRent }, value: e.monthlyRent }]),
   ];
 }
 
@@ -191,6 +210,19 @@ export class PlanfixAdapter implements CrmAdapter {
       filters: [{ type: 73, operator: "equal", value: propertyTaskId }],
     });
     return res.tasks.filter((t) => t.template?.id === TEMPLATE.engagement).map((t) => t.id);
+  }
+
+  // Same call as updateEngagement and updateServiceRequest (POST task/{id}),
+  // on the property template's verified fields.
+  async updateProperty(taskId: number, p: PropertyUpdate): Promise<void> {
+    const f = FIELD.property;
+    await this.client.request("POST", `task/${taskId}`, {
+      customFieldData: [
+        { field: { id: f.baseNumber }, value: p.baseNumber },
+        { field: { id: f.address }, value: p.address },
+        { field: { id: f.currentOwner }, value: contact(p.ownerPlanfixId) },
+      ],
+    });
   }
 
   async updateEngagement(taskId: number, e: EngagementPush): Promise<void> {
@@ -276,16 +308,23 @@ export class PlanfixAdapter implements CrmAdapter {
     }));
   }
 
+  // The status of each service request task (template 20). Reading "status"
+  // through task/list was verified read-only on maglardsand (tasks 336-344).
+  async readServiceRequests(): Promise<ImportedServiceRequest[]> {
+    const tasks = await this.listByTemplate(TEMPLATE.serviceRequest, [], ["status"]);
+    return tasks.map((t) => ({ planfixTaskId: t.id, statusId: readTaskId(t.status) }));
+  }
+
   // Filter type 51 = task template (verified read-only on maglardsand: 55 tasks
   // of template 11, all of that template).
-  private async listByTemplate(templateId: number, fieldIds: number[]): Promise<RawTask[]> {
+  private async listByTemplate(templateId: number, fieldIds: number[], extra: string[] = []): Promise<RawTask[]> {
     const pageSize = 100;
     const all: RawTask[] = [];
     for (let offset = 0; ; offset += pageSize) {
       const res = await this.client.request<{ tasks: RawTask[] }>("POST", "task/list", {
         pageSize,
         offset,
-        fields: ["id", "parent", ...fieldIds].join(","),
+        fields: ["id", "parent", ...extra, ...fieldIds].join(","),
         filters: [{ type: 51, operator: "equal", value: templateId }],
       });
       all.push(...res.tasks);

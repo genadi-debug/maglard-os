@@ -86,19 +86,7 @@ async function ensureEngagement(db: Db, crm: CrmAdapter, id: string): Promise<nu
   if (ctx.planfix_task_id) return ctx.planfix_task_id;
   const propertyTask = await ensureProperty(db, crm, id);
   return ensureRow<any>(db, "engagements", "planfix_task_id", id, async (e) => {
-    const push = {
-      ref: `engagement:${e.id}`,
-      apartmentCode: e.apartment_code,
-      address: ctx.address,
-      propertyTaskId: propertyTask,
-      ownerPlanfixId: await ensureContact(db, crm, e.owner_id),
-      clientPlanfixId: await ensureContact(db, crm, e.client_id),
-      clientName: ctx.client_name,
-      startsOn: e.starts_on,
-      endsOn: e.ends_on,
-      moveInOn: e.move_in_on,
-      monthlyRent: Number(e.monthly_rent),
-    };
+    const push = await engagementPush(db, crm, e, ctx, propertyTask);
     const autoTask = await findUnclaimedEngagementTask(db, crm, propertyTask);
     if (autoTask) {
       await crm.updateEngagement(autoTask, push);
@@ -106,6 +94,48 @@ async function ensureEngagement(db: Db, crm: CrmAdapter, id: string): Promise<nu
     }
     return crm.createEngagement(push);
   });
+}
+
+async function engagementPush(db: Db, crm: CrmAdapter, e: any, ctx: { address: string; client_name: string }, propertyTask: number) {
+  return {
+    ref: `engagement:${e.id}`,
+    apartmentCode: e.apartment_code,
+    address: ctx.address,
+    propertyTaskId: propertyTask,
+    ownerPlanfixId: await ensureContact(db, crm, e.owner_id),
+    clientPlanfixId: await ensureContact(db, crm, e.client_id),
+    clientName: ctx.client_name,
+    startsOn: e.starts_on,
+    endsOn: e.ends_on,
+    moveInOn: e.move_in_on,
+    monthlyRent: e.monthly_rent === null ? null : Number(e.monthly_rent),
+  };
+}
+
+// After a person kept the MAGLARD OS value over a change made in Planfix:
+// write the record's fields to its existing Planfix task again.
+async function repushEngagement(db: Db, crm: CrmAdapter, id: string): Promise<number> {
+  const e = await one(
+    db,
+    `SELECT e.*, p.address, p.planfix_task_id AS property_task_id, cl.name AS client_name
+       FROM engagements e JOIN properties p ON p.id = e.property_id JOIN contacts cl ON cl.id = e.client_id
+      WHERE e.id = $1`,
+    id,
+  );
+  if (!e.planfix_task_id || !e.property_task_id) return ensureEngagement(db, crm, id);
+  await crm.updateEngagement(e.planfix_task_id, await engagementPush(db, crm, e, e, e.property_task_id));
+  return e.planfix_task_id;
+}
+
+async function repushProperty(db: Db, crm: CrmAdapter, id: string): Promise<number> {
+  const p = await one(db, "SELECT * FROM properties WHERE id = $1", id);
+  if (!p.planfix_task_id) throw new Error(`property ${id} has no Planfix task`);
+  await crm.updateProperty(p.planfix_task_id, {
+    baseNumber: p.base_number,
+    address: p.address,
+    ownerPlanfixId: await ensureContact(db, crm, p.owner_id),
+  });
+  return p.planfix_task_id;
 }
 
 export const timing = { autoTaskTries: 3, autoTaskWaitMs: 1000 };
@@ -196,6 +226,8 @@ const handlers: Record<string, (db: Db, crm: CrmAdapter, id: string) => Promise<
   "engagement.push": ensureEngagement,
   "supplier_invoice.push": ensureSupplierInvoice,
   "service_request.sync": syncServiceRequest,
+  "engagement.repush": repushEngagement,
+  "property.repush": repushProperty,
 };
 
 async function claim(db: Db): Promise<Job | undefined> {

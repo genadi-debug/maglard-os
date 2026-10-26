@@ -103,7 +103,8 @@ export async function workCenter(db: Db, actor: { id: string; role: Role }) {
        (SELECT count(*) FROM tasks WHERE assignee_id = $1 AND status <> 'done')::int AS my_open,
        (SELECT count(*) FROM service_requests WHERE status <> 'closed' AND urgency = 'emergency')::int AS emergencies,
        (SELECT count(*) FROM approvals WHERE status = 'pending')::int AS pending_approvals,
-       (SELECT count(*) FROM notifications WHERE user_id = $1 AND read_at IS NULL)::int AS unread`,
+       (SELECT count(*) FROM notifications WHERE user_id = $1 AND read_at IS NULL)::int AS unread,
+       (SELECT count(*) FROM planfix_changes WHERE status = 'open')::int AS planfix_conflicts`,
     [me],
   );
   const result: Record<string, unknown> = {

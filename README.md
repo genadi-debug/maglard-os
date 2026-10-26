@@ -39,7 +39,7 @@ sees only the screens and buttons their role allows. The screens are:
 - **Suppliers:** each supplier's open and closed jobs, average days to close, the apartments they worked in, and their invoices (for roles that see invoices).
 - **Notifications:** a task given to me, an approval to decide or decided, an emergency request.
 - **Supplier invoices:** amounts, handling and sync state.
-- **Planfix sync:** the queue, with a resend button on failed jobs.
+- **Planfix sync:** changes made directly in Planfix (conflicts to settle, and what was applied on its own), then the outgoing queue, with a resend button on failed jobs.
 - **Import from Planfix** (admin, on the sync screen): a dry run that reports what would be imported and skipped, then the real import.
 - **Users** (admin): add users, change roles, block, set a new password, and set the approval threshold.
 - **Audit log** (admin, management): every change and login attempt, including refused ones.
@@ -148,6 +148,29 @@ is safe but wasteful.
 - If a record changes while its sync job is running, the job runs again
   (`request_seq`), so Planfix always ends on the latest state.
 
+## Reading changes back from Planfix
+
+Every 10 minutes (`PLANFIX_READBACK_MINUTES`, 0 turns it off), and on demand
+from the sync screen, `src/sync/readback.ts` reads the property (11), intake
+(12) and service request (20) tasks. Each field is compared three ways:
+MAGLARD OS now, Planfix now, and Planfix at the previous read.
+
+- A field that changed only in Planfix is applied in MAGLARD OS and listed
+  as applied.
+- A field that changed on both sides, or with no earlier read to compare,
+  goes to the conflict queue. So does a value that breaks a rule here, such
+  as an end date before the start. Admin or management then either take the
+  Planfix value or keep the MAGLARD OS one, which pushes it to Planfix.
+- A service request's status always goes to the queue, because a status in
+  MAGLARD OS has rules (supplier, approvals, invoice) that Planfix does not
+  enforce.
+- A record with a push still on its way is checked at the next read.
+- Records that exist only in Planfix are counted, and the import brings them in.
+
+Only verified calls are used: `task/list` with filter 51 and the `status`
+field (read-only check on tasks 336–344), and `POST task/{id}` to write
+back a kept value. Webhooks are not used until they are verified.
+
 ## Cost approval
 
 Assigning a supplier needs an estimated cost. Above the approval threshold
@@ -182,8 +205,8 @@ not imported yet.
   `MAGLARD OS (<ref>)` marker in the task description before creating, and it
   waits on confirming a supported Planfix search filter.
 - Only the value `לחיוב` of field 9978 is verified.
-- So far sync runs one way only, MAGLARD OS to Planfix. Reading changes back
-  and handling conflicts come next.
+- Supplier invoices and contacts' own details (phone, email) are not read
+  back from Planfix yet.
 - Roles limit actions, not records: every role sees every client and
   property it may see at all. Scopes come after the Planfix import.
 - No two-factor login yet.
