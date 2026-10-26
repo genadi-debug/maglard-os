@@ -92,6 +92,9 @@ export const FIELD = {
     amountVat: 10192,
     balance: 9938,
     bills: 9976,
+    // Formula: the linked contract's monthly price over the charge's period,
+    // by days. A text when something is missing ("חסר מחיר חוזה לקוח").
+    rentByDays: 10320,
   },
   // Accumulated bill (template 23). The computed total, balance and missing
   // count are Planfix formulas.

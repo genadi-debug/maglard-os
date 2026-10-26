@@ -296,6 +296,41 @@ describe.skipIf(!url)("the client's billing, read from Planfix", () => {
     expect((await call("GET", `/clients/${ids.client}/bills/9999`)).statusCode).toBe(404);
   });
 
+  it("opens the month's rent per contract at Planfix's rent by days", async () => {
+    await call("POST", `/contacts/${ids.client}`, { vatOnRent: true });
+    await call("POST", "/settings", { vatRate: 18 });
+    // October is already charged on contract 7001 (charge 7102).
+    const oct = (await call("GET", `/clients/${ids.client}/rent-charges?month=2026-10`)).json();
+    expect(oct.contracts).toMatchObject([{ contract_task_id: 7001, charged: true }]);
+    expect((await call("POST", `/clients/${ids.client}/rent-charges`, { month: "2026-10" })).statusCode).toBe(409);
+    // Before the move-in: nothing to charge.
+    expect((await call("GET", `/clients/${ids.client}/rent-charges?month=2026-09`)).json().contracts).toEqual([]);
+
+    const nov = (await call("GET", `/clients/${ids.client}/rent-charges?month=2026-11`)).json();
+    expect(nov.contracts).toMatchObject([
+      { contract_task_id: 7001, apartment_code: "99970.00", period_from: "2026-11-01", period_to: "2026-11-30", charged: false },
+    ]);
+    crm.rentByDays.set(crm.nextId, 5900);
+    const res = await call("POST", `/clients/${ids.client}/rent-charges`, { month: "2026-11" });
+    expect(res.statusCode).toBe(201);
+    const [opened, set] = crm.calls.slice(-2);
+    expect(opened).toMatchObject({
+      method: "createCharge",
+      input: { chargeType: "שכר דירה", contractTaskId: 7001, periodFrom: "2026-11-01", periodTo: "2026-11-30", amountTotal: 0 },
+    });
+    expect(set).toEqual({ method: "setChargeAmount", input: { taskId: res.json().created[0].planfixTaskId, amountTotal: 5900, split: { net: 5000, vat: 900 } } });
+    expect(res.json().created).toMatchObject([{ amount: 5900, problem: null }]);
+  });
+
+  it("reports a rent charge Planfix could not compute", async () => {
+    crm.rentByDays.set(crm.nextId, null);
+    const res = (await call("POST", `/clients/${ids.client}/rent-charges`, { month: "2026-12" })).json();
+    expect(res.created[0]).toMatchObject({ amount: null });
+    expect(res.created[0].problem).toContain("להשלים");
+    expect(crm.calls.at(-1)!.method).toBe("createCharge");
+    expect((await call("GET", `/clients/${ids.client}/rent-charges?month=dec`)).statusCode).toBe(400);
+  });
+
   it("replaces the mirror on every read", async () => {
     crm.billing = { contracts: [], charges: [], bills: [] };
     await call("POST", "/billing/refresh");
