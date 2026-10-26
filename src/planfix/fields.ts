@@ -9,6 +9,11 @@ export const TEMPLATE = {
   serviceRequest: 20,
 } as const;
 
+// Contact templates by kind, verified against maglardsand 2026-10-26 (contacts
+// 9, 11, 13; creating a contact without a template fails with code 41).
+export const CONTACT_TEMPLATE = { client: 7, owner: 8, supplier: 6 } as const;
+export type ContactKind = keyof typeof CONTACT_TEMPLATE;
+
 // Planfix "מוקד" statuses, by MAGLARD OS service request status. Setting status
 // through POST task/{id} was verified on task 336.
 export const SERVICE_REQUEST_STATUS = {

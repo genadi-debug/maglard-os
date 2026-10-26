@@ -14,6 +14,14 @@ function fakeFetch(response: { status?: number; body: unknown }) {
 const fields = (body: any) => Object.fromEntries(body.customFieldData.map((c: any) => [c.field.id, c.value]));
 
 describe("PlanfixAdapter", () => {
+  it("creates a contact with the template for its kind", async () => {
+    const f = fakeFetch({ body: { result: "success", id: 71 } });
+    const adapter = new PlanfixAdapter(new PlanfixClient("https://x.planfix.com/rest/", "tok", f.impl));
+    expect(await adapter.createContact({ name: "בעלים", isCompany: false, kind: "owner" })).toBe(71);
+    expect(f.calls[0].url).toBe("https://x.planfix.com/rest/contact/");
+    expect(JSON.parse(String(f.calls[0].init.body))).toEqual({ template: { id: 8 }, name: "בעלים", isCompany: false });
+  });
+
   it("creates an engagement under its property with the verified field formats", async () => {
     const f = fakeFetch({ body: { result: "success", id: 334 } });
     const adapter = new PlanfixAdapter(new PlanfixClient("https://x.planfix.com/rest/", "tok", f.impl));

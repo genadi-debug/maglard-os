@@ -47,7 +47,7 @@ async function one(db: Db, sql: string, id: string) {
 
 function ensureContact(db: Db, crm: CrmAdapter, id: string): Promise<number> {
   return ensureRow<any>(db, "contacts", "planfix_id", id, (c) =>
-    crm.createContact({ name: c.name, isCompany: c.is_company }),
+    crm.createContact({ name: c.name, isCompany: c.is_company, kind: c.kind }),
   );
 }
 

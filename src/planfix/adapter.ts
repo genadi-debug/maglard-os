@@ -1,10 +1,10 @@
 import { PlanfixClient } from "./client.js";
-import { FIELD, SERVICE_REQUEST_STATUS, TEMPLATE } from "./fields.js";
+import { CONTACT_TEMPLATE, FIELD, SERVICE_REQUEST_STATUS, TEMPLATE, type ContactKind } from "./fields.js";
 
 // What the rest of MAGLARD OS needs from the CRM. Planfix is the only
 // implementation today; keeping the interface narrow lets us swap or fake it.
 export interface CrmAdapter {
-  createContact(input: { name: string; isCompany: boolean }): Promise<number>;
+  createContact(input: { name: string; isCompany: boolean; kind: ContactKind }): Promise<number>;
   createProperty(input: PropertyPush): Promise<number>;
   createEngagement(input: EngagementPush): Promise<number>;
   // Planfix's own scenario opens an intake task under every new property. Returns
@@ -100,9 +100,9 @@ function engagementFields(e: EngagementPush): FieldValue[] {
 export class PlanfixAdapter implements CrmAdapter {
   constructor(private readonly client: PlanfixClient) {}
 
-  async createContact(input: { name: string; isCompany: boolean }): Promise<number> {
-    // NOTE: contact creation has not been exercised against maglardsand yet.
+  async createContact(input: { name: string; isCompany: boolean; kind: ContactKind }): Promise<number> {
     const res = await this.client.request<{ id: number }>("POST", "contact/", {
+      template: { id: CONTACT_TEMPLATE[input.kind] },
       name: input.name,
       isCompany: input.isCompany,
     });
