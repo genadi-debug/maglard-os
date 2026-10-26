@@ -5,6 +5,7 @@ import Fastify from "fastify";
 import { ZodError } from "zod";
 import * as auth from "../auth.js";
 import * as files from "../domain/attachments.js";
+import * as contacts from "../domain/contacts.js";
 import { ForbiddenError } from "../domain/common.js";
 import * as notifications from "../domain/notifications.js";
 import type { Db } from "../db/pool.js";
@@ -67,6 +68,13 @@ const ROUTES: Record<string, Permission | null> = {
   "GET /readback": "sync.view",
   "POST /readback/run": "sync.retry",
   "POST /readback/changes/:id": "sync.resolve",
+  "POST /contacts": "contacts.manage",
+  "GET /contacts/:id": "apartments.view",
+  "POST /contacts/:id": "contacts.manage",
+  "POST /contacts/:id/people": "contacts.manage",
+  "POST /contacts/:id/people/:personId/remove": "contacts.manage",
+  "GET /owners": "apartments.view",
+  "GET /owners/:id": "apartments.view",
   "GET /suppliers": "requests.view",
   "GET /suppliers/:id": "requests.view",
   "GET /approvals": "approvals.decide",
@@ -223,6 +231,40 @@ export function buildServer(
   }));
   app.get("/service-requests", async () => q.listServiceRequests(db));
   app.get("/suppliers", async () => cards.listSuppliers(db));
+
+  // Client, owner and supplier cards: details, contact people, what is missing.
+  const bankOf = (req: { user: auth.User | null }) => ({ bank: can(req.user!.role, "bank.view") });
+  app.post("/contacts", async (req, reply) => {
+    const input = contacts.newContactInput.parse(req.body);
+    if (!bankOf(req).bank) for (const k of ["bankName", "bankBranch", "bankAccount"] as const) delete input[k];
+    return reply.status(201).send(await contacts.createContact(db, input));
+  });
+  app.get<IdParams>("/contacts/:id", async (req) => contacts.getContact(db, req.params.id, bankOf(req)));
+  app.post<IdParams>("/contacts/:id", async (req) =>
+    contacts.updateContact(db, req.params.id, contacts.contactInput.parse(req.body), bankOf(req)),
+  );
+  app.post<IdParams>("/contacts/:id/people", async (req, reply) =>
+    reply.status(201).send(await contacts.addPerson(db, req.params.id, contacts.personInput.parse(req.body))),
+  );
+  app.post<{ Params: { id: string; personId: string } }>("/contacts/:id/people/:personId/remove", async (req) =>
+    contacts.removePerson(db, req.params.id, req.params.personId),
+  );
+  app.get("/owners", async () => {
+    const owners = await contacts.listByKind(db, "owner");
+    const { rows } = await db.query("SELECT owner_id, count(*)::int AS n FROM properties GROUP BY owner_id");
+    const props = new Map(rows.map((r) => [r.owner_id, r.n]));
+    return owners.map((o) => ({ ...o, properties: props.get(o.id) ?? 0 }));
+  });
+  app.get<IdParams>("/owners/:id", async (req) => {
+    const { rows } = await db.query(
+      `SELECT p.id, p.base_number, p.address,
+              (SELECT c.name FROM engagements e JOIN contacts c ON c.id = e.client_id
+                WHERE e.property_id = p.id ORDER BY e.starts_on DESC LIMIT 1) AS client_name
+         FROM properties p WHERE p.owner_id = $1 ORDER BY p.base_number`,
+      [req.params.id],
+    );
+    return { properties: rows };
+  });
   app.get<IdParams>("/suppliers/:id", async (req) => {
     const card = await cards.supplierCard(db, req.params.id);
     const role = req.user!.role;

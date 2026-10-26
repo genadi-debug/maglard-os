@@ -227,6 +227,7 @@ const handlers: Record<string, (db: Db, crm: CrmAdapter, id: string) => Promise<
   "supplier_invoice.push": ensureSupplierInvoice,
   "service_request.sync": syncServiceRequest,
   "engagement.repush": repushEngagement,
+  "contact.push": ensureContact,
   "property.repush": repushProperty,
 };
 
