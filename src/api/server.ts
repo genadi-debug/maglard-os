@@ -1,9 +1,20 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import { ZodError } from "zod";
 import type { Db } from "../db/pool.js";
 import { intakeInput, supplierInvoiceInput } from "../domain/schemas.js";
+import * as q from "../domain/queries.js";
 import * as sr from "../domain/serviceRequests.js";
 import { createIntake, createSupplierInvoice, NotFoundError } from "../domain/services.js";
+
+const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "public");
+const assets: Record<string, string> = {
+  "/": "index.html",
+  "/app.js": "app.js",
+};
+const types: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8" };
 
 export function buildServer(db: Db) {
   const app = Fastify({ logger: false });
@@ -19,6 +30,19 @@ export function buildServer(db: Db) {
   });
 
   app.get("/health", async () => ({ ok: true }));
+
+  for (const [route, file] of Object.entries(assets)) {
+    app.get(route, async (_req, reply) =>
+      reply.type(types[path.extname(file)]).send(await readFile(path.join(publicDir, file), "utf8")),
+    );
+  }
+
+  // Read models for the screens.
+  app.get<{ Querystring: { kind?: string } }>("/contacts", async (req) => q.listContacts(db, req.query.kind));
+  app.get("/engagements", async () => q.listEngagements(db));
+  app.get("/service-requests", async () => q.listServiceRequests(db));
+  app.get("/supplier-invoices", async () => q.listSupplierInvoices(db));
+  app.get("/work-center", async () => q.workCenter(db));
 
   // Saved locally first; Planfix sync happens in the background ("saved, waiting for sync").
   app.post("/intakes", async (req, reply) => {
@@ -49,6 +73,16 @@ export function buildServer(db: Db) {
     reply.status(201).send(await sr.addSupplierInvoice(db, req.params.id, sr.invoiceInput.parse(req.body))),
   );
   app.post<IdParams>("/service-requests/:id/close", async (req) => sr.closeRequest(db, req.params.id));
+
+  app.post<{ Params: { id: string } }>("/sync/:id/retry", async (req, reply) => {
+    const { rowCount } = await db.query(
+      `UPDATE outbox SET status = 'pending', attempts = 0, run_after = now(), last_error = NULL, updated_at = now()
+        WHERE id = $1 AND status = 'failed'`,
+      [Number(req.params.id) || 0],
+    );
+    if (!rowCount) return reply.status(404).send({ error: "no failed job with that id" });
+    return { status: "pending" };
+  });
 
   app.get("/sync/status", async () => {
     const { rows } = await db.query(
