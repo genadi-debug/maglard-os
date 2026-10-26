@@ -1,0 +1,27 @@
+# Render Blueprint: the app (from the Dockerfile) and its PostgreSQL database.
+# In Render: New → Blueprint → pick this repo. PLANFIX_TOKEN is asked for once
+# and kept only in Render.
+services:
+  - type: web
+    name: maglard-os
+    runtime: docker
+    # A paid plan keeps the service awake; on the free plan it sleeps and the
+    # Planfix sync worker stops with it.
+    plan: starter
+    healthCheckPath: /health
+    numInstances: 1
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: maglard-db
+          property: connectionString
+      - key: PLANFIX_TOKEN
+        sync: false
+      - key: PLANFIX_BASE_URL
+        value: https://maglardsand.planfix.com/rest
+
+databases:
+  - name: maglard-db
+    databaseName: maglard_os
+    plan: basic-256mb
+    postgresMajorVersion: "16"

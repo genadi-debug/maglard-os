@@ -59,6 +59,20 @@ Tests need a Postgres database they may wipe:
 TEST_DATABASE_URL=postgres://maglard:maglard@localhost:5432/maglard_test npm test
 ```
 
+## Deploying on Render
+
+`render.yaml` is a Render Blueprint. It defines the app and a PostgreSQL 16
+database.
+
+1. In Render, choose **New → Blueprint** and pick `genadi-debug/maglard-os`.
+2. When asked, paste the Planfix token for `PLANFIX_TOKEN`. Keep it only in
+   Render. `PLANFIX_BASE_URL` defaults to maglardsand; change it in the
+   service's Environment when you move to production.
+3. Click **Apply**. Render builds the Dockerfile, creates the database and
+   wires `DATABASE_URL`, and the app runs its migrations on start.
+4. To create the first user, open the service's **Shell** and run
+   `MOS_PASSWORD='...' npx tsx src/createUser.ts you@example.com "Name"`.
+
 ## Deploying on Railway
 
 1. In Railway, create a project from the GitHub repo `genadi-debug/maglard-os`.
