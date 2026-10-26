@@ -9,7 +9,7 @@ const url = process.env.TEST_DATABASE_URL;
 
 describe.skipIf(!url)("screens API", () => {
   const db = createPool(url ?? "");
-  const app = buildServer(db);
+  const app = buildServer(db, { requireAuth: false });
   const get = async (u: string) => (await app.inject({ method: "GET", url: u })).json();
   const post = (u: string, payload?: object) => app.inject({ method: "POST", url: u, payload });
 

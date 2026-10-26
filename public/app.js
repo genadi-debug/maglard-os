@@ -28,6 +28,10 @@ async function api(method, url, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && url !== "/auth/login") {
+    showLogin();
+    throw new Error("נדרשת כניסה");
+  }
   if (!res.ok) {
     const issue = data.issues?.[0];
     throw new Error(issue ? `${issue.path.join(".")}: ${issue.message}` : data.error || `שגיאה ${res.status}`);
@@ -358,6 +362,44 @@ async function syncView() {
   });
 }
 
+// ---------- login ----------
+
+function showLogin() {
+  if (document.getElementById("login")) return;
+  document.body.innerHTML = `<main class="login">
+    <form id="login" novalidate>
+      <h1>MAGLARD OS</h1><p class="sub">כניסה למערכת</p>
+      <label>אימייל<input name="email" type="email" autocomplete="username" required></label>
+      <label>סיסמה<input name="password" type="password" autocomplete="current-password" required></label>
+      <div class="err" role="alert"></div>
+      <button class="btn primary">כניסה</button>
+    </form></main>`;
+  const form = document.getElementById("login");
+  form.querySelector("input").focus();
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      await api("POST", "/auth/login", Object.fromEntries(new FormData(form)));
+      location.reload();
+    } catch (err) {
+      form.querySelector(".err").textContent = err.message;
+    }
+  });
+}
+
+async function showUser() {
+  const me = await api("GET", "/auth/me").catch(() => null);
+  if (!me) return;
+  const box = document.createElement("div");
+  box.className = "me";
+  box.innerHTML = `${esc(me.name)}<br><button type="button">יציאה</button>`;
+  box.querySelector("button").onclick = async () => {
+    await api("POST", "/auth/logout");
+    location.reload();
+  };
+  document.querySelector(".rail").append(box);
+}
+
 // ---------- routing ----------
 
 async function refreshCounts() {
@@ -394,4 +436,4 @@ async function route() {
 }
 
 window.addEventListener("hashchange", route);
-route();
+route().then(showUser);

@@ -21,7 +21,7 @@ const intake = {
 
 describe.skipIf(!url)("intake and supplier invoice flow", () => {
   const db = createPool(url ?? "");
-  const app = buildServer(db);
+  const app = buildServer(db, { requireAuth: false });
   let crm: FakeCrm;
 
   beforeAll(async () => {

@@ -45,11 +45,36 @@ npm run migrate
 npm run dev
 ```
 
+Create a login (passwords must be at least 10 characters):
+
+```bash
+MOS_PASSWORD='...' npm run create-user -- you@example.com "Your Name"
+```
+
+For plain-http local development, set `COOKIE_SECURE=false` so the session cookie works without https.
+
 Tests need a Postgres database they may wipe:
 
 ```bash
 TEST_DATABASE_URL=postgres://maglard:maglard@localhost:5432/maglard_test npm test
 ```
+
+## Deploying on Railway
+
+1. In Railway, create a project from the GitHub repo `genadi-debug/maglard-os`.
+   It builds with the `Dockerfile` (see `railway.json`), and the health check
+   is `/health`.
+2. Add a **PostgreSQL** database to the project. In the app service's
+   variables, set `DATABASE_URL` to `${{Postgres.DATABASE_URL}}`.
+3. Set `PLANFIX_TOKEN`, and set `PLANFIX_BASE_URL` if the account is not
+   maglardsand. Keep them only in Railway's variables.
+4. Under the service's Networking, generate a domain.
+5. Create the first user from the service's shell:
+   `MOS_PASSWORD='...' npx tsx src/createUser.ts you@example.com "Name"`.
+
+The app runs its migrations on start. Keep one replica: the sync worker runs
+in the same process, and a second replica would only compete for jobs, which
+is safe but wasteful.
 
 ## Layout
 
@@ -98,7 +123,7 @@ TEST_DATABASE_URL=postgres://maglard:maglard@localhost:5432/maglard_test npm tes
 - Only the value `לחיוב` of field 9978 is verified.
 - So far sync runs one way only, MAGLARD OS to Planfix. Reading changes back
   and handling conflicts come next.
-- There is no authentication or permission layer yet.
+- Every user who can log in can do everything. There are no roles yet.
 - While a record is being created in Planfix, its row stays locked. Staff
   edits to that same record wait for the Planfix call to finish, which takes
   up to a few seconds.

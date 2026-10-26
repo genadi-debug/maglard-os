@@ -12,7 +12,7 @@ await migrate(db);
 const crm = new PlanfixAdapter(new PlanfixClient(config.planfixBaseUrl(), config.planfixToken()));
 const stopWorker = startWorker(db, crm, config.syncPollMs());
 
-const app = buildServer(db);
+const app = buildServer(db, { secureCookie: config.secureCookie() });
 await app.listen({ port: config.port(), host: "0.0.0.0" });
 console.log(`MAGLARD OS API on :${config.port()}`);
 
