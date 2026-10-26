@@ -62,6 +62,6 @@ describe.skipIf(!url)("login", () => {
   });
 
   it("refuses short passwords when creating a user", async () => {
-    await expect(createUser(db, "x@example.com", "x", "short")).rejects.toThrow(/10 characters/);
+    await expect(createUser(db, "x@example.com", "x", "short")).rejects.toThrow(/10 תווים/);
   });
 });

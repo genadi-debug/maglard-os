@@ -74,6 +74,8 @@ input,select,textarea{border:1px solid var(--line);border-radius:8px;padding:8px
 .timeline small{color:var(--muted)}
 .next{background:var(--accent-soft);border-radius:10px;padding:14px 16px;margin:12px 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .rail .me{margin-top:auto;padding:12px;border-top:1px solid rgba(255,255,255,.12);font-size:13px}
+.nav[hidden]{display:none}
+.rail .me small{display:block;opacity:.75}
 .rail .me button{background:none;border:0;color:var(--rail-ink);text-decoration:underline;cursor:pointer;padding:0;font-size:12px}
 .login{min-height:100vh;display:grid;place-items:center;max-width:none;padding:16px}
 .login form{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:28px;width:min(380px,100%);display:flex;flex-direction:column;gap:12px}
@@ -94,10 +96,12 @@ input,select,textarea{border:1px solid var(--line);border-radius:8px;padding:8px
   <nav class="rail" aria-label="ניווט ראשי">
     <div class="brand">MAGLARD OS<small>ניהול דירות ותפעול</small></div>
     <a class="nav" href="#/">מרכז עבודה <span class="cnt" id="cnt-work"></span></a>
-    <a class="nav" href="#/apartments">דירות</a>
-    <a class="nav" href="#/requests">קריאות שירות <span class="cnt" id="cnt-req"></span></a>
-    <a class="nav" href="#/invoices">חשבוניות ספק</a>
-    <a class="nav" href="#/sync">סנכרון Planfix <span class="cnt" id="cnt-sync"></span></a>
+    <a class="nav" href="#/apartments" data-perm="apartments.view">דירות</a>
+    <a class="nav" href="#/requests" data-perm="requests.view">קריאות שירות <span class="cnt" id="cnt-req"></span></a>
+    <a class="nav" href="#/invoices" data-perm="invoices.view">חשבוניות ספק</a>
+    <a class="nav" href="#/sync" data-perm="sync.view">סנכרון Planfix <span class="cnt" id="cnt-sync"></span></a>
+    <a class="nav" href="#/users" data-perm="users.manage">משתמשים</a>
+    <a class="nav" href="#/audit" data-perm="audit.view">יומן פעולות</a>
   </nav>
   <main id="view" tabindex="-1"></main>
 </div>
