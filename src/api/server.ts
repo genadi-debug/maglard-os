@@ -5,6 +5,7 @@ import Fastify from "fastify";
 import { ZodError } from "zod";
 import * as auth from "../auth.js";
 import type { Db } from "../db/pool.js";
+import { can, isRole, permissionsOf, ROLES, type Permission } from "../permissions.js";
 import { intakeInput, supplierInvoiceInput } from "../domain/schemas.js";
 import * as q from "../domain/queries.js";
 import * as sr from "../domain/serviceRequests.js";
@@ -20,6 +21,42 @@ const types: Record<string, string> = { ".html": "text/html; charset=utf-8", ".j
 // Reachable without a session: the app shell (it shows the login form), health and login.
 const PUBLIC = new Set(["GET /", "GET /app.js", "GET /health", "POST /auth/login"]);
 
+// What each route needs. `null` = any signed-in user. A route missing here is
+// refused, so a new route stays closed until it is given a permission.
+const ROUTES: Record<string, Permission | null> = {
+  "POST /auth/logout": null,
+  "GET /auth/me": null,
+  "GET /contacts": null,
+  "GET /work-center": null,
+  "GET /engagements": "apartments.view",
+  "POST /intakes": "apartments.create",
+  "GET /service-requests": "requests.view",
+  "GET /service-requests/:id": "requests.view",
+  "POST /service-requests": "requests.manage",
+  "POST /service-requests/:id/assign": "requests.manage",
+  "POST /service-requests/:id/client-approval": "requests.manage",
+  "POST /service-requests/:id/close": "requests.manage",
+  "POST /service-requests/:id/invoice": "invoices.create",
+  "GET /supplier-invoices": "invoices.view",
+  "POST /supplier-invoices": "invoices.create",
+  "GET /sync/status": "sync.view",
+  "POST /sync/:id/retry": "sync.retry",
+  "GET /users": "users.manage",
+  "POST /users": "users.manage",
+  "POST /users/:id": "users.manage",
+  "GET /audit": "audit.view",
+};
+
+// Used when auth is switched off (tests of the screens and flows).
+const SYSTEM_USER: auth.User = { id: "", email: "system", name: "system", role: "admin" };
+
+declare module "fastify" {
+  interface FastifyRequest {
+    user: auth.User | null;
+    auditEntity?: string;
+  }
+}
+
 export function buildServer(db: Db, opts: { requireAuth?: boolean; secureCookie?: boolean } = {}) {
   const app = Fastify({ logger: false });
   const requireAuth = opts.requireAuth ?? true;
@@ -27,17 +64,60 @@ export function buildServer(db: Db, opts: { requireAuth?: boolean; secureCookie?
     `${auth.SESSION_COOKIE}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}` +
     (opts.secureCookie ?? true ? "; Secure" : "");
 
+  const audit = (userId: string | null, action: string, ok: boolean, entityId?: string, detail?: object) =>
+    db.query("INSERT INTO audit_log (user_id, action, entity_id, ok, detail) VALUES ($1, $2, $3, $4, $5)", [
+      userId || null,
+      action,
+      entityId ?? null,
+      ok,
+      detail ?? null,
+    ]);
+
+  app.decorateRequest("user", null);
+
   app.addHook("onRequest", async (req, reply) => {
-    if (!requireAuth || PUBLIC.has(`${req.method} ${req.routeOptions.url}`)) return;
-    const user = await auth.userForToken(db, auth.readCookie(req.headers.cookie, auth.SESSION_COOKIE));
-    if (!user) return reply.status(401).send({ error: "login required" });
+    if (!req.routeOptions.url) return; // unknown path: Fastify answers 404
+    const route = `${req.method} ${req.routeOptions.url}`;
+    if (PUBLIC.has(route)) return;
+    req.user = requireAuth
+      ? await auth.userForToken(db, auth.readCookie(req.headers.cookie, auth.SESSION_COOKIE))
+      : SYSTEM_USER;
+    if (!req.user) return reply.status(401).send({ error: "login required" });
+    const needs = ROUTES[route];
+    if (needs === undefined || (needs && !can(req.user.role, needs))) {
+      return reply.status(403).send({ error: "אין לך הרשאה לפעולה הזו" });
+    }
+  });
+
+  // The id a create returned, so the audit log can point at the new record.
+  app.addHook("onSend", async (req, _reply, payload) => {
+    if (req.method === "POST" && typeof payload === "string" && payload.startsWith("{")) {
+      try {
+        const body = JSON.parse(payload);
+        req.auditEntity = body.id ?? body.engagementId ?? undefined;
+      } catch {
+        // not JSON; nothing to record
+      }
+    }
+    return payload;
+  });
+
+  // Every change made through the API, allowed or refused. Bodies are not
+  // stored: they can hold passwords and personal details.
+  app.addHook("onResponse", async (req, reply) => {
+    if (req.method === "GET" || !req.user || req.routeOptions.url === "/auth/login") return;
+    const params = req.params as { id?: string };
+    await audit(req.user.id, `${req.method} ${req.routeOptions.url}`, reply.statusCode < 400, params.id ?? req.auditEntity, {
+      status: reply.statusCode,
+    });
   });
 
   app.post("/auth/login", async (req, reply) => {
     const { email, password } = (req.body ?? {}) as { email?: string; password?: string };
-    const token = email && password ? await auth.login(db, email, password) : null;
-    if (!token) return reply.status(401).send({ error: "אימייל או סיסמה שגויים" });
-    return reply.header("Set-Cookie", cookie(token, auth.SESSION_DAYS * 86400)).send({ ok: true });
+    const session = email && password ? await auth.login(db, email, password) : null;
+    await audit(session?.userId ?? null, "login", Boolean(session), undefined, { email: String(email ?? "") });
+    if (!session) return reply.status(401).send({ error: "אימייל או סיסמה שגויים" });
+    return reply.header("Set-Cookie", cookie(session.token, auth.SESSION_DAYS * 86400)).send({ ok: true });
   });
 
   app.post("/auth/logout", async (req, reply) => {
@@ -45,13 +125,17 @@ export function buildServer(db: Db, opts: { requireAuth?: boolean; secureCookie?
     return reply.header("Set-Cookie", cookie("", 0)).send({ ok: true });
   });
 
-  app.get("/auth/me", async (req) => auth.userForToken(db, auth.readCookie(req.headers.cookie, auth.SESSION_COOKIE)));
+  app.get("/auth/me", async (req) => {
+    const user = req.user!;
+    return { ...user, roleLabel: ROLES[user.role], permissions: permissionsOf(user.role) };
+  });
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) return reply.status(400).send({ error: "validation", issues: err.issues });
     if (err instanceof NotFoundError) return reply.status(404).send({ error: err.message });
     if ((err as { code?: string }).code === "22P02") return reply.status(400).send({ error: "invalid id" });
     if (err instanceof sr.RuleError) return reply.status(409).send({ error: err.message });
+    if (err instanceof auth.AuthError) return reply.status(400).send({ error: err.message });
     if ((err as { code?: string }).code === "23505") return reply.status(409).send({ error: "already exists" });
     reply.log.error(err);
     return reply.status(500).send({ error: "internal" });
@@ -67,7 +151,10 @@ export function buildServer(db: Db, opts: { requireAuth?: boolean; secureCookie?
 
   // Read models for the screens.
   app.get<{ Querystring: { kind?: string } }>("/contacts", async (req) => q.listContacts(db, req.query.kind));
-  app.get("/engagements", async () => q.listEngagements(db));
+  app.get("/engagements", async (req) => {
+    const rows = await q.listEngagements(db);
+    return can(req.user!.role, "amounts.view") ? rows : rows.map(({ monthly_rent: _hidden, ...rest }) => rest);
+  });
   app.get("/service-requests", async () => q.listServiceRequests(db));
   app.get("/supplier-invoices", async () => q.listSupplierInvoices(db));
   app.get("/work-center", async () => q.workCenter(db));
@@ -118,6 +205,40 @@ export function buildServer(db: Db, opts: { requireAuth?: boolean; secureCookie?
          FROM outbox ORDER BY id DESC LIMIT 100`,
     );
     return { jobs: rows };
+  });
+
+  // Users and roles (admin only).
+  app.get("/users", async () => ({ users: await auth.listUsers(db), roles: ROLES }));
+
+  app.post("/users", async (req, reply) => {
+    const { email, name, password, role } = (req.body ?? {}) as Record<string, string>;
+    if (!email || !name || !password || !isRole(role)) {
+      return reply.status(400).send({ error: "צריך אימייל, שם, סיסמה ותפקיד" });
+    }
+    return reply.status(201).send({ id: await auth.createUser(db, email, name, password, role) });
+  });
+
+  app.post<IdParams>("/users/:id", async (req, reply) => {
+    const { role, active, password } = (req.body ?? {}) as { role?: string; active?: boolean; password?: string };
+    // An admin cannot lock themselves out.
+    if (req.params.id === req.user!.id && (active === false || (role !== undefined && role !== "admin"))) {
+      return reply.status(409).send({ error: "אי אפשר להוריד לעצמך הרשאת מנהל או לחסום את עצמך" });
+    }
+    if (role !== undefined && !isRole(role)) return reply.status(400).send({ error: "תפקיד לא מוכר" });
+    const found = await auth.updateUser(db, req.params.id, { role, active, password });
+    if (!found) return reply.status(404).send({ error: "user not found" });
+    return { ok: true };
+  });
+
+  app.get<{ Querystring: { limit?: string } }>("/audit", async (req) => {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+    const { rows } = await db.query(
+      `SELECT a.id, a.action, a.entity_id, a.ok, a.detail, a.created_at, u.name AS user_name
+         FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
+        ORDER BY a.id DESC LIMIT $1`,
+      [limit],
+    );
+    return { entries: rows };
   });
 
   return app;

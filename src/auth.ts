@@ -1,6 +1,7 @@
 import { createHash, randomBytes, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 import type { Db } from "./db/pool.js";
+import { isRole, type Role } from "./permissions.js";
 
 const scrypt = promisify(scryptCb) as (pw: string, salt: Buffer, len: number) => Promise<Buffer>;
 
@@ -23,17 +24,53 @@ export async function verifyPassword(password: string, stored: string): Promise<
 
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
 
-export async function createUser(db: Db, email: string, name: string, password: string) {
-  if (password.length < 10) throw new Error("password must be at least 10 characters");
+export class AuthError extends Error {}
+
+function checkPassword(password: string) {
+  if (password.length < 10) throw new AuthError("הסיסמה צריכה להיות באורך 10 תווים לפחות");
+}
+
+export async function createUser(db: Db, email: string, name: string, password: string, role: Role = "admin") {
+  checkPassword(password);
+  if (!isRole(role)) throw new AuthError(`תפקיד לא מוכר: ${role}`);
   const { rows } = await db.query(
-    "INSERT INTO users (email, name, password_hash) VALUES (lower($1), $2, $3) RETURNING id",
-    [email, name, await hashPassword(password)],
+    "INSERT INTO users (email, name, password_hash, role) VALUES (lower($1), $2, $3, $4) RETURNING id",
+    [email, name, await hashPassword(password), role],
   );
   return rows[0].id as string;
 }
 
+export async function listUsers(db: Db) {
+  const { rows } = await db.query("SELECT id, email, name, role, active, created_at FROM users ORDER BY name");
+  return rows;
+}
+
+// Changes a user's role, active flag or password. Ending a user's access
+// (deactivation or a new password) also ends their open sessions.
+export async function updateUser(
+  db: Db,
+  id: string,
+  change: { role?: Role; active?: boolean; password?: string },
+) {
+  if (change.role !== undefined && !isRole(change.role)) throw new AuthError(`תפקיד לא מוכר: ${change.role}`);
+  if (change.password !== undefined) checkPassword(change.password);
+  const hash = change.password === undefined ? null : await hashPassword(change.password);
+  const { rowCount } = await db.query(
+    `UPDATE users SET role = coalesce($2, role), active = coalesce($3, active), password_hash = coalesce($4, password_hash)
+      WHERE id = $1`,
+    [id, change.role ?? null, change.active ?? null, hash],
+  );
+  if (!rowCount) return false;
+  if (change.active === false || hash) await db.query("DELETE FROM sessions WHERE user_id = $1", [id]);
+  return true;
+}
+
 // Returns a new session token, or null when the email/password do not match.
-export async function login(db: Db, email: string, password: string): Promise<string | null> {
+export async function login(
+  db: Db,
+  email: string,
+  password: string,
+): Promise<{ token: string; userId: string } | null> {
   const { rows } = await db.query("SELECT id, password_hash FROM users WHERE email = lower($1) AND active", [email]);
   // Hash against a dummy when the user is unknown so timing does not reveal which emails exist.
   const ok = await verifyPassword(password, rows[0]?.password_hash ?? DUMMY_HASH);
@@ -43,13 +80,15 @@ export async function login(db: Db, email: string, password: string): Promise<st
     `INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + make_interval(days => $3))`,
     [hashToken(token), rows[0].id, SESSION_DAYS],
   );
-  return token;
+  return { token, userId: rows[0].id };
 }
 
-export async function userForToken(db: Db, token: string | undefined) {
+export type User = { id: string; email: string; name: string; role: Role };
+
+export async function userForToken(db: Db, token: string | undefined): Promise<User | null> {
   if (!token) return null;
   const { rows } = await db.query(
-    `SELECT u.id, u.email, u.name FROM sessions s JOIN users u ON u.id = s.user_id
+    `SELECT u.id, u.email, u.name, u.role FROM sessions s JOIN users u ON u.id = s.user_id
       WHERE s.token_hash = $1 AND s.expires_at > now() AND u.active`,
     [hashToken(token)],
   );

@@ -19,6 +19,11 @@ const CHARGE = { client: "הלקוח", owner: "בעל הדירה", maglard: "מ�
 const SYNC = { synced: ["סונכרן ל-Planfix", "good"], pending: ["ממתין לסנכרון", "warn"], failed: ["סנכרון נכשל", "bad"] };
 const JOB = { "engagement.push": "קליטת דירה", "supplier_invoice.push": "חשבונית ספק", "service_request.sync": "קריאת שירות" };
 
+// The signed-in user, with the permissions the server grants their role. The
+// server enforces them; here they only decide what to show.
+let me = null;
+const allowed = (permission) => Boolean(me?.permissions.includes(permission));
+
 const pill = ([text, tone]) => `<span class="pill ${tone}">${esc(text)}</span>`;
 
 async function api(method, url, body) {
@@ -234,7 +239,7 @@ async function workCenterView() {
         ? `<h2>כשלי סנכרון</h2>${w.syncFailures
             .map(
               (f) => `<div class="card"><div class="grow"><b>${esc(JOB[f.job_type] || f.job_type)}</b><br>
-              <small>${esc(f.last_error)}</small></div><a class="btn" href="#/sync">לטיפול</a></div>`,
+              <small>${esc(f.last_error)}</small></div>${allowed("sync.view") ? `<a class="btn" href="#/sync">לטיפול</a>` : ""}</div>`,
             )
             .join("")}`
         : ""
@@ -258,27 +263,27 @@ async function apartmentsView() {
   const rows = await api("GET", "/engagements");
   view.innerHTML = `
     <div class="head"><div><h1>דירות</h1><p class="sub">דירות בהתקשרות וסטטוס הסנכרון שלהן ל-Planfix.</p></div>
-    <button class="btn primary" id="add">קליטת דירה</button></div>
+    ${allowed("apartments.create") ? `<button class="btn primary" id="add">קליטת דירה</button>` : ""}</div>
     ${
       rows.length
         ? `<div class="wrap"><table class="table"><thead><tr><th>קוד</th><th>כתובת</th><th>בעל דירה</th><th>לקוח</th>
-          <th>תקופה</th><th>שכ״ד</th><th>Planfix</th></tr></thead><tbody>${rows
+          <th>תקופה</th>${allowed("amounts.view") ? "<th>שכ״ד</th>" : ""}<th>Planfix</th></tr></thead><tbody>${rows
             .map(
               (e) => `<tr><td>${esc(e.apartment_code)}</td><td>${esc(e.address)}</td><td>${esc(e.owner_name)}</td>
-              <td>${esc(e.client_name)}</td><td>${date(e.starts_on)}–${date(e.ends_on)}</td><td>${money(e.monthly_rent)}</td>
+              <td>${esc(e.client_name)}</td><td>${date(e.starts_on)}–${date(e.ends_on)}</td>${allowed("amounts.view") ? `<td>${money(e.monthly_rent)}</td>` : ""}
               <td>${pill(SYNC[e.sync])}${e.planfix_task_id ? ` <small>#${e.planfix_task_id}</small>` : ""}</td></tr>`,
             )
             .join("")}</tbody></table></div>`
-        : `<div class="empty">עדיין אין דירות. התחל בקליטת דירה.</div>`
+        : `<div class="empty">עדיין אין דירות.</div>`
     }`;
-  view.querySelector("#add").onclick = intakeDialog;
+  view.querySelector("#add")?.addEventListener("click", intakeDialog);
 }
 
 async function requestsView() {
   const rows = await api("GET", "/service-requests");
   view.innerHTML = `
     <div class="head"><div><h1>קריאות שירות</h1><p class="sub">תקלות וקריאות, כולל עבודה לחיוב הלקוח.</p></div>
-    <button class="btn primary" id="add">קריאה חדשה</button></div>
+    ${allowed("requests.manage") ? `<button class="btn primary" id="add">קריאה חדשה</button>` : ""}</div>
     ${
       rows.length
         ? `<div class="wrap"><table class="table"><thead><tr><th>נושא</th><th>דירה</th><th>סטטוס</th><th>על חשבון</th>
@@ -291,7 +296,7 @@ async function requestsView() {
             .join("")}</tbody></table></div>`
         : `<div class="empty">אין קריאות</div>`
     }`;
-  view.querySelector("#add").onclick = newRequestDialog;
+  view.querySelector("#add")?.addEventListener("click", newRequestDialog);
   view.querySelectorAll("tr.click").forEach((tr) => {
     const go = () => (location.hash = `#/requests/${tr.dataset.id}`);
     tr.onclick = go;
@@ -301,12 +306,15 @@ async function requestsView() {
 
 async function requestView(id) {
   const r = await api("GET", `/service-requests/${id}`);
-  const n = nextStep(r);
+  const step = nextStep(r);
+  // Show the step to everyone, but the button only to a role that may take it.
+  const mayAct = step && allowed(step.action === "invoice" ? "invoices.create" : "requests.manage");
+  const n = step && { ...step, label: mayAct ? step.label : null };
   view.innerHTML = `
     <p><a href="#/requests">→ כל הקריאות</a></p>
     <h1>${esc(r.subject)}</h1>
     <p class="sub">${pill(STATUS[r.status])} · פתח: ${esc(r.reported_by)} · ${date(r.created_at)}</p>
-    ${n ? `<div class="next"><div class="grow" style="flex:1">${esc(n.text)}</div><button class="btn primary" id="next">${esc(n.label)}</button></div>` : ""}
+    ${n ? `<div class="next"><div class="grow" style="flex:1">${esc(n.text)}</div>${n.label ? `<button class="btn primary" id="next">${esc(n.label)}</button>` : ""}</div>` : ""}
     ${r.description ? `<p>${esc(r.description)}</p>` : ""}
     <div class="kpis">
       <div class="kpi"><span>על חשבון</span><b style="font-size:18px">${esc(CHARGE[r.charge_to] || "טרם נקבע")}</b></div>
@@ -316,7 +324,7 @@ async function requestView(id) {
     <ul class="timeline">${r.events
       .map((e) => `<li>${esc(STATUS[e.to_status][0])} ${e.note ? `· ${esc(e.note)}` : ""} <small>${new Date(e.created_at).toLocaleString("he-IL")}</small></li>`)
       .join("")}</ul>`;
-  if (n) view.querySelector("#next").onclick = () => stepDialog(r, n.action);
+  view.querySelector("#next")?.addEventListener("click", () => stepDialog(r, n.action));
 }
 
 async function invoicesView() {
@@ -348,7 +356,7 @@ async function syncView() {
             .map(
               (j) => `<tr><td>${esc(JOB[j.job_type] || j.job_type)}</td><td>${pill(tone[j.status])}</td><td>${j.attempts}</td>
               <td><small>${esc(j.last_error || "")}</small></td><td>${new Date(j.updated_at).toLocaleString("he-IL")}</td>
-              <td>${j.status === "failed" ? `<button class="btn" data-retry="${j.id}">שליחה חוזרת</button>` : ""}</td></tr>`,
+              <td>${j.status === "failed" && allowed("sync.retry") ? `<button class="btn" data-retry="${j.id}">שליחה חוזרת</button>` : ""}</td></tr>`,
             )
             .join("")}</tbody></table></div>`
         : `<div class="empty">עדיין לא נשלח דבר ל-Planfix</div>`
@@ -393,12 +401,107 @@ function showLogin() {
   });
 }
 
-async function showUser() {
-  const me = await api("GET", "/auth/me").catch(() => null);
-  if (!me) return;
+// ---------- users and audit (admin) ----------
+
+async function usersView() {
+  const { users, roles } = await api("GET", "/users");
+  const roleOptions = (selected) =>
+    Object.entries(roles)
+      .map(([k, label]) => `<option value="${k}" ${k === selected ? "selected" : ""}>${esc(label)}</option>`)
+      .join("");
+  view.innerHTML = `
+    <div class="head"><div><h1>משתמשים</h1><p class="sub">מי נכנס למערכת ובאיזה תפקיד. התפקיד קובע מה המשתמש רואה ומה מותר לו לעשות.</p></div>
+    <button class="btn primary" id="add">משתמש חדש</button></div>
+    <div class="wrap"><table class="table"><thead><tr><th>שם</th><th>אימייל</th><th>תפקיד</th><th>מצב</th><th></th></tr></thead><tbody>${users
+      .map(
+        (u) => `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td>
+        <td><select data-role="${u.id}" aria-label="תפקיד של ${esc(u.name)}" ${u.id === me.id ? "disabled" : ""}>${roleOptions(u.role)}</select></td>
+        <td>${u.active ? pill(["פעיל", "good"]) : pill(["חסום", "bad"])}</td>
+        <td>${
+          u.id === me.id
+            ? "<small>זה אתה</small>"
+            : `<button class="btn" data-active="${u.id}" data-to="${!u.active}">${u.active ? "חסימה" : "הפעלה"}</button>
+               <button class="btn" data-password="${u.id}">סיסמה חדשה</button>`
+        }</td></tr>`,
+      )
+      .join("")}</tbody></table></div>`;
+  const save = async (id, change, msg) => {
+    try {
+      await api("POST", `/users/${id}`, change);
+      toast(msg);
+    } catch (err) {
+      toast(err.message);
+    }
+    route();
+  };
+  view.querySelectorAll("[data-role]").forEach((sel) => {
+    sel.onchange = () => save(sel.dataset.role, { role: sel.value }, "התפקיד עודכן");
+  });
+  view.querySelectorAll("[data-active]").forEach((b) => {
+    b.onclick = () =>
+      save(b.dataset.active, { active: b.dataset.to === "true" }, b.dataset.to === "true" ? "המשתמש הופעל" : "המשתמש נחסם ונותק");
+  });
+  view.querySelectorAll("[data-password]").forEach((b) => {
+    b.onclick = () =>
+      dialog("סיסמה חדשה", field("password", "סיסמה חדשה (10 תווים לפחות)", 'type="password" required', true), async (v) => {
+        await api("POST", `/users/${b.dataset.password}`, { password: v.password });
+        toast("הסיסמה הוחלפה והמשתמש נותק");
+      });
+  });
+  view.querySelector("#add").onclick = () =>
+    dialog(
+      "משתמש חדש",
+      field("name", "שם", "required") +
+        field("email", "אימייל", 'type="email" required') +
+        `<label>תפקיד<select name="role" required>${roleOptions("operations")}</select></label>` +
+        field("password", "סיסמה ראשונית (10 תווים לפחות)", 'type="password" required'),
+      async (v) => {
+        await api("POST", "/users", v);
+        toast("המשתמש נוצר");
+        route();
+      },
+      "יצירה",
+    );
+}
+
+const AUDIT_ACTION = {
+  login: "כניסה",
+  "POST /auth/logout": "יציאה",
+  "POST /intakes": "קליטת דירה",
+  "POST /service-requests": "פתיחת קריאה",
+  "POST /service-requests/:id/assign": "שיוך ספק",
+  "POST /service-requests/:id/client-approval": "רישום אישור לקוח",
+  "POST /service-requests/:id/invoice": "קליטת חשבונית לקריאה",
+  "POST /service-requests/:id/close": "סגירת קריאה",
+  "POST /supplier-invoices": "קליטת חשבונית ספק",
+  "POST /sync/:id/retry": "שליחה חוזרת ל-Planfix",
+  "POST /users": "יצירת משתמש",
+  "POST /users/:id": "עדכון משתמש",
+};
+
+async function auditView() {
+  const { entries } = await api("GET", "/audit");
+  view.innerHTML = `
+    <h1>יומן פעולות</h1><p class="sub">כל שינוי וכל ניסיון כניסה, כולל פעולות שנחסמו. 100 האחרונים.</p>
+    ${
+      entries.length
+        ? `<div class="wrap"><table class="table"><thead><tr><th>מתי</th><th>מי</th><th>פעולה</th><th>תוצאה</th></tr></thead><tbody>${entries
+            .map(
+              (e) => `<tr><td>${new Date(e.created_at).toLocaleString("he-IL")}</td>
+              <td>${esc(e.user_name || e.detail?.email || "—")}</td>
+              <td>${esc(AUDIT_ACTION[e.action] || e.action)}</td>
+              <td>${e.ok ? pill(["בוצע", "good"]) : pill([e.detail?.status === 403 ? "נחסם: אין הרשאה" : "נכשל", "bad"])}</td></tr>`,
+            )
+            .join("")}</tbody></table></div>`
+        : `<div class="empty">היומן ריק</div>`
+    }`;
+}
+
+function showUser() {
+  document.querySelectorAll(".nav[data-perm]").forEach((a) => (a.hidden = !allowed(a.dataset.perm)));
   const box = document.createElement("div");
   box.className = "me";
-  box.innerHTML = `${esc(me.name)}<br><button type="button">יציאה</button>`;
+  box.innerHTML = `${esc(me.name)}<small>${esc(me.roleLabel)}</small><button type="button">יציאה</button>`;
   box.querySelector("button").onclick = async () => {
     await api("POST", "/auth/logout");
     location.reload();
@@ -434,6 +537,8 @@ async function route() {
     else if (section === "requests") await requestsView();
     else if (section === "invoices") await invoicesView();
     else if (section === "sync") await syncView();
+    else if (section === "users") await usersView();
+    else if (section === "audit") await auditView();
     else view.innerHTML = `<div class="empty">הדף לא נמצא</div>`;
   } catch (err) {
     view.innerHTML = `<div class="empty">לא הצלחתי לטעון: ${esc(err.message)}</div>`;
@@ -441,5 +546,15 @@ async function route() {
   refreshCounts();
 }
 
-window.addEventListener("hashchange", route);
-route().then(showUser);
+async function start() {
+  try {
+    me = await api("GET", "/auth/me");
+  } catch {
+    return; // not signed in: api() has shown the login form
+  }
+  showUser();
+  window.addEventListener("hashchange", route);
+  route();
+}
+
+start();

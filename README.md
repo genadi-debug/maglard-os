@@ -26,14 +26,25 @@ This first slice covers two flows end to end:
 ## Screens
 
 `npm run dev` serves the Hebrew, right-to-left app at `http://localhost:3000/`.
-It is plain HTML and an ES module in `public/`, with no build step. It has
-five screens:
+It is plain HTML and an ES module in `public/`, with no build step. Each user
+sees only the screens and buttons their role allows. The screens are:
 
 - **Work center:** open service requests with their next step, plus sync failures.
 - **Apartments:** the apartment list, each with its Planfix sync state, and an intake form.
 - **Service requests:** a list, and a detail page with one next-action button and the request's history.
 - **Supplier invoices:** amounts, handling and sync state.
 - **Planfix sync:** the queue, with a resend button on failed jobs.
+- **Users** (admin): add users, change roles, block, set a new password.
+- **Audit log** (admin, management): every change and login attempt, including refused ones.
+
+## Roles
+
+`src/permissions.ts` maps each permission to roles, following section 4 of
+the spec: admin, management, department manager, finance, operations and
+property manager. Every route declares the permission it needs in `ROUTES`
+(`src/api/server.ts`), and a route not listed there is refused. Operations
+does not see rent or invoice amounts, and finance cannot open or run service
+requests. Scoping by client, property and department is not built yet.
 
 ## Running
 
@@ -45,11 +56,14 @@ npm run migrate
 npm run dev
 ```
 
-Create a login (passwords must be at least 10 characters):
+Create the first login, an admin (passwords must be at least 10 characters).
+Add everyone else from the users screen:
 
 ```bash
 MOS_PASSWORD='...' npm run create-user -- you@example.com "Your Name"
 ```
+
+`MOS_ROLE=finance` (or another role) creates a user with that role instead.
 
 For plain-http local development, set `COOKIE_SECURE=false` so the session cookie works without https.
 
@@ -133,11 +147,12 @@ is safe but wasteful.
   stored. The retry would then create a duplicate. The fix is to look up the
   `MAGLARD OS (<ref>)` marker in the task description before creating, and it
   waits on confirming a supported Planfix search filter.
-- Contact creation (`POST contact/`) has not been run against Planfix yet.
 - Only the value `לחיוב` of field 9978 is verified.
 - So far sync runs one way only, MAGLARD OS to Planfix. Reading changes back
   and handling conflicts come next.
-- Every user who can log in can do everything. There are no roles yet.
+- Roles limit actions, not records: every role sees every client and
+  property it may see at all. Scopes come after the Planfix import.
+- No two-factor login yet.
 - While a record is being created in Planfix, its row stays locked. Staff
   edits to that same record wait for the Planfix call to finish, which takes
   up to a few seconds.
