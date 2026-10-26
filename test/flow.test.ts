@@ -2,33 +2,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { buildServer } from "../src/api/server.js";
 import { migrate } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
-import type { CrmAdapter } from "../src/planfix/adapter.js";
 import { PlanfixError } from "../src/planfix/client.js";
-import { MAX_ATTEMPTS, runOnce } from "../src/sync/worker.js";
+import { MAX_ATTEMPTS, runOnce, timing } from "../src/sync/worker.js";
+import { FakeCrm } from "./fakeCrm.js";
 
 const url = process.env.TEST_DATABASE_URL;
-
-class FakeCrm implements CrmAdapter {
-  calls: { method: string; input: any }[] = [];
-  nextId = 1000;
-  failNext: Partial<Record<keyof CrmAdapter, Error>> = {};
-
-  private async record(method: keyof CrmAdapter, input: unknown) {
-    const fail = this.failNext[method];
-    if (fail) {
-      delete this.failNext[method];
-      throw fail;
-    }
-    await new Promise((r) => setTimeout(r, 5));
-    this.calls.push({ method, input });
-    return this.nextId++;
-  }
-  createContact = (i: any) => this.record("createContact", i);
-  createProperty = (i: any) => this.record("createProperty", i);
-  createEngagement = (i: any) => this.record("createEngagement", i);
-  createSupplierInvoice = (i: any) => this.record("createSupplierInvoice", i);
-  count = (m: string) => this.calls.filter((c) => c.method === m).length;
-}
 
 const intake = {
   baseNumber: 99901,
@@ -47,6 +25,7 @@ describe.skipIf(!url)("intake and supplier invoice flow", () => {
   let crm: FakeCrm;
 
   beforeAll(async () => {
+    timing.autoTaskTries = 1;
     await db.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
     await migrate(db);
   });
@@ -177,5 +156,21 @@ describe.skipIf(!url)("intake and supplier invoice flow", () => {
   it("rejects a duplicate apartment base number", async () => {
     expect((await post("/intakes", intake)).statusCode).toBe(201);
     expect((await post("/intakes", intake)).statusCode).toBe(409);
+  });
+
+  it("fills the intake task Planfix opens under a new property instead of creating a second one", async () => {
+    await post("/intakes", intake);
+    const createProperty = crm.createProperty;
+    crm.createProperty = async (i: any) => {
+      const id = await createProperty(i);
+      crm.autoEngagements.set(id, [id + 500]);
+      return id;
+    };
+    await drain();
+    expect(crm.count("createEngagement")).toBe(0);
+    const update = crm.calls.find((c) => c.method === "updateEngagement")!.input;
+    expect(update).toMatchObject({ apartmentCode: "99901.00", monthlyRent: 3000 });
+    const eng = (await db.query("SELECT planfix_task_id FROM engagements")).rows[0];
+    expect(eng.planfix_task_id).toBe(update.taskId);
   });
 });

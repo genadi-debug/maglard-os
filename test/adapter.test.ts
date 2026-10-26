@@ -99,4 +99,38 @@ describe("PlanfixAdapter", () => {
   it("converts ISO dates to Planfix format", () => {
     expect(pfDate("2026-01-31")).toEqual({ date: "31-01-2026" });
   });
+
+  it("creates a service request on template 20 and updates its status and supplier", async () => {
+    const f = fakeFetch({ body: { result: "success", id: 336 } });
+    const adapter = new PlanfixAdapter(new PlanfixClient("https://x/rest", "tok", f.impl));
+    await adapter.createServiceRequest({
+      ref: "service_request:1",
+      apartmentCode: "99901.00",
+      address: "a",
+      engagementTaskId: 334,
+      subject: "דוד שמש",
+      description: null,
+      reportedBy: "דייר",
+    });
+    const created = JSON.parse(String(f.calls[0].init.body));
+    expect(created.template).toEqual({ id: 20 });
+    expect(fields(created)).toEqual({ 9868: { id: 334 }, 9878: "דוד שמש" });
+    expect(created.description).toContain("פותח הקריאה: דייר");
+
+    await adapter.updateServiceRequest(336, { status: "with_supplier", supplierPlanfixId: 13, chargeTo: "client" });
+    expect(f.calls[1].url).toBe("https://x/rest/task/336");
+    const updated = JSON.parse(String(f.calls[1].init.body));
+    expect(updated.status).toEqual({ id: 115 });
+    expect(fields(updated)).toEqual({ 9882: { id: "contact:13" }, 9886: "על חשבון: הלקוח" });
+  });
+
+  it("finds intake tasks under a property by the parent-task filter", async () => {
+    const f = fakeFetch({
+      body: { result: "success", tasks: [{ id: 338, template: { id: 12 } }, { id: 400, template: { id: 22 } }] },
+    });
+    const adapter = new PlanfixAdapter(new PlanfixClient("https://x/rest", "tok", f.impl));
+    expect(await adapter.findEngagementTasks(337)).toEqual([338]);
+    const body = JSON.parse(String(f.calls[0].init.body));
+    expect(body.filters).toEqual([{ type: 73, operator: "equal", value: 337 }]);
+  });
 });

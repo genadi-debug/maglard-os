@@ -74,6 +74,20 @@ TEST_DATABASE_URL=postgres://maglard:maglard@localhost:5432/maglard_test npm tes
   required field, fail the job immediately.
 - Every attempt is written to `sync_log`.
 
+## Planfix behaviour to know
+
+- A Planfix scenario opens an intake task (template 12) under every new
+  property. The worker waits briefly for that task (filter type 73 = parent
+  task) and fills it, instead of creating a second intake. It falls back to
+  creating one only if none appears.
+- Service requests use template 20 ("מגלארד — מוקד תקלות"). Each change in
+  MAGLARD OS re-syncs the task's status (113–117), supplier, and its "last
+  update" field, which records who pays. Field 10280 (who pays) is not on
+  template 20. The payer instead travels with the supplier invoice's handling
+  (9978): לחיוב = client, בעלים = owner, נספג = MAGLARD (confirmed).
+- If a record changes while its sync job is running, the job runs again
+  (`request_seq`), so Planfix always ends on the latest state.
+
 ## Known gaps
 
 - Suppose the process dies after Planfix created a task but before its id was
@@ -85,7 +99,6 @@ TEST_DATABASE_URL=postgres://maglard:maglard@localhost:5432/maglard_test npm tes
 - So far sync runs one way only, MAGLARD OS to Planfix. Reading changes back
   and handling conflicts come next.
 - There is no authentication or permission layer yet.
-- Service requests are not pushed to Planfix yet, because the template id of
-  the "מוקד" task is still unknown. Their supplier invoices are pushed.
-- The mapping of owner → בעלים and MAGLARD → נספג for field 9978 is an
-  assumption that still needs confirmation.
+- While a record is being created in Planfix, its row stays locked. Staff
+  edits to that same record wait for the Planfix call to finish, which takes
+  up to a few seconds.

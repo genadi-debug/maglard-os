@@ -19,7 +19,7 @@ type Push<Row> = (row: Row) => Promise<number>;
 
 async function ensureRow<Row extends { planfix_id: number | null }>(
   db: Db,
-  table: "contacts" | "properties" | "engagements" | "supplier_invoices",
+  table: "contacts" | "properties" | "engagements" | "supplier_invoices" | "service_requests",
   column: "planfix_id" | "planfix_task_id",
   id: string,
   push: Push<Row>,
@@ -80,8 +80,8 @@ async function ensureEngagement(db: Db, crm: CrmAdapter, id: string): Promise<nu
   );
   if (ctx.planfix_task_id) return ctx.planfix_task_id;
   const propertyTask = await ensureProperty(db, crm, id);
-  return ensureRow<any>(db, "engagements", "planfix_task_id", id, async (e) =>
-    crm.createEngagement({
+  return ensureRow<any>(db, "engagements", "planfix_task_id", id, async (e) => {
+    const push = {
       ref: `engagement:${e.id}`,
       apartmentCode: e.apartment_code,
       address: ctx.address,
@@ -93,8 +93,33 @@ async function ensureEngagement(db: Db, crm: CrmAdapter, id: string): Promise<nu
       endsOn: e.ends_on,
       moveInOn: e.move_in_on,
       monthlyRent: Number(e.monthly_rent),
-    }),
-  );
+    };
+    const autoTask = await findUnclaimedEngagementTask(db, crm, propertyTask);
+    if (autoTask) {
+      await crm.updateEngagement(autoTask, push);
+      return autoTask;
+    }
+    return crm.createEngagement(push);
+  });
+}
+
+export const timing = { autoTaskTries: 3, autoTaskWaitMs: 1000 };
+
+// Planfix's scenario opens an intake task under each new property, usually
+// within a moment. Wait briefly for it, and skip any task another engagement
+// already owns.
+async function findUnclaimedEngagementTask(db: Db, crm: CrmAdapter, propertyTask: number): Promise<number | null> {
+  for (let attempt = 1; attempt <= timing.autoTaskTries; attempt++) {
+    const ids = await crm.findEngagementTasks(propertyTask);
+    if (ids.length) {
+      const { rows } = await db.query("SELECT planfix_task_id FROM engagements WHERE planfix_task_id = ANY($1)", [ids]);
+      const taken = new Set(rows.map((r) => r.planfix_task_id));
+      const free = ids.filter((t) => !taken.has(t)).sort((a, b) => a - b);
+      if (free.length) return free[0];
+    }
+    if (attempt < timing.autoTaskTries) await new Promise((r) => setTimeout(r, timing.autoTaskWaitMs));
+  }
+  return null;
 }
 
 async function ensureSupplierInvoice(db: Db, crm: CrmAdapter, id: string): Promise<number> {
@@ -129,14 +154,46 @@ async function ensureSupplierInvoice(db: Db, crm: CrmAdapter, id: string): Promi
   );
 }
 
+// Creates the Planfix task for a service request if needed, then brings its
+// status, supplier and "last update" field in line with MAGLARD OS.
+async function syncServiceRequest(db: Db, crm: CrmAdapter, id: string): Promise<number> {
+  const ctx = await one(
+    db,
+    `SELECT r.engagement_id, r.supplier_id, e.apartment_code, p.address
+       FROM service_requests r
+       JOIN engagements e ON e.id = r.engagement_id
+       JOIN properties p ON p.id = e.property_id
+      WHERE r.id = $1`,
+    id,
+  );
+  const engagementTask = await ensureEngagement(db, crm, ctx.engagement_id);
+  const supplierPf = ctx.supplier_id ? await ensureContact(db, crm, ctx.supplier_id) : null;
+  const taskId = await ensureRow<any>(db, "service_requests", "planfix_task_id", id, (r) =>
+    crm.createServiceRequest({
+      ref: `service_request:${r.id}`,
+      apartmentCode: ctx.apartment_code,
+      address: ctx.address,
+      engagementTaskId: engagementTask,
+      subject: r.subject,
+      description: r.description,
+      reportedBy: r.reported_by,
+    }),
+  );
+  // Read the state after creating, so the update reflects the latest change.
+  const r = await one(db, "SELECT status, charge_to FROM service_requests WHERE id = $1", id);
+  await crm.updateServiceRequest(taskId, { status: r.status, supplierPlanfixId: supplierPf, chargeTo: r.charge_to });
+  return taskId;
+}
+
 const handlers: Record<string, (db: Db, crm: CrmAdapter, id: string) => Promise<number>> = {
   "engagement.push": ensureEngagement,
   "supplier_invoice.push": ensureSupplierInvoice,
+  "service_request.sync": syncServiceRequest,
 };
 
 async function claim(db: Db): Promise<Job | undefined> {
   const { rows } = await db.query(
-    `UPDATE outbox SET status = 'running', attempts = attempts + 1, updated_at = now()
+    `UPDATE outbox SET status = 'running', attempts = attempts + 1, claimed_seq = request_seq, updated_at = now()
       WHERE id = (
         SELECT id FROM outbox
          WHERE status = 'pending' AND run_after <= now()
@@ -156,9 +213,12 @@ export async function runOnce(db: Db, crm: CrmAdapter): Promise<boolean> {
   try {
     if (!handler) throw new Error(`Unknown job type ${job.job_type}`);
     const planfixId = await handler(db, crm, job.entity_id);
-    await db.query("UPDATE outbox SET status = 'done', last_error = NULL, updated_at = now() WHERE id = $1", [
-      job.id,
-    ]);
+    await db.query(
+      `UPDATE outbox SET last_error = NULL, updated_at = now(), attempts = 0,
+              status = CASE WHEN request_seq > claimed_seq THEN 'pending' ELSE 'done' END
+        WHERE id = $1`,
+      [job.id],
+    );
     await log(db, job.id, job.job_type, true, { planfixId });
   } catch (err) {
     const retryable = err instanceof PlanfixError ? err.retryable : false;

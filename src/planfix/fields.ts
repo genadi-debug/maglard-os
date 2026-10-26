@@ -5,6 +5,18 @@ export const TEMPLATE = {
   property: 11,
   engagement: 12,
   supplierInvoice: 22,
+  // "מגלארד — מוקד תקלות", verified 2026-10-26 (task 336). The UI's object id 128526 is not the API id.
+  serviceRequest: 20,
+} as const;
+
+// Planfix "מוקד" statuses, by MAGLARD OS service request status. Setting status
+// through POST task/{id} was verified on task 336.
+export const SERVICE_REQUEST_STATUS = {
+  new: 113,
+  triage: 114,
+  with_supplier: 115,
+  awaiting_resolution: 116,
+  closed: 117,
 } as const;
 
 export const FIELD = {
@@ -34,5 +46,13 @@ export const FIELD = {
     amountVat: 10054,
     amountTotal: 9910,
     handling: 9978,
+  },
+  // Only these fields exist on template 20; "who pays" (10280) is not on it and
+  // travels with the supplier invoice's handling (9978) instead.
+  serviceRequest: {
+    engagement: 9868,
+    subject: 9878,
+    supplier: 9882,
+    lastUpdate: 9886,
   },
 } as const;

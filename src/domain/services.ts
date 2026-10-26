@@ -4,12 +4,16 @@ import type { IntakeInput, SupplierInvoiceInput } from "./schemas.js";
 
 export { NotFoundError };
 
+// Queues (or re-queues) a sync job. A job already running is flagged to run
+// again once it finishes, so a change made mid-sync is never lost.
 export async function enqueue(tx: Tx, jobType: string, entityId: string): Promise<void> {
   await tx.query(
     `INSERT INTO outbox (job_type, entity_id) VALUES ($1, $2)
      ON CONFLICT (job_type, entity_id) DO UPDATE
-       SET status = 'pending', attempts = 0, run_after = now(), last_error = NULL, updated_at = now()
-       WHERE outbox.status = 'failed'`,
+       SET request_seq = outbox.request_seq + 1, updated_at = now(),
+           status = CASE WHEN outbox.status = 'running' THEN 'running' ELSE 'pending' END,
+           attempts = CASE WHEN outbox.status = 'running' THEN outbox.attempts ELSE 0 END,
+           run_after = now(), last_error = NULL`,
     [jobType, entityId],
   );
 }
