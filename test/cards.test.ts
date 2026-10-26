@@ -104,7 +104,7 @@ describe.skipIf(!url)("client and property cards, search", () => {
     const hits = async (who: string, q: string) =>
       (await get(who, `/search?q=${encodeURIComponent(q)}`)).json().hits.map((h: any) => `${h.type}:${h.title}`);
     expect(await hits("fin", "האיקלי")).toEqual(["client:האיקלי אריאל"]);
-    expect(await hits("fin", "תומר")).toEqual(["property:תומר רובין"]);
+    expect(await hits("fin", "תומר")).toEqual(["owner:תומר רובין"]);
     expect(await hits("fin", "טירת")).toEqual(["property:הפלמח 13, טירת הכרמל"]);
     expect(await hits("fin", "1314")).toEqual(["property:הפלמח 13, טירת הכרמל"]);
     expect(await hits("fin", "INV-7")).toEqual(["invoice:חשבונית INV-77"]);

@@ -1,0 +1,208 @@
+import { z } from "zod";
+import { withTx, type Db } from "../db/pool.js";
+import { enqueue } from "./services.js";
+import { NotFoundError } from "./common.js";
+
+// Card intake (spec process 1): a client, owner or supplier card with the
+// details finance needs. A card is complete once every required field of its
+// kind is filled in; until then it shows what is missing.
+
+export type Kind = "client" | "owner" | "supplier";
+
+// Required fields by kind, from the finance spec (process 1, required fields).
+// A field missing here is optional for that kind.
+const REQUIRED: Record<Kind, string[]> = {
+  client: ["id_number", "vat_on_rent", "withholding_tax", "ledger_card"],
+  owner: ["id_number", "licensed_dealer", "withholding_cert_until", "bank", "ledger_card"],
+  supplier: ["id_number", "supplier_type", "service_areas", "withholding_cert_until", "bank", "payment_terms"],
+};
+
+export const FIELD_LABEL: Record<string, string> = {
+  id_number: "ת.ז / ח.פ",
+  vat_on_rent: "מע״מ על שכירות",
+  withholding_tax: "ניכוי מס במקור",
+  withholding_rate: "שיעור ניכוי במקור",
+  ledger_card: "מספר כרטיס",
+  licensed_dealer: "עוסק מורשה",
+  withholding_cert_until: "תוקף אישור ניכוי במקור",
+  bank: "פרטי בנק",
+  supplier_type: "סוג ספק",
+  service_areas: "תחומי שירות",
+  payment_terms: "תנאי תשלום",
+};
+
+// Israeli ID and company numbers share one check digit (9 digits, weights
+// 1,2,1,2..., digit sums).
+export function validIsraeliId(value: string): boolean {
+  if (!/^\d{5,9}$/.test(value)) return false;
+  const digits = value.padStart(9, "0");
+  let sum = 0;
+  for (let i = 0; i < 9; i++) {
+    const n = Number(digits[i]) * ((i % 2) + 1);
+    sum += n > 9 ? n - 9 : n;
+  }
+  return sum % 10 === 0;
+}
+
+export function missingFields(c: Record<string, unknown>): string[] {
+  const kind = c.kind as Kind;
+  const missing = REQUIRED[kind].filter((f) =>
+    f === "bank" ? !(c.bank_name && c.bank_branch && c.bank_account) : c[f] === null || c[f] === undefined || c[f] === "",
+  );
+  if (kind === "client" && c.withholding_tax === true && c.withholding_rate == null) missing.push("withholding_rate");
+  return missing.map((f) => FIELD_LABEL[f]);
+}
+
+const text = z.string().trim().max(500).nullable().optional();
+
+export const contactInput = z
+  .object({
+    name: z.string().trim().min(1).max(200).optional(),
+    isCompany: z.boolean().optional(),
+    idNumber: z
+      .string()
+      .trim()
+      .refine(validIsraeliId, "מספר ת.ז / ח.פ לא תקין")
+      .nullable()
+      .optional(),
+    phone: text,
+    email: z.string().trim().email("דוא״ל לא תקין").nullable().optional(),
+    address: text,
+    ledgerCard: text,
+    vatOnRent: z.boolean().nullable().optional(),
+    withholdingTax: z.boolean().nullable().optional(),
+    withholdingRate: z.number().min(0).max(100).nullable().optional(),
+    licensedDealer: z.boolean().nullable().optional(),
+    withholdingCertUntil: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+    bankName: text,
+    bankBranch: text,
+    bankAccount: text,
+    supplierType: text,
+    serviceAreas: text,
+    regions: text,
+    paymentTerms: text,
+    notes: z.string().trim().max(4000).nullable().optional(),
+  })
+  .strict();
+
+export const newContactInput = contactInput.extend({
+  kind: z.enum(["client", "owner", "supplier"]),
+  name: z.string().trim().min(1).max(200),
+});
+
+export const personInput = z.object({
+  name: z.string().trim().min(1).max(200),
+  role: text,
+  phone: text,
+  email: z.string().trim().email("דוא״ל לא תקין").nullable().optional(),
+});
+
+const COLUMN: Record<string, string> = {
+  name: "name",
+  isCompany: "is_company",
+  idNumber: "id_number",
+  phone: "phone",
+  email: "email",
+  address: "address",
+  ledgerCard: "ledger_card",
+  vatOnRent: "vat_on_rent",
+  withholdingTax: "withholding_tax",
+  withholdingRate: "withholding_rate",
+  licensedDealer: "licensed_dealer",
+  withholdingCertUntil: "withholding_cert_until",
+  bankName: "bank_name",
+  bankBranch: "bank_branch",
+  bankAccount: "bank_account",
+  supplierType: "supplier_type",
+  serviceAreas: "service_areas",
+  regions: "regions",
+  paymentTerms: "payment_terms",
+  notes: "notes",
+};
+export const BANK_COLUMNS = ["bank_name", "bank_branch", "bank_account"];
+const BANK_KEYS = ["bankName", "bankBranch", "bankAccount"];
+
+const blankToNull = (v: unknown) => (v === "" ? null : v);
+
+export async function createContact(db: Db, input: z.infer<typeof newContactInput>) {
+  return withTx(db, async (tx) => {
+    const { kind, ...rest } = input;
+    const entries = Object.entries(rest).filter(([, v]) => v !== undefined);
+    const cols = ["kind", ...entries.map(([k]) => COLUMN[k])];
+    const values = [kind, ...entries.map(([, v]) => blankToNull(v))];
+    if (!("isCompany" in rest)) {
+      cols.push("is_company");
+      values.push(kind !== "owner");
+    }
+    const { rows } = await tx.query(
+      `INSERT INTO contacts (${cols.join(", ")}) VALUES (${cols.map((_, i) => `$${i + 1}`).join(", ")}) RETURNING id`,
+      values,
+    );
+    // Created in Planfix now, like a contact created through an intake.
+    await enqueue(tx, "contact.push", rows[0].id);
+    return { id: rows[0].id as string };
+  });
+}
+
+// Only the fields sent are changed. Bank details need their own permission.
+export async function updateContact(
+  db: Db,
+  id: string,
+  input: z.infer<typeof contactInput>,
+  opts: { bank: boolean },
+) {
+  const entries = Object.entries(input).filter(([k, v]) => v !== undefined && (opts.bank || !BANK_KEYS.includes(k)));
+  if (!entries.length) return getContact(db, id, opts);
+  const { rowCount } = await db.query(
+    `UPDATE contacts SET ${entries.map(([k], i) => `${COLUMN[k]} = $${i + 2}`).join(", ")}, updated_at = now()
+      WHERE id = $1`,
+    [id, ...entries.map(([, v]) => blankToNull(v))],
+  );
+  if (!rowCount) throw new NotFoundError(`contact ${id} not found`);
+  return getContact(db, id, opts);
+}
+
+export async function getContact(db: Db, id: string, opts: { bank: boolean }) {
+  const { rows } = await db.query("SELECT * FROM contacts WHERE id = $1", [id]);
+  if (!rows[0]) throw new NotFoundError(`contact ${id} not found`);
+  const people = await db.query(
+    "SELECT id, name, role, phone, email FROM contact_people WHERE contact_id = $1 ORDER BY created_at",
+    [id],
+  );
+  const c = rows[0];
+  const missing = missingFields(c);
+  if (!opts.bank) for (const col of BANK_COLUMNS) c[col] = c[col] ? "•••" : null;
+  return { ...c, people: people.rows, missing, complete: missing.length === 0 };
+}
+
+export async function addPerson(db: Db, contactId: string, input: z.infer<typeof personInput>) {
+  const exists = await db.query("SELECT 1 FROM contacts WHERE id = $1", [contactId]);
+  if (!exists.rowCount) throw new NotFoundError(`contact ${contactId} not found`);
+  const { rows } = await db.query(
+    "INSERT INTO contact_people (contact_id, name, role, phone, email) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+    [contactId, input.name, blankToNull(input.role) ?? null, blankToNull(input.phone) ?? null, blankToNull(input.email) ?? null],
+  );
+  return { id: rows[0].id as string };
+}
+
+export async function removePerson(db: Db, contactId: string, personId: string) {
+  const { rowCount } = await db.query("DELETE FROM contact_people WHERE id = $1 AND contact_id = $2", [
+    personId,
+    contactId,
+  ]);
+  if (!rowCount) throw new NotFoundError("person not found");
+  return { ok: true };
+}
+
+// The list for a kind, with whether each card is complete.
+export async function listByKind(db: Db, kind: Kind) {
+  const { rows } = await db.query("SELECT * FROM contacts WHERE kind = $1 ORDER BY name", [kind]);
+  return rows.map((c) => ({
+    id: c.id,
+    name: c.name,
+    planfix_id: c.planfix_id,
+    id_number: c.id_number,
+    phone: c.phone,
+    missing: missingFields(c),
+  }));
+}

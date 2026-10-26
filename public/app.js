@@ -701,39 +701,234 @@ async function approvalsView(params) {
   view.querySelectorAll("[data-reject]").forEach((b) => (b.onclick = () => decide(b.dataset.reject, "rejected")));
 }
 
+// ---------- client, owner and supplier cards ----------
+
+const KIND_LABEL = { client: "לקוח", owner: "בעל דירה", supplier: "ספק" };
+const yesNo = (v) => (v === true ? "כן" : v === false ? "לא" : "—");
+const cardPill = (missing) => (missing.length ? pill(["לא מלא", "warn"]) : pill(["מלא", "good"]));
+
+// The fields of each kind, in form order: [key, column, label, type, required].
+function contactFields(kind) {
+  const f = [
+    ["name", "name", "שם", "text", true],
+    ...(kind !== "owner" ? [["isCompany", "is_company", "סוג", "company", false]] : []),
+    ["idNumber", "id_number", kind === "client" ? "ח.פ / ת.ז" : "ת.ז / ח.פ", "text", true],
+    ["phone", "phone", "טלפון", "tel", false],
+    ["email", "email", "דוא״ל", "email", false],
+    ["address", "address", "כתובת", "text", false],
+  ];
+  if (kind === "client") {
+    f.push(
+      ["vatOnRent", "vat_on_rent", "מע״מ על שכירות", "bool", true],
+      ["withholdingTax", "withholding_tax", "ניכוי מס במקור", "bool", true],
+      ["withholdingRate", "withholding_rate", "שיעור ניכוי במקור (%)", "number", false],
+      ["ledgerCard", "ledger_card", "מספר כרטיס", "text", true],
+    );
+  }
+  if (kind === "owner") {
+    f.push(
+      ["licensedDealer", "licensed_dealer", "עוסק מורשה", "bool", true],
+      ["withholdingCertUntil", "withholding_cert_until", "אישור ניכוי במקור בתוקף עד", "date", true],
+      ["ledgerCard", "ledger_card", "מספר כרטיס", "text", true],
+    );
+  }
+  if (kind === "supplier") {
+    f.push(
+      ["supplierType", "supplier_type", "סוג ספק", "text", true],
+      ["serviceAreas", "service_areas", "תחומי שירות", "text", true],
+      ["regions", "regions", "אזורים", "text", false],
+      ["withholdingCertUntil", "withholding_cert_until", "אישור ניכוי במקור בתוקף עד", "date", true],
+      ["paymentTerms", "payment_terms", "תנאי תשלום", "text", true],
+    );
+  }
+  if (kind !== "client" && allowed("bank.view")) {
+    f.push(
+      ["bankName", "bank_name", "בנק", "text", true],
+      ["bankBranch", "bank_branch", "סניף", "text", true],
+      ["bankAccount", "bank_account", "מספר חשבון", "text", true],
+    );
+  }
+  f.push(["notes", "notes", "הערות", "textarea", false]);
+  return f;
+}
+
+function contactDialog(kind, c, onSaved) {
+  const input = ([key, col, label, type, required]) => {
+    const v = c?.[col];
+    const mark = required ? " *" : "";
+    if (type === "bool") {
+      return `<label>${esc(label + mark)}<select name="${key}"><option value="">—</option>
+        <option value="true" ${v === true ? "selected" : ""}>כן</option><option value="false" ${v === false ? "selected" : ""}>לא</option></select></label>`;
+    }
+    if (type === "company") {
+      return `<label>${esc(label)}<select name="${key}"><option value="true" ${v !== false ? "selected" : ""}>תאגיד</option>
+        <option value="false" ${v === false ? "selected" : ""}>פרטי</option></select></label>`;
+    }
+    if (type === "textarea") return `<label class="full">${esc(label)}<textarea name="${key}" rows="2">${esc(v ?? "")}</textarea></label>`;
+    const attrs = `type="${type}" value="${esc(v ?? "")}" ${key === "name" ? "required" : ""} ${type === "number" ? 'step="0.01" min="0" max="100"' : ""}`;
+    return `<label>${esc(label + mark)}<input name="${key}" ${attrs}></label>`;
+  };
+  const fields = contactFields(kind);
+  dialog(
+    c ? `עריכת פרטי ${KIND_LABEL[kind]}` : `${KIND_LABEL[kind]} חדש`,
+    fields.map(input).join("") + `<p class="full"><small>* נדרש כדי שהכרטיס יהיה מלא. אפשר לשמור גם בלי, והכרטיס יסומן "לא מלא".</small></p>`,
+    async (v) => {
+      const body = {};
+      for (const [key, , , type] of fields) {
+        const raw = v[key];
+        if (raw === undefined) continue;
+        if (type === "bool" || type === "company") body[key] = raw === "" ? null : raw === "true";
+        else if (type === "number") body[key] = raw === "" ? null : Number(raw);
+        else body[key] = raw.trim() === "" ? null : raw.trim();
+      }
+      if (c) {
+        // Bank details come masked for roles without bank access; never send the mask back.
+        for (const k of ["bankName", "bankBranch", "bankAccount"]) if (body[k] === "•••") delete body[k];
+        await api("POST", `/contacts/${c.id}`, body);
+        toast("הפרטים נשמרו");
+        onSaved?.(c.id);
+      } else {
+        const { id } = await api("POST", "/contacts", { kind, ...body });
+        toast("הכרטיס נפתח");
+        onSaved?.(id);
+      }
+    },
+    c ? "שמירה" : "פתיחת כרטיס",
+  );
+}
+
+// Details, missing fields and contact people, on the client, owner and supplier cards.
+function contactSection(c) {
+  const shown = contactFields(c.kind).filter(([key]) => key !== "name" && key !== "notes");
+  const value = ([, col, , type]) =>
+    type === "bool" ? yesNo(c[col]) : type === "company" ? (c[col] ? "תאגיד" : "פרטי") : type === "date" ? date(c[col]) || "—" : esc(c[col] ?? "—");
+  const edit = allowed("contacts.manage");
+  return `
+    ${c.missing.length ? `<div class="missing"><b>כרטיס לא מלא. חסר:</b> ${esc(c.missing.join(" · "))}</div>` : ""}
+    <div class="head" style="align-items:center"><h2 style="margin:16px 0 0">פרטים</h2>
+      ${edit ? `<button class="btn" id="edit-contact">עריכת פרטים</button>` : ""}</div>
+    <div class="facts">${shown.map((f) => `<div><span>${esc(f[2])}</span><b>${value(f)}</b></div>`).join("")}</div>
+    ${c.notes ? `<p>${esc(c.notes)}</p>` : ""}
+    <h2>אנשי קשר</h2>
+    ${
+      c.people.length
+        ? `<div class="wrap"><table class="table"><thead><tr><th>שם</th><th>תפקיד</th><th>טלפון</th><th>דוא״ל</th>${edit ? "<th></th>" : ""}</tr></thead><tbody>${c.people
+            .map(
+              (p) => `<tr><td>${esc(p.name)}</td><td>${esc(p.role || "")}</td>
+              <td>${p.phone ? `<a href="tel:${esc(p.phone)}">${esc(p.phone)}</a>` : ""}</td>
+              <td>${p.email ? `<a href="mailto:${esc(p.email)}">${esc(p.email)}</a>` : ""}</td>
+              ${edit ? `<td><button class="btn" data-remove-person="${p.id}">הסרה</button></td>` : ""}</tr>`,
+            )
+            .join("")}</tbody></table></div>`
+        : `<div class="empty">אין אנשי קשר</div>`
+    }
+    ${edit ? `<p><button class="btn" id="add-person">הוספת איש קשר</button></p>` : ""}`;
+}
+
+function wireContact(c) {
+  view.querySelector("#edit-contact")?.addEventListener("click", () => contactDialog(c.kind, c, () => route()));
+  view.querySelector("#add-person")?.addEventListener("click", () =>
+    dialog(
+      "איש קשר חדש",
+      field("name", "שם", "required") + field("role", "תפקיד") + field("phone", "טלפון", 'type="tel"') + field("email", "דוא״ל", 'type="email"'),
+      async (v) => {
+        await api("POST", `/contacts/${c.id}/people`, {
+          name: v.name,
+          role: v.role || null,
+          phone: v.phone || null,
+          email: v.email || null,
+        });
+        toast("איש הקשר נוסף");
+        route();
+      },
+      "הוספה",
+    ),
+  );
+  view.querySelectorAll("[data-remove-person]").forEach((b) => {
+    b.onclick = async () => {
+      try {
+        await api("POST", `/contacts/${c.id}/people/${b.dataset.removePerson}/remove`);
+        toast("איש הקשר הוסר");
+      } catch (err) {
+        toast(err.message);
+      }
+      route();
+    };
+  });
+}
+
+async function ownersView() {
+  const rows = await api("GET", "/owners");
+  view.innerHTML = `
+    <div class="head"><div><h1>בעלי דירות</h1><p class="sub">בעלי הדירות שמגלארד שוכרת מהם, ומה חסר בכרטיס של כל אחד.</p></div>
+    ${allowed("contacts.manage") ? `<button class="btn primary" id="add">בעל דירה חדש</button>` : ""}</div>
+    ${
+      rows.length
+        ? `<div class="wrap"><table class="table"><thead><tr><th>שם</th><th>ת.ז / ח.פ</th><th>טלפון</th><th>דירות</th><th>כרטיס</th></tr></thead><tbody>${rows
+            .map(
+              (o) => `<tr class="click" data-href="#/owners/${o.id}" tabindex="0"><td>${esc(o.name)}</td><td>${esc(o.id_number || "")}</td>
+              <td>${esc(o.phone || "")}</td><td>${o.properties}</td><td>${cardPill(o.missing)}</td></tr>`,
+            )
+            .join("")}</tbody></table></div>`
+        : `<div class="empty">אין בעלי דירות עדיין</div>`
+    }`;
+  view.querySelector("#add")?.addEventListener("click", () => contactDialog("owner", null, (id) => (location.hash = `#/owners/${id}`)));
+  clickableRows();
+}
+
+async function ownerView(id) {
+  const [c, { properties }] = await Promise.all([api("GET", `/contacts/${id}`), api("GET", `/owners/${id}`)]);
+  view.innerHTML = `
+    <p><a href="#/owners">→ כל בעלי הדירות</a></p>
+    <h1>${esc(c.name)}</h1>
+    <p class="sub">בעל דירה · ${cardPill(c.missing)}${c.planfix_id ? ` · איש קשר ${c.planfix_id} ב-Planfix` : ""}</p>
+    ${contactSection(c)}
+    <h2>דירות</h2>
+    ${
+      properties.length
+        ? `<ul>${properties.map((p) => `<li><a href="#/properties/${p.id}">${esc(p.address)}</a> · דירה ${p.base_number}${p.client_name ? ` · ${esc(p.client_name)}` : ""}</li>`).join("")}</ul>`
+        : `<div class="empty">אין דירות</div>`
+    }`;
+  wireContact(c);
+}
+
 async function suppliersView() {
   const rows = await api("GET", "/suppliers");
   view.innerHTML = `
-    <div class="head"><div><h1>ספקים</h1><p class="sub">ספקים וטכנאים, ועבודות פתוחות אצל כל אחד.</p></div></div>
+    <div class="head"><div><h1>ספקים</h1><p class="sub">ספקים וטכנאים, ועבודות פתוחות אצל כל אחד.</p></div>
+    ${allowed("contacts.manage") ? `<button class="btn primary" id="add">ספק חדש</button>` : ""}</div>
     ${
       rows.length
-        ? `<div class="wrap"><table class="table"><thead><tr><th>ספק</th><th>עבודות פתוחות</th><th>עבודות שנסגרו</th><th>עבודה אחרונה</th></tr></thead><tbody>${rows
+        ? `<div class="wrap"><table class="table"><thead><tr><th>ספק</th><th>עבודות פתוחות</th><th>עבודות שנסגרו</th><th>עבודה אחרונה</th><th>כרטיס</th></tr></thead><tbody>${rows
             .map(
               (s) => `<tr class="click" data-href="#/suppliers/${s.id}" tabindex="0"><td>${esc(s.name)}</td><td>${s.open_jobs}</td>
-              <td>${s.closed_jobs}</td><td>${s.last_job ? date(s.last_job) : "—"}</td></tr>`,
+              <td>${s.closed_jobs}</td><td>${s.last_job ? date(s.last_job) : "—"}</td><td>${cardPill(s.missing)}</td></tr>`,
             )
             .join("")}</tbody></table></div>`
         : `<div class="empty">עדיין אין ספקים</div>`
     }`;
+  view.querySelector("#add")?.addEventListener("click", () => contactDialog("supplier", null, (id) => (location.hash = `#/suppliers/${id}`)));
   clickableRows();
 }
 
 async function supplierView(id) {
-  const s = await api("GET", `/suppliers/${id}`);
+  const [s, c] = await Promise.all([api("GET", `/suppliers/${id}`), api("GET", `/contacts/${id}`)]);
   view.innerHTML = `
     <p><a href="#/suppliers">→ כל הספקים</a></p>
     <h1>${esc(s.name)}</h1>
-    <p class="sub">ספק${s.planfix_id ? ` · איש קשר ${s.planfix_id} ב-Planfix` : ""}</p>
+    <p class="sub">ספק · ${cardPill(c.missing)}${s.planfix_id ? ` · איש קשר ${s.planfix_id} ב-Planfix` : ""}</p>
     <div class="facts">
       <div><span>עבודות פתוחות</span><b>${s.open_jobs}</b></div>
       <div><span>עבודות שנסגרו</span><b>${s.closed_jobs}</b></div>
       <div><span>זמן ממוצע עד סגירה</span><b>${s.avg_days_to_close == null ? "—" : `${s.avg_days_to_close} ימים`}</b></div>
       <div><span>דירות שעבד בהן</span><b>${s.properties.length}</b></div>
     </div>
+    ${contactSection(c)}
     <h2>קריאות שירות</h2>${requestsTable(s.requests)}
     ${invoicesTable(s.invoices)}
     <h2>דירות</h2>
     ${s.properties.length ? `<ul>${s.properties.map((p) => `<li><a href="#/properties/${p.id}">${esc(p.address)}</a> · ${p.jobs} קריאות</li>`).join("")}</ul>` : `<div class="empty">עדיין לא</div>`}`;
+  wireContact(c);
 }
 
 async function notificationsView() {
@@ -989,35 +1184,38 @@ function missingFor(e) {
 async function clientsView() {
   const rows = await api("GET", "/clients");
   view.innerHTML = `
-    <h1>לקוחות</h1><p class="sub">התאגידים שמגלארד מנהלת עבורם דירות.</p>
+    <div class="head"><div><h1>לקוחות</h1><p class="sub">התאגידים שמגלארד מנהלת עבורם דירות.</p></div>
+    ${allowed("contacts.manage") ? `<button class="btn primary" id="add">קליטת לקוח</button>` : ""}</div>
     ${
       rows.length
-        ? `<div class="wrap"><table class="table"><thead><tr><th>לקוח</th><th>דירות בתוקף</th><th>כל הדירות</th><th>קריאות פתוחות</th></tr></thead><tbody>${rows
+        ? `<div class="wrap"><table class="table"><thead><tr><th>לקוח</th><th>דירות בתוקף</th><th>כל הדירות</th><th>קריאות פתוחות</th><th>כרטיס</th></tr></thead><tbody>${rows
             .map(
               (c) => `<tr class="click" data-href="#/clients/${c.id}" tabindex="0"><td>${esc(c.name)}</td><td>${c.active_apartments}</td>
-              <td>${c.apartments}</td><td>${c.open_requests || ""}</td></tr>`,
+              <td>${c.apartments}</td><td>${c.open_requests || ""}</td><td>${cardPill(c.missing)}</td></tr>`,
             )
             .join("")}</tbody></table></div>`
         : `<div class="empty">אין לקוחות עדיין</div>`
     }`;
+  view.querySelector("#add")?.addEventListener("click", () => contactDialog("client", null, (id) => (location.hash = `#/clients/${id}`)));
   clickableRows();
 }
 
 async function clientView(id) {
-  const c = await api("GET", `/clients/${id}`);
+  const [c, details] = await Promise.all([api("GET", `/clients/${id}`), api("GET", `/contacts/${id}`)]);
   const active = c.engagements.filter((e) => e.active);
   const openReqs = c.requests.filter((r) => r.status !== "closed");
   const gaps = active.flatMap((e) => missingFor(e).map((g) => `${e.apartment_code}: ${g}`));
   view.innerHTML = `
     <p><a href="#/clients">→ כל הלקוחות</a></p>
-    <div class="head"><div><h1>${esc(c.name)}</h1><p class="sub">לקוח${c.planfix_id ? ` · איש קשר ${c.planfix_id} ב-Planfix` : ""}</p></div>
+    <div class="head"><div><h1>${esc(c.name)}</h1><p class="sub">לקוח · ${cardPill(details.missing)}${c.planfix_id ? ` · איש קשר ${c.planfix_id} ב-Planfix` : ""}</p></div>
     ${allowed("requests.manage") && active.length ? `<button class="btn primary" id="new-req">פתיחת קריאת שירות</button>` : ""}</div>
-    ${gaps.length ? `<div class="missing"><b>מה חסר:</b> ${esc(gaps.join(" · "))}</div>` : ""}
+    ${gaps.length ? `<div class="missing"><b>מה חסר בדירות:</b> ${esc(gaps.join(" · "))}</div>` : ""}
     <div class="facts">
       <div><span>דירות בתוקף</span><b>${active.length}</b></div>
       <div><span>קריאות פתוחות</span><b>${openReqs.length}</b></div>
       ${allowed("amounts.view") ? `<div><span>שכ״ד חודשי בדירות בתוקף</span><b>${money(active.reduce((t, e) => t + Number(e.monthly_rent || 0), 0))}</b></div>` : ""}
     </div>
+    ${contactSection(details)}
     <h2>דירות</h2>
     ${
       c.engagements.length
@@ -1037,6 +1235,7 @@ async function clientView(id) {
   view.querySelector("#new-req")?.addEventListener("click", () =>
     newRequestDialog(active.length === 1 ? active[0].id : undefined),
   );
+  wireContact(details);
 }
 
 async function propertyView(id) {
@@ -1094,6 +1293,7 @@ const HIT_LINK = {
   request: (id) => `#/requests/${id}`,
   invoice: () => "#/invoices",
   supplier: (id) => `#/suppliers/${id}`,
+  owner: (id) => `#/owners/${id}`,
 };
 
 function wireSearch() {
@@ -1305,6 +1505,8 @@ async function route() {
     else if (section === "requests") await requestsView();
     else if (section === "invoices") await invoicesView();
     else if (section === "suppliers" && id) await supplierView(id);
+    else if (section === "owners" && id) await ownerView(id);
+    else if (section === "owners") await ownersView();
     else if (section === "suppliers") await suppliersView();
     else if (section === "approvals") await approvalsView(params);
     else if (section === "notifications") await notificationsView();

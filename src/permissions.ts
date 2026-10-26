@@ -25,6 +25,10 @@ export const PERMISSIONS = {
   "requests.manage": ["admin", "management", "dept_manager", "operations", "property_manager"],
   // Approve a service request whose estimated cost is above the threshold.
   "approvals.decide": ["admin", "management", "dept_manager"],
+  // Open and edit client, owner and supplier cards (spec process 1).
+  "contacts.manage": ["admin", "management", "dept_manager", "finance", "property_manager"],
+  // Bank details on owner and supplier cards.
+  "bank.view": ["admin", "management", "finance"],
   "invoices.view": ["admin", "management", "dept_manager", "finance"],
   "invoices.create": ["admin", "management", "finance", "operations"],
   "tasks.use": ALL,

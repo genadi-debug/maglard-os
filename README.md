@@ -33,7 +33,12 @@ sees only the screens and buttons their role allows. The screens are:
 - **Tasks:** tasks of my own, overdue, urgent, all and done. A task can be linked to an apartment or a service request, and it has an assignee, a due date and a notes thread. Each status change or handover writes a note. A user sees only tasks assigned to or created by them, unless they are a manager.
 - **Search** (top of every screen, Ctrl+K): clients, owners, suppliers, addresses, base numbers, apartment codes, service requests and invoice numbers.
 - **Apartments:** the apartment list, each with its Planfix sync state, and an intake form. Each address opens the property card: owner, client, contract period, what is missing, service requests, invoices and suppliers who worked there.
-- **Clients:** the client list, and a client card with its apartments (active and past), open requests, invoices and what is missing.
+- **Clients, owners and suppliers:** lists, a "new" form for each (spec process 1), and cards with the details finance needs, contact people, and an edit button. A card misses fields until each required field of its kind is filled in: the ID or company number (with check digit), and also:
+  - client: VAT on rent, withholding tax and its rate, ledger card number
+  - owner: licensed dealer, withholding certificate expiry, bank details, ledger card number
+  - supplier: type, service areas, withholding certificate expiry, bank details, payment terms
+
+  Bank details are shown and changed only by admin, management and finance. The client card also lists its apartments (active and past), open requests and invoices.
 - **Service requests:** a list, and a detail page with one next-action button, photos and documents, and the request's history. Each request has a fault type and an urgency; emergencies come first and notify the managers.
 - **Approvals** (admin, management, department manager): service requests whose estimated cost is above the approval threshold. The supplier starts only after a manager approves, and nobody approves their own request.
 - **Suppliers:** each supplier's open and closed jobs, average days to close, the apartments they worked in, and their invoices (for roles that see invoices).
@@ -215,6 +220,9 @@ not imported yet.
   approval stay in MAGLARD OS until the "חריג" fields (10154–10160) are
   verified on a template.
 - Notifications are in the app only: no email or WhatsApp yet.
+- Only a contact's name goes to Planfix. Its other details (ID, bank, tax
+  fields, contact people) stay in MAGLARD OS until the Planfix contact
+  fields are verified.
 - While a record is being created in Planfix, its row stays locked. Staff
   edits to that same record wait for the Planfix call to finish, which takes
   up to a few seconds.

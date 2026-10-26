@@ -1,5 +1,6 @@
 import type { Db } from "../db/pool.js";
 import { NotFoundError } from "./common.js";
+import { missingFields } from "./contacts.js";
 
 // Read models for the client card, the property card and global search.
 // Amounts are returned as stored; the API strips them for roles that may not
@@ -9,7 +10,7 @@ const ACTIVE = "e.starts_on <= current_date AND e.ends_on >= current_date";
 
 export async function listClients(db: Db) {
   const { rows } = await db.query(
-    `SELECT c.id, c.name, c.planfix_id,
+    `SELECT c.*,
             count(DISTINCT e.id) FILTER (WHERE ${ACTIVE})::int AS active_apartments,
             count(DISTINCT e.id)::int AS apartments,
             count(DISTINCT r.id) FILTER (WHERE r.status <> 'closed')::int AS open_requests
@@ -20,7 +21,15 @@ export async function listClients(db: Db) {
       GROUP BY c.id
       ORDER BY c.name`,
   );
-  return rows;
+  return rows.map((c) => ({
+    id: c.id,
+    name: c.name,
+    planfix_id: c.planfix_id,
+    active_apartments: c.active_apartments,
+    apartments: c.apartments,
+    open_requests: c.open_requests,
+    missing: missingFields(c),
+  }));
 }
 
 const ENGAGEMENTS = `
@@ -88,7 +97,7 @@ export async function propertyCard(db: Db, id: string) {
 
 export async function listSuppliers(db: Db) {
   const { rows } = await db.query(
-    `SELECT c.id, c.name, c.planfix_id,
+    `SELECT c.*,
             count(r.id) FILTER (WHERE r.status <> 'closed')::int AS open_jobs,
             count(r.id) FILTER (WHERE r.status = 'closed')::int AS closed_jobs,
             max(r.created_at) AS last_job
@@ -96,7 +105,15 @@ export async function listSuppliers(db: Db) {
       WHERE c.kind = 'supplier'
       GROUP BY c.id ORDER BY c.name`,
   );
-  return rows;
+  return rows.map((c) => ({
+    id: c.id,
+    name: c.name,
+    planfix_id: c.planfix_id,
+    open_jobs: c.open_jobs,
+    closed_jobs: c.closed_jobs,
+    last_job: c.last_job,
+    missing: missingFields(c),
+  }));
 }
 
 // The supplier card: their jobs, the apartments they worked in, how long a job
@@ -150,12 +167,12 @@ export async function search(db: Db, q: string, opts: { invoices: boolean }): Pr
          FROM contacts WHERE kind <> 'owner' AND name ILIKE $1 ORDER BY name LIMIT 8`,
       [like],
     ),
-    // Owners have no card of their own: a hit opens their apartment.
     db.query(
-      `SELECT 'property' AS type, p.id::text, o.name AS title, 'בעל דירה · ' || p.address AS detail
-         FROM contacts o JOIN properties p ON p.owner_id = o.id
-        WHERE o.kind = 'owner' AND o.name ILIKE $1 ORDER BY o.name LIMIT 8`,
-      [like],
+      `SELECT 'owner' AS type, o.id::text, o.name AS title,
+              'בעל דירה' || coalesce(' · ' || (SELECT p.address FROM properties p WHERE p.owner_id = o.id LIMIT 1), '') AS detail
+         FROM contacts o
+        WHERE o.kind = 'owner' AND (o.name ILIKE $1 OR o.id_number LIKE $2) ORDER BY o.name LIMIT 8`,
+      [like, `${term.replace(/[\\%_]/g, "")}%`],
     ),
     db.query(
       `SELECT 'property' AS type, p.id::text, p.address AS title,
