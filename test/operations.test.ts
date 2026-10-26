@@ -125,7 +125,7 @@ describe.skipIf(!url)("operations: urgency, cost approval, files, notifications,
     expect((await call("dana", "POST", "/settings", { approvalThreshold: 99999 })).statusCode).toBe(403);
     expect((await call("admin", "POST", "/settings", { approvalThreshold: "lots" })).statusCode).toBe(400);
     expect((await call("admin", "POST", "/settings", { approvalThreshold: 3000 })).statusCode).toBe(200);
-    expect((await call("dana", "GET", "/settings")).json()).toEqual({ approvalThreshold: 3000 });
+    expect((await call("dana", "GET", "/settings")).json()).toEqual({ approvalThreshold: 3000, vatRate: 18 });
     const id = await open("dana");
     const res = await call("dana", "POST", `/service-requests/${id}/assign`, { supplier: { name: "אינסטלטור MOS-TEST" }, chargeTo: "owner", estimatedCost: 2400 });
     expect(res.json().status).toBe("with_supplier");

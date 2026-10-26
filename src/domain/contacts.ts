@@ -12,7 +12,7 @@ export type Kind = "client" | "owner" | "supplier";
 // Required fields by kind, from the finance spec (process 1, required fields).
 // A field missing here is optional for that kind.
 const REQUIRED: Record<Kind, string[]> = {
-  client: ["id_number", "vat_on_rent", "withholding_tax", "ledger_card"],
+  client: ["id_number", "vat_on_rent", "vat_on_expenses", "withholding_tax", "ledger_card"],
   owner: ["id_number", "licensed_dealer", "withholding_cert_until", "bank", "ledger_card"],
   supplier: ["id_number", "supplier_type", "service_areas", "withholding_cert_until", "bank", "payment_terms"],
 };
@@ -20,6 +20,7 @@ const REQUIRED: Record<Kind, string[]> = {
 export const FIELD_LABEL: Record<string, string> = {
   id_number: "ת.ז / ח.פ",
   vat_on_rent: "מע״מ על שכירות",
+  vat_on_expenses: "מע״מ על הוצאות",
   withholding_tax: "ניכוי מס במקור",
   withholding_rate: "שיעור ניכוי במקור",
   ledger_card: "מספר כרטיס",
@@ -74,6 +75,7 @@ export const contactInput = z
     address: text,
     ledgerCard: text,
     vatOnRent: z.boolean().nullable().optional(),
+    vatOnExpenses: z.boolean().nullable().optional(),
     withholdingTax: z.boolean().nullable().optional(),
     withholdingRate: z.number().min(0).max(100).nullable().optional(),
     licensedDealer: z.boolean().nullable().optional(),
@@ -110,6 +112,7 @@ const COLUMN: Record<string, string> = {
   address: "address",
   ledgerCard: "ledger_card",
   vatOnRent: "vat_on_rent",
+  vatOnExpenses: "vat_on_expenses",
   withholdingTax: "withholding_tax",
   withholdingRate: "withholding_rate",
   licensedDealer: "licensed_dealer",

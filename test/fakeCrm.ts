@@ -1,5 +1,6 @@
 import type {
   CrmAdapter,
+  ExpenseType,
   ImportedBilling,
   ImportedEngagement,
   ImportedProperty,
@@ -27,6 +28,7 @@ export class FakeCrm implements CrmAdapter {
   createEngagement = (i: any) => this.record("createEngagement", i);
   createSupplierInvoice = (i: any) => this.record("createSupplierInvoice", i);
   createServiceRequest = (i: any) => this.record("createServiceRequest", i);
+  createCharge = (i: any) => this.record("createCharge", i);
   // Planfix auto-created intake tasks, by property task id.
   autoEngagements = new Map<number, number[]>();
   findEngagementTasks = async (propertyTaskId: number) => this.autoEngagements.get(propertyTaskId) ?? [];
@@ -50,5 +52,7 @@ export class FakeCrm implements CrmAdapter {
   readSupplierInvoices = async () => this.supplierInvoices;
   billing: ImportedBilling = { contracts: [], charges: [], bills: [] };
   readBilling = async () => this.billing;
+  expenseTypes: ExpenseType[] = [];
+  readExpenseTypes = async () => this.expenseTypes;
   count = (m: string) => this.calls.filter((c) => c.method === m).length;
 }

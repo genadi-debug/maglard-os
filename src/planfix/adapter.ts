@@ -1,5 +1,5 @@
 import { PlanfixClient } from "./client.js";
-import { CONTACT_TEMPLATE, FIELD, SERVICE_REQUEST_STATUS, TEMPLATE, type ContactKind } from "./fields.js";
+import { CONTACT_TEMPLATE, EXPENSE_TYPES, FIELD, SERVICE_REQUEST_STATUS, TEMPLATE, type ContactKind } from "./fields.js";
 
 // What the rest of MAGLARD OS needs from the CRM. Planfix is the only
 // implementation today; keeping the interface narrow lets us swap or fake it.
@@ -24,6 +24,30 @@ export interface CrmAdapter {
   readSupplierInvoices(): Promise<ImportedSupplierInvoice[]>;
   // The client's contracts, charges and accumulated bills, as Planfix computes them.
   readBilling(): Promise<ImportedBilling>;
+  readExpenseTypes(): Promise<ExpenseType[]>;
+  createCharge(input: ChargePush): Promise<number>;
+}
+
+// An entry of Planfix's expense-type directory: a charge type and whether it carries VAT.
+export interface ExpenseType {
+  key: number;
+  name: string;
+  vatable: boolean;
+}
+
+export interface ChargePush {
+  name: string;
+  ref: string;
+  clientPlanfixId: number;
+  engagementTaskId: number;
+  contractTaskId: number | null;
+  chargeType: string;
+  expenseTypeKey: number | null;
+  periodFrom: string;
+  periodTo: string;
+  amountTotal: number;
+  // Left out when the charge type is not in the expense-type directory.
+  split: { net: number; vat: number } | null;
 }
 
 type TaskRef = { planfixTaskId: number; name: string };
@@ -470,6 +494,42 @@ export class PlanfixAdapter implements CrmAdapter {
         chargeTaskIds: readTaskIds(fieldOf(t, b.charges)),
       })),
     };
+  }
+
+  async readExpenseTypes(): Promise<ExpenseType[]> {
+    const e = EXPENSE_TYPES;
+    const res = await this.client.request<{
+      directoryEntries: { key: number; customFieldData?: { field: { id: number }; value: unknown }[] }[];
+    }>("POST", `directory/${e.directory}/entry/list`, {
+      offset: 0,
+      pageSize: 100,
+      fields: ["key", e.name, e.vatable].join(","),
+    });
+    return res.directoryEntries.flatMap((d) => {
+      const value = (id: number) => d.customFieldData?.find((c) => c.field.id === id)?.value;
+      const name = readText(value(e.name));
+      return name ? [{ key: d.key, name, vatable: value(e.vatable) === true }] : [];
+    });
+  }
+
+  // Verified on maglardsand task 348: Planfix takes these fields and computes
+  // the balance; it does not fill net and VAT by itself.
+  createCharge(c: ChargePush): Promise<number> {
+    const f = FIELD.charge;
+    const data: FieldValue[] = [
+      { field: { id: f.client }, value: contact(c.clientPlanfixId) },
+      { field: { id: f.engagement }, value: task(c.engagementTaskId) },
+      { field: { id: f.chargeType }, value: c.chargeType },
+      { field: { id: f.periodFrom }, value: pfDate(c.periodFrom) },
+      { field: { id: f.periodTo }, value: pfDate(c.periodTo) },
+      { field: { id: f.amountTotal }, value: c.amountTotal },
+    ];
+    if (c.contractTaskId) data.push({ field: { id: f.contract }, value: task(c.contractTaskId) });
+    if (c.expenseTypeKey != null) data.push({ field: { id: f.vatType }, value: { id: c.expenseTypeKey } });
+    if (c.split) {
+      data.push({ field: { id: f.amountNet }, value: c.split.net }, { field: { id: f.amountVat }, value: c.split.vat });
+    }
+    return this.createTask({ name: c.name, description: describe(c.ref), template: { id: TEMPLATE.charge }, customFieldData: data });
   }
 
   // Filter type 51 = task template (verified read-only on maglardsand: 55 tasks
