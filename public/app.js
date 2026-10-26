@@ -345,11 +345,53 @@ async function invoicesView() {
     }`;
 }
 
+// Import of the apartments that already live in Planfix (admin). A dry run
+// first shows what would change; only the second button writes.
+function importCard() {
+  if (!allowed("import.run")) return "";
+  return `<div class="card" id="import"><div class="grow"><b>ייבוא דירות מ-Planfix</b><br>
+    <small>מביא בעלי דירות, לקוחות, דירות והתקשרויות שכבר קיימים ב-Planfix. הרצה חוזרת מעדכנת ולא יוצרת כפילויות. Planfix לא משתנה.</small>
+    <div id="import-result"></div></div>
+    <button class="btn" id="import-dry">בדיקה בלי לשמור</button></div>`;
+}
+
+function importReport(r) {
+  const line = (label, t) => `<li>${label}: ${t.created} חדשים, ${t.updated} עודכנו</li>`;
+  const skipped = r.skipped.length
+    ? `<p><b>${r.skipped.length} לא ${r.dryRun ? "ייובאו" : "יובאו"}:</b></p><ul>${r.skipped
+        .map((s) => `<li>משימה ${s.planfixTaskId} (${s.what === "property" ? "דירה" : "התקשרות"}): ${esc(s.reason)}</li>`)
+        .join("")}</ul>`
+    : "";
+  return `<p><b>${r.dryRun ? "בדיקה, שום דבר לא נשמר:" : "הייבוא הסתיים:"}</b></p><ul>
+    ${line("אנשי קשר", r.contacts)}${line("דירות", r.properties)}${line("התקשרויות", r.engagements)}</ul>${skipped}
+    ${r.dryRun ? `<button class="btn primary" id="import-run">ייבוא בפועל</button>` : ""}`;
+}
+
+function wireImport() {
+  const box = view.querySelector("#import-result");
+  if (!box) return;
+  const run = async (dryRun, btn) => {
+    btn.disabled = true;
+    box.innerHTML = "<p>קורא מ-Planfix…</p>";
+    try {
+      box.innerHTML = importReport(await api("POST", "/import/planfix", { dryRun }));
+      box.querySelector("#import-run")?.addEventListener("click", (e) => run(false, e.target));
+      if (!dryRun) toast("הייבוא הסתיים");
+    } catch (err) {
+      box.innerHTML = `<p class="err">${esc(err.message)}</p>`;
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  view.querySelector("#import-dry").onclick = (e) => run(true, e.target);
+}
+
 async function syncView() {
   const { jobs } = await api("GET", "/sync/status");
   const tone = { done: ["הושלם", "good"], pending: ["ממתין", "warn"], running: ["רץ", "warn"], failed: ["נכשל", "bad"] };
   view.innerHTML = `
     <h1>סנכרון Planfix</h1><p class="sub">כל פעולה נשמרת קודם כאן ונשלחת ל-Planfix ברקע. פעולה שנכשלה אפשר לשלוח שוב.</p>
+    ${importCard()}
     ${
       jobs.length
         ? `<div class="wrap"><table class="table"><thead><tr><th>פעולה</th><th>מצב</th><th>ניסיונות</th><th>שגיאה</th><th>עודכן</th><th></th></tr></thead><tbody>${jobs
@@ -361,6 +403,7 @@ async function syncView() {
             .join("")}</tbody></table></div>`
         : `<div class="empty">עדיין לא נשלח דבר ל-Planfix</div>`
     }`;
+  wireImport();
   view.querySelectorAll("[data-retry]").forEach((b) => {
     b.onclick = async () => {
       b.disabled = true;
@@ -477,6 +520,7 @@ const AUDIT_ACTION = {
   "POST /sync/:id/retry": "שליחה חוזרת ל-Planfix",
   "POST /users": "יצירת משתמש",
   "POST /users/:id": "עדכון משתמש",
+  "POST /import/planfix": "ייבוא מ-Planfix",
 };
 
 async function auditView() {

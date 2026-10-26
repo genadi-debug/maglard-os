@@ -10,6 +10,8 @@ import { intakeInput, supplierInvoiceInput } from "../domain/schemas.js";
 import * as q from "../domain/queries.js";
 import * as sr from "../domain/serviceRequests.js";
 import { createIntake, createSupplierInvoice, NotFoundError } from "../domain/services.js";
+import type { CrmAdapter } from "../planfix/adapter.js";
+import { importFromCrm } from "../sync/importer.js";
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "public");
 const assets: Record<string, string> = {
@@ -45,6 +47,7 @@ const ROUTES: Record<string, Permission | null> = {
   "POST /users": "users.manage",
   "POST /users/:id": "users.manage",
   "GET /audit": "audit.view",
+  "POST /import/planfix": "import.run",
 };
 
 // Used when auth is switched off (tests of the screens and flows).
@@ -57,7 +60,10 @@ declare module "fastify" {
   }
 }
 
-export function buildServer(db: Db, opts: { requireAuth?: boolean; secureCookie?: boolean } = {}) {
+export function buildServer(
+  db: Db,
+  opts: { requireAuth?: boolean; secureCookie?: boolean; crm?: CrmAdapter } = {},
+) {
   const app = Fastify({ logger: false });
   const requireAuth = opts.requireAuth ?? true;
   const cookie = (value: string, maxAge: number) =>
@@ -228,6 +234,14 @@ export function buildServer(db: Db, opts: { requireAuth?: boolean; secureCookie?
     const found = await auth.updateUser(db, req.params.id, { role, active, password });
     if (!found) return reply.status(404).send({ error: "user not found" });
     return { ok: true };
+  });
+
+  // Import of existing apartments from Planfix. A dry run reports what would
+  // change and writes nothing.
+  app.post("/import/planfix", async (req, reply) => {
+    if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
+    const { dryRun } = (req.body ?? {}) as { dryRun?: boolean };
+    return importFromCrm(db, opts.crm, { dryRun: dryRun !== false });
   });
 
   app.get<{ Querystring: { limit?: string } }>("/audit", async (req) => {
