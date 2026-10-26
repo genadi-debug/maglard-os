@@ -17,7 +17,7 @@ const STATUS = {
 };
 const CHARGE = { client: "הלקוח", owner: "בעל הדירה", maglard: "מגלארד" };
 const SYNC = { synced: ["סונכרן ל-Planfix", "good"], pending: ["ממתין לסנכרון", "warn"], failed: ["סנכרון נכשל", "bad"] };
-const JOB = { "engagement.push": "קליטת דירה", "supplier_invoice.push": "חשבונית ספק" };
+const JOB = { "engagement.push": "קליטת דירה", "supplier_invoice.push": "חשבונית ספק", "service_request.sync": "קריאת שירות" };
 
 const pill = ([text, tone]) => `<span class="pill ${tone}">${esc(text)}</span>`;
 
@@ -355,9 +355,15 @@ async function syncView() {
     }`;
   view.querySelectorAll("[data-retry]").forEach((b) => {
     b.onclick = async () => {
-      await api("POST", `/sync/${b.dataset.retry}/retry`);
-      toast("נשלח שוב לתור");
-      route();
+      b.disabled = true;
+      try {
+        await api("POST", `/sync/${b.dataset.retry}/retry`);
+        toast("נשלח שוב לתור");
+        route();
+      } catch (err) {
+        toast(err.message);
+        b.disabled = false;
+      }
     };
   });
 }

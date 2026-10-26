@@ -114,7 +114,7 @@ export function buildServer(db: Db, opts: { requireAuth?: boolean; secureCookie?
 
   app.get("/sync/status", async () => {
     const { rows } = await db.query(
-      `SELECT job_type, entity_id, status, attempts, last_error, updated_at
+      `SELECT id, job_type, entity_id, status, attempts, last_error, updated_at
          FROM outbox ORDER BY id DESC LIMIT 100`,
     );
     return { jobs: rows };
