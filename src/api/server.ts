@@ -17,6 +17,7 @@ import * as tasks from "../domain/tasks.js";
 import { createIntake, createSupplierInvoice, NotFoundError } from "../domain/services.js";
 import type { CrmAdapter } from "../planfix/adapter.js";
 import { importFromCrm } from "../sync/importer.js";
+import * as readback from "../sync/readback.js";
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "public");
 const assets: Record<string, string> = {
@@ -63,6 +64,9 @@ const ROUTES: Record<string, Permission | null> = {
   "POST /users/:id": "users.manage",
   "GET /audit": "audit.view",
   "POST /import/planfix": "import.run",
+  "GET /readback": "sync.view",
+  "POST /readback/run": "sync.retry",
+  "POST /readback/changes/:id": "sync.resolve",
   "GET /suppliers": "requests.view",
   "GET /suppliers/:id": "requests.view",
   "GET /approvals": "approvals.decide",
@@ -399,6 +403,18 @@ export function buildServer(
     if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
     const { dryRun } = (req.body ?? {}) as { dryRun?: boolean };
     return importFromCrm(db, opts.crm, { dryRun: dryRun !== false });
+  });
+
+  // Changes made directly in Planfix: what was applied, and what waits for a person.
+  app.get("/readback", async () => readback.readbackStatus(db));
+  app.post("/readback/run", async (_req, reply) => {
+    if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
+    return readback.runReadback(db, opts.crm);
+  });
+  app.post<IdParams>("/readback/changes/:id", async (req, reply) => {
+    const { choice } = (req.body ?? {}) as { choice?: string };
+    if (choice !== "remote" && choice !== "local") return reply.status(400).send({ error: "choice must be remote or local" });
+    return readback.resolveChange(db, req.user!.id, Number(req.params.id) || 0, choice);
   });
 
   app.get<{ Querystring: { limit?: string } }>("/audit", async (req) => {

@@ -32,6 +32,8 @@ export const PERMISSIONS = {
   "tasks.manage_all": ["admin", "management", "dept_manager"],
   "sync.view": ["admin", "management", "finance"],
   "sync.retry": ["admin", "management"],
+  // Settle a conflict between MAGLARD OS and a change made in Planfix.
+  "sync.resolve": ["admin", "management"],
   "users.manage": ["admin"],
   "settings.manage": ["admin"],
   "import.run": ["admin"],

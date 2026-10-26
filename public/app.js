@@ -35,7 +35,25 @@ const options = (entries, selected) =>
   entries.map(([k, label]) => `<option value="${k}" ${k === selected ? "selected" : ""}>${esc(label)}</option>`).join("");
 const CHARGE = { client: "הלקוח", owner: "בעל הדירה", maglard: "מגלארד" };
 const SYNC = { synced: ["סונכרן ל-Planfix", "good"], pending: ["ממתין לסנכרון", "warn"], failed: ["סנכרון נכשל", "bad"] };
-const JOB = { "engagement.push": "קליטת דירה", "supplier_invoice.push": "חשבונית ספק", "service_request.sync": "קריאת שירות" };
+const JOB = {
+  "engagement.push": "קליטת דירה",
+  "supplier_invoice.push": "חשבונית ספק",
+  "service_request.sync": "קריאת שירות",
+  "engagement.repush": "עדכון התקשרות",
+  "property.repush": "עדכון דירה",
+};
+const FIELD_LABEL = {
+  base_number: "מספר בסיס",
+  address: "כתובת",
+  owner: "בעל הדירה",
+  client: "לקוח",
+  apartment_code: "קוד דירה",
+  starts_on: "תחילת התקשרות",
+  ends_on: "סוף התקשרות",
+  move_in_on: "תאריך כניסה",
+  monthly_rent: "שכ״ד חודשי",
+  status: "סטטוס",
+};
 
 // The signed-in user, with the permissions the server grants their role. The
 // server enforces them; here they only decide what to show.
@@ -310,6 +328,7 @@ async function workCenterView() {
       ${kpi(c.my_urgent, "דחופות", "#/tasks?filter=urgent", c.my_urgent ? "bad" : "")}
       ${allowed("requests.view") && c.emergencies ? kpi(c.emergencies, "קריאות חירום פתוחות", "#/requests", "bad") : ""}
       ${allowed("approvals.decide") ? kpi(c.pending_approvals, "חריגות לאישורך", "#/approvals", c.pending_approvals ? "warn" : "") : ""}
+      ${allowed("sync.resolve") && c.planfix_conflicts ? kpi(c.planfix_conflicts, "התנגשויות מול Planfix", "#/sync", "warn") : ""}
       ${allowed("requests.view") ? kpi(c.awaiting_client, "ממתינות לאישור לקוח", "#/requests") : ""}
       ${allowed("requests.view") ? kpi(c.open_requests, "קריאות שירות פתוחות", "#/requests") : ""}
     </div>
@@ -801,12 +820,79 @@ function wireImport() {
   view.querySelector("#import-dry").onclick = (e) => run(true, e.target);
 }
 
+// Changes made directly in Planfix: the conflicts that wait for a person,
+// and what was applied on its own.
+function readbackSection(rb) {
+  const last = rb.lastRun;
+  const when = last ? new Date(last.finished_at).toLocaleString("he-IL") : "עדיין לא";
+  const resolver = allowed("sync.resolve");
+  return `<h2>שינויים שנעשו ב-Planfix</h2>
+    <div class="next"><div class="grow" style="flex:1">בדיקה אחרונה: ${esc(when)}${
+      last ? (last.ok ? ` · נבדקו ${last.checked} רשומות` : ` · ${pill(["נכשלה", "bad"])} ${esc(last.error || "")}`) : ""
+    }${last?.new_in_planfix ? ` · ${last.new_in_planfix} רשומות קיימות רק ב-Planfix (אפשר לייבא)` : ""}</div>
+      ${allowed("sync.retry") ? `<button class="btn" id="readback-run">לבדוק עכשיו</button>` : ""}</div>
+    ${
+      rb.open.length
+        ? rb.open
+            .map(
+              (c) => `<div class="card"><div class="grow"><b>${esc(c.entity_label || "")}</b> · ${esc(FIELD_LABEL[c.field] || c.field)}<br>
+              במערכת: <b>${esc(c.local_label)}</b> · ב-Planfix: <b>${esc(c.remote_label)}</b><br><small>${esc(c.note || "")}</small></div>
+              ${
+                resolver
+                  ? `<button class="btn primary" data-choice="remote" data-change="${c.id}">לקבל מ-Planfix</button>
+                     <button class="btn" data-choice="local" data-change="${c.id}">להשאיר ולעדכן את Planfix</button>`
+                  : ""
+              }</div>`,
+            )
+            .join("")
+        : `<div class="empty">אין התנגשויות שממתינות להחלטה</div>`
+    }
+    ${
+      rb.recent.length
+        ? `<details><summary>שינויים אחרונים (${rb.recent.length})</summary><div class="wrap"><table class="table"><thead><tr><th>רשומה</th><th>שדה</th><th>היה</th><th>עכשיו ב-Planfix</th><th>מה נעשה</th><th>מתי</th></tr></thead><tbody>${rb.recent
+            .map(
+              (c) => `<tr><td>${esc(c.entity_label || "")}</td><td>${esc(FIELD_LABEL[c.field] || c.field)}</td><td>${esc(c.local_label)}</td>
+              <td>${esc(c.remote_label)}</td><td>${esc(
+                { applied: "נקלט אוטומטית", took_remote: "התקבל מ-Planfix", kept_local: "נשאר ערך המערכת", settled: "הערכים התיישרו" }[c.status],
+              )}${c.resolved_by_name ? ` · ${esc(c.resolved_by_name)}` : ""}</td><td>${new Date(c.updated_at).toLocaleString("he-IL")}</td></tr>`,
+            )
+            .join("")}</tbody></table></div></details>`
+        : ""
+    }`;
+}
+
+function wireReadback() {
+  view.querySelector("#readback-run")?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      const r = await api("POST", "/readback/run");
+      toast(r.skipped ? "בדיקה אחרת כבר רצה" : `נבדק. נקלטו ${r.applied}, להחלטה ${r.conflicts}`);
+    } catch (err) {
+      toast(err.message);
+    }
+    route();
+  });
+  view.querySelectorAll("[data-change]").forEach((b) => {
+    b.onclick = async () => {
+      try {
+        await api("POST", `/readback/changes/${b.dataset.change}`, { choice: b.dataset.choice });
+        toast(b.dataset.choice === "remote" ? "הערך מ-Planfix נקלט" : "נשאר ערך המערכת, ו-Planfix יעודכן");
+      } catch (err) {
+        toast(err.message);
+      }
+      route();
+    };
+  });
+}
+
 async function syncView() {
-  const { jobs } = await api("GET", "/sync/status");
+  const [{ jobs }, rb] = await Promise.all([api("GET", "/sync/status"), api("GET", "/readback")]);
   const tone = { done: ["הושלם", "good"], pending: ["ממתין", "warn"], running: ["רץ", "warn"], failed: ["נכשל", "bad"] };
   view.innerHTML = `
     <h1>סנכרון Planfix</h1><p class="sub">כל פעולה נשמרת קודם כאן ונשלחת ל-Planfix ברקע. פעולה שנכשלה אפשר לשלוח שוב.</p>
+    ${readbackSection(rb)}
     ${importCard()}
+    <h2>שליחות ל-Planfix</h2>
     ${
       jobs.length
         ? `<div class="wrap"><table class="table"><thead><tr><th>פעולה</th><th>מצב</th><th>ניסיונות</th><th>שגיאה</th><th>עודכן</th><th></th></tr></thead><tbody>${jobs
@@ -819,6 +905,7 @@ async function syncView() {
         : `<div class="empty">עדיין לא נשלח דבר ל-Planfix</div>`
     }`;
   wireImport();
+  wireReadback();
   view.querySelectorAll("[data-retry]").forEach((b) => {
     b.onclick = async () => {
       b.disabled = true;
@@ -1188,7 +1275,7 @@ async function refreshCounts() {
     document.getElementById("cnt-work").textContent = counts.my_urgent || "";
     document.getElementById("cnt-tasks").textContent = counts.my_open || "";
     document.getElementById("cnt-req").textContent = counts.open_requests || "";
-    document.getElementById("cnt-sync").textContent = counts.sync_failed || "";
+    document.getElementById("cnt-sync").textContent = counts.sync_failed + (allowed("sync.view") ? counts.planfix_conflicts : 0) || "";
     document.getElementById("cnt-approvals").textContent = counts.pending_approvals || "";
     document.getElementById("cnt-notif").textContent = counts.unread || "";
   } catch {

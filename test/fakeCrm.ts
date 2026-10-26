@@ -1,4 +1,9 @@
-import type { CrmAdapter, ImportedEngagement, ImportedProperty } from "../src/planfix/adapter.js";
+import type {
+  CrmAdapter,
+  ImportedEngagement,
+  ImportedProperty,
+  ImportedServiceRequest,
+} from "../src/planfix/adapter.js";
 
 export class FakeCrm implements CrmAdapter {
   calls: { method: string; input: any }[] = [];
@@ -26,6 +31,9 @@ export class FakeCrm implements CrmAdapter {
   updateEngagement = async (taskId: number, i: any) => {
     await this.record("updateEngagement", { taskId, ...i });
   };
+  updateProperty = async (taskId: number, i: any) => {
+    await this.record("updateProperty", { taskId, ...i });
+  };
   updateServiceRequest = async (taskId: number, i: any) => {
     await this.record("updateServiceRequest", { taskId, ...i });
   };
@@ -34,5 +42,7 @@ export class FakeCrm implements CrmAdapter {
   engagements: ImportedEngagement[] = [];
   readProperties = async () => this.properties;
   readEngagements = async () => this.engagements;
+  serviceRequests: ImportedServiceRequest[] = [];
+  readServiceRequests = async () => this.serviceRequests;
   count = (m: string) => this.calls.filter((c) => c.method === m).length;
 }
