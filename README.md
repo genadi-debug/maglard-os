@@ -29,7 +29,8 @@ This first slice covers two flows end to end:
 It is plain HTML and an ES module in `public/`, with no build step. Each user
 sees only the screens and buttons their role allows. The screens are:
 
-- **Work center:** open service requests with their next step, plus sync failures.
+- **Work center:** the user's tasks for today, overdue and urgent, open service requests with their next step, and sync failures. Managers also see each person's workload and requests that have not moved in 3 days. Admin and management also see company figures: active properties and clients, and contracts ending within 90 days.
+- **Tasks:** tasks of my own, overdue, urgent, all and done. A task can be linked to an apartment or a service request, and it has an assignee, a due date and a notes thread. Each status change or handover writes a note. A user sees only tasks assigned to or created by them, unless they are a manager.
 - **Search** (top of every screen, Ctrl+K): clients, owners, suppliers, addresses, base numbers, apartment codes, service requests and invoice numbers.
 - **Apartments:** the apartment list, each with its Planfix sync state, and an intake form. Each address opens the property card: owner, client, contract period, what is missing, service requests, invoices and suppliers who worked there.
 - **Clients:** the client list, and a client card with its apartments (active and past), open requests, invoices and what is missing.

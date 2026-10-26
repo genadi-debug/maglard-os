@@ -25,11 +25,17 @@ export const PERMISSIONS = {
   "requests.manage": ["admin", "management", "dept_manager", "operations", "property_manager"],
   "invoices.view": ["admin", "management", "dept_manager", "finance"],
   "invoices.create": ["admin", "management", "finance", "operations"],
+  "tasks.use": ALL,
+  // See and reassign everyone's tasks; see team workload.
+  "tasks.manage_all": ["admin", "management", "dept_manager"],
   "sync.view": ["admin", "management", "finance"],
   "sync.retry": ["admin", "management"],
   "users.manage": ["admin"],
   "import.run": ["admin"],
   "audit.view": ["admin", "management"],
+  // Company-wide numbers on the work center: active properties and clients,
+  // contracts ending soon.
+  "dashboard.company": ["admin", "management"],
 } satisfies Record<string, readonly Role[]>;
 export type Permission = keyof typeof PERMISSIONS;
 
