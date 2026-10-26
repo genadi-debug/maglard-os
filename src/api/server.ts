@@ -6,6 +6,7 @@ import { z, ZodError } from "zod";
 import * as auth from "../auth.js";
 import * as archive from "../domain/archive.js";
 import * as files from "../domain/attachments.js";
+import * as billing from "../domain/billing.js";
 import * as invoices from "../domain/invoices.js";
 import * as contacts from "../domain/contacts.js";
 import { ForbiddenError } from "../domain/common.js";
@@ -20,6 +21,7 @@ import * as tasks from "../domain/tasks.js";
 import { createIntake, createSupplierInvoice, NotFoundError } from "../domain/services.js";
 import type { CrmAdapter } from "../planfix/adapter.js";
 import { importFromCrm } from "../sync/importer.js";
+import { refreshPlanfixBilling } from "../sync/planfixBilling.js";
 import { refreshPlanfixInvoices } from "../sync/planfixInvoices.js";
 import * as readback from "../sync/readback.js";
 
@@ -63,6 +65,8 @@ const ROUTES: Record<string, Permission | null> = {
   "POST /supplier-invoices": "invoices.create",
   "POST /supplier-invoices/refresh": "invoices.view",
   "GET /suppliers/:id/statement": "invoices.view",
+  "GET /clients/:id/billing": "billing.view",
+  "POST /billing/refresh": "billing.view",
   "GET /sync/status": "sync.view",
   "POST /sync/:id/retry": "sync.retry",
   "GET /users": "users.manage",
@@ -306,6 +310,13 @@ export function buildServer(
   app.get<{ Params: { id: string }; Querystring: { month?: string } }>("/suppliers/:id/statement", async (req) => {
     const month = z.string().regex(/^\d{4}-\d{2}$/, "חודש בפורמט YYYY-MM").parse(req.query.month ?? new Date().toISOString().slice(0, 7));
     return invoices.supplierStatement(db, req.params.id, month);
+  });
+  // The client's billing as Planfix computes it, and a read now instead of at
+  // the next readback.
+  app.get<IdParams>("/clients/:id/billing", async (req) => billing.clientBilling(db, req.params.id));
+  app.post("/billing/refresh", async (_req, reply) => {
+    if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
+    return refreshPlanfixBilling(db, opts.crm);
   });
   app.get("/work-center", async (req) => q.workCenter(db, req.user!));
 

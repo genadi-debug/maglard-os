@@ -1388,11 +1388,86 @@ async function clientView(id) {
         : `<div class="empty">אין דירות</div>`
     }
     <h2>קריאות שירות</h2>${requestsTable(c.requests)}
-    ${invoicesTable(c.invoices)}`;
+    ${invoicesTable(c.invoices)}
+    ${allowed("billing.view") ? `<div id="billing">${await billingSection(id)}</div>` : ""}`;
   view.querySelector("#new-req")?.addEventListener("click", () =>
     newRequestDialog(active.length === 1 ? active[0].id : undefined),
   );
+  wireBilling(id);
   wireContact(details);
+}
+
+// The client's contracts, charges and accumulated bills as Planfix computes
+// them. Read only: amounts are changed in Planfix.
+const span = (from, to) => (from || to ? `${date(from)} עד ${date(to)}` : "—");
+const chargesTable = (rows) =>
+  `<div class="wrap"><table class="table"><thead><tr><th>דירה</th><th>סוג</th><th>תקופה</th><th>לפני מע״מ</th><th>מע״מ</th>
+    <th>סה״כ</th><th>התקבל</th><th>יתרה</th><th>סטטוס</th></tr></thead><tbody>${rows
+      .map(
+        (c) => `<tr><td>${esc(c.apartment_code || "—")}</td><td>${esc(c.charge_type || c.name)}</td><td>${span(c.period_from, c.period_to)}</td>
+        <td>${money(c.amount_net)}</td><td>${money(c.amount_vat)}</td><td>${money(c.amount_total)}</td><td>${money(c.received)}</td>
+        <td><b>${money(c.balance)}</b></td><td>${esc(c.status || "")}</td></tr>`,
+      )
+      .join("")}</tbody></table></div>`;
+
+async function billingSection(clientId) {
+  const b = await api("GET", `/clients/${clientId}/billing`);
+  const head = `<div class="head" style="align-items:end"><h2 style="margin:16px 0 0">חיובים וחשבונות</h2>
+    <button class="btn" id="billing-refresh">רענון מ־Planfix</button></div>
+    <p class="sub">מוצג כפי ש־Planfix מחשב אותו, לקריאה בלבד. שינוי סכום נעשה ב־Planfix.${
+      b.readAt ? ` נקרא לאחרונה: ${new Date(b.readAt).toLocaleString("he-IL")}` : ""
+    }</p>`;
+  if (!b.linked) return `${head}<div class="empty">הלקוח עוד לא נשלח ל־Planfix, ולכן אין לו חיובים שם</div>`;
+  return `${head}
+    <div class="facts">
+      <div><span>יתרה לגבייה</span><b>${money(b.totals.balance)}</b></div>
+      <div><span>חיובים שעוד לא נכללו בחשבון</span><b>${b.unbilled.length} · ${money(b.totals.unbilled)}</b></div>
+      <div><span>חשבונות מצטברים</span><b>${b.bills.length}</b></div>
+    </div>
+    <h3>חוזי שכירות ללקוח</h3>
+    ${
+      b.contracts.length
+        ? `<div class="wrap"><table class="table"><thead><tr><th>דירה</th><th>חוזה</th><th>כניסה ויציאה</th><th>מחיר חודשי</th>
+          <th>דמי תיווך והקמה</th><th>פיקדון</th><th>סטטוס</th></tr></thead><tbody>${b.contracts
+            .map(
+              (k) => `<tr><td>${k.property_id ? `<a href="#/properties/${k.property_id}">${esc(k.apartment_code || "—")}</a>` : esc(k.apartment_code || "—")}</td>
+              <td>${esc(k.name)}</td><td>${span(k.move_in_on, k.move_out_on)}</td><td>${money(k.monthly_price)}</td>
+              <td>${money(k.setup_fee)}</td><td>${money(k.deposit)}</td><td>${esc(k.status || "")}</td></tr>`,
+            )
+            .join("")}</tbody></table></div>`
+        : `<div class="empty">אין חוזים ב־Planfix</div>`
+    }
+    <h3>חיובים שעוד לא נכללו בחשבון</h3>
+    ${b.unbilled.length ? chargesTable(b.unbilled) : `<div class="empty">כל החיובים כבר בחשבון</div>`}
+    <h3>חשבונות מצטברים</h3>
+    ${
+      b.bills.length
+        ? `<div class="wrap"><table class="table"><thead><tr><th>חשבון</th><th>תקופה</th><th>סכום</th><th>יתרה לגבייה</th>
+          <th>חיובים חסרים</th><th>הוגש</th><th>סטטוס</th></tr></thead><tbody>${b.bills
+            .map(
+              (x) => `<tr><td>${esc(x.name)}</td><td>${span(x.period_from, x.period_to)}</td><td>${money(x.computed_total ?? x.amount)}</td>
+              <td><b>${money(x.balance)}</b></td><td>${x.missing_charges ? pill([`${x.missing_charges} חסרים`, "warn"]) : "—"}</td>
+              <td>${x.submitted_on ? date(x.submitted_on) : "—"}</td><td>${esc(x.status || "")}</td></tr>`,
+            )
+            .join("")}</tbody></table></div>`
+        : `<div class="empty">אין חשבונות ב־Planfix</div>`
+    }
+    ${b.billed.length ? `<details><summary>חיובים שכבר בחשבון (${b.billed.length})</summary>${chargesTable(b.billed)}</details>` : ""}`;
+}
+
+function wireBilling(clientId) {
+  const btn = view.querySelector("#billing-refresh");
+  btn?.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.textContent = "קורא מ־Planfix…";
+    try {
+      await api("POST", "/billing/refresh");
+    } catch (err) {
+      toast(err.message);
+    }
+    view.querySelector("#billing").innerHTML = await billingSection(clientId);
+    wireBilling(clientId);
+  });
 }
 
 async function propertyView(id) {

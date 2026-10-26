@@ -1,0 +1,174 @@
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { buildServer } from "../src/api/server.js";
+import { migrate } from "../src/db/migrate.js";
+import { createPool } from "../src/db/pool.js";
+import { can } from "../src/permissions.js";
+import { runOnce, timing } from "../src/sync/worker.js";
+import { FakeCrm } from "./fakeCrm.js";
+
+const url = process.env.TEST_DATABASE_URL;
+
+describe("who sees the client's billing", () => {
+  it("is finance and management, not operations", () => {
+    expect(can("finance", "billing.view")).toBe(true);
+    expect(can("dept_manager", "billing.view")).toBe(true);
+    expect(can("operations", "billing.view")).toBe(false);
+    expect(can("property_manager", "billing.view")).toBe(false);
+  });
+});
+
+describe.skipIf(!url)("the client's billing, read from Planfix", () => {
+  const db = createPool(url ?? "");
+  const crm = new FakeCrm();
+  const app = buildServer(db, { requireAuth: false, crm });
+  const ids: Record<string, any> = {};
+  const call = (method: "GET" | "POST", path: string, payload?: object) => app.inject({ method, url: path, payload });
+
+  beforeAll(async () => {
+    timing.autoTaskTries = 1;
+    await db.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+    await migrate(db);
+    const intake = await call("POST", "/intakes", {
+      baseNumber: 99970,
+      address: "רחוב החיוב 70",
+      owner: { name: "בעלים MOS-TEST" },
+      client: { name: "לקוח MOS-TEST" },
+      startsOn: "2026-10-01",
+      endsOn: "2027-09-30",
+      moveInOn: "2026-10-01",
+      monthlyRent: 4000,
+    });
+    while (await runOnce(db, crm));
+    const { rows } = await db.query(
+      "SELECT e.planfix_task_id, c.id AS client_id, c.planfix_id FROM engagements e JOIN contacts c ON c.id = e.client_id WHERE e.id = $1",
+      [intake.json().engagementId],
+    );
+    Object.assign(ids, { engagementPf: rows[0].planfix_task_id, client: rows[0].client_id, clientPf: rows[0].planfix_id });
+    const client = { planfixId: ids.clientPf, name: "לקוח MOS-TEST" };
+    const engagement = { planfixTaskId: ids.engagementPf, name: "99970 — רחוב החיוב 70" };
+    const charge = {
+      status: "גבייה — להכנת חיוב",
+      contractTaskId: 7001,
+      vatType: null,
+      received: null,
+    };
+    crm.billing = {
+      contracts: [
+        {
+          planfixTaskId: 7001,
+          name: "99970-2 — חוזה לקוח",
+          status: "New",
+          client,
+          engagement,
+          moveInOn: "2026-10-01",
+          moveOutOn: "2027-09-30",
+          monthlyPrice: 5000,
+          setupFee: 1500,
+          deposit: 10000,
+        },
+      ],
+      charges: [
+        // On a bill.
+        {
+          ...charge,
+          planfixTaskId: 7101,
+          name: "99970 — דמי ניהול — 10/2026",
+          client,
+          engagement,
+          chargeType: "דמי ניהול",
+          periodFrom: "2026-10-01",
+          periodTo: "2026-10-31",
+          amountNet: 600,
+          amountVat: 108,
+          amountTotal: 708,
+          balance: 708,
+          billTaskIds: [7201],
+        },
+        // Not on a bill yet; its client and apartment come from the contract.
+        {
+          ...charge,
+          planfixTaskId: 7102,
+          name: "99970 — שכר דירה — 10/2026",
+          client: null,
+          engagement: null,
+          chargeType: "שכר דירה",
+          periodFrom: "2026-10-02",
+          periodTo: "2026-10-31",
+          amountNet: null,
+          amountVat: null,
+          amountTotal: 4838.71,
+          received: 1000,
+          balance: 3838.71,
+          billTaskIds: [],
+        },
+        // Another client's.
+        {
+          ...charge,
+          planfixTaskId: 7103,
+          name: "אחר",
+          client: { planfixId: 424242, name: "לקוח אחר" },
+          engagement: null,
+          contractTaskId: null,
+          chargeType: "שכר דירה",
+          periodFrom: "2026-10-01",
+          periodTo: "2026-10-31",
+          amountNet: null,
+          amountVat: null,
+          amountTotal: 999,
+          balance: 999,
+          billTaskIds: [],
+        },
+      ],
+      bills: [
+        {
+          planfixTaskId: 7201,
+          name: "חשבון מצטבר — לקוח MOS-TEST — 10/2026",
+          status: "חשבון — איסוף חיובים לדירות",
+          client,
+          periodFrom: "2026-10-01",
+          periodTo: "2026-10-31",
+          submittedOn: null,
+          amount: null,
+          computedTotal: 708,
+          balance: 708,
+          missingCharges: 0,
+          approved: false,
+          submissionVerified: false,
+          chargeTaskIds: [7101],
+        },
+      ],
+    };
+  });
+  afterAll(async () => {
+    await app.close();
+    await db.end();
+  });
+
+  it("mirrors Planfix's contracts, charges and bills", async () => {
+    expect((await call("POST", "/billing/refresh")).json()).toEqual({ contracts: 1, charges: 3, bills: 1 });
+  });
+
+  it("shows what Planfix computed: open charges, bills and the balance", async () => {
+    const b = (await call("GET", `/clients/${ids.client}/billing`)).json();
+    expect(b.linked).toBe(true);
+    expect(b.contracts).toMatchObject([{ apartment_code: "99970.00", monthly_price: "5000.00", setup_fee: "1500.00" }]);
+    expect(b.unbilled).toMatchObject([
+      { planfix_task_id: 7102, apartment_code: "99970.00", charge_type: "שכר דירה", amount_total: "4838.71", balance: "3838.71" },
+    ]);
+    expect(b.billed.map((c: any) => c.planfix_task_id)).toEqual([7101]);
+    expect(b.bills).toMatchObject([{ planfix_task_id: 7201, computed_total: "708.00", missing_charges: 0 }]);
+    expect(b.totals).toEqual({ unbilled: 4838.71, balance: 4546.71 });
+  });
+
+  it("replaces the mirror on every read", async () => {
+    crm.billing = { contracts: [], charges: [], bills: [] };
+    await call("POST", "/billing/refresh");
+    const b = (await call("GET", `/clients/${ids.client}/billing`)).json();
+    expect([b.contracts, b.unbilled, b.bills]).toEqual([[], [], []]);
+  });
+
+  it("says when the client is not in Planfix yet", async () => {
+    const id = (await call("POST", "/contacts", { kind: "client", name: "לקוח חדש MOS-TEST" })).json().id;
+    expect((await call("GET", `/clients/${id}/billing`)).json()).toMatchObject({ linked: false, unbilled: [] });
+  });
+});

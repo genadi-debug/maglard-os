@@ -33,6 +33,8 @@ export const PERMISSIONS = {
   "records.delete": ["admin"],
   // Bank details on owner and supplier cards.
   "bank.view": ["admin", "management", "finance"],
+  // The client's contracts, charges and bills, read from Planfix.
+  "billing.view": ["admin", "management", "dept_manager", "finance"],
   "invoices.view": ["admin", "management", "dept_manager", "finance"],
   "invoices.create": ["admin", "management", "finance", "operations"],
   "tasks.use": ALL,
