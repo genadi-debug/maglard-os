@@ -33,6 +33,8 @@ const CATEGORY = {
 const urgencyPill = (u) => (u && u !== "normal" ? pill(URGENCY[u]) : "");
 const options = (entries, selected) =>
   entries.map(([k, label]) => `<option value="${k}" ${k === selected ? "selected" : ""}>${esc(label)}</option>`).join("");
+// Same list as the server (src/domain/contacts.ts).
+const PAYMENT_TERMS = ["מיידי", "שוטף", "שוטף+15", "שוטף+30", "שוטף+45", "שוטף+60", "שוטף+90", "שוטף+120"];
 const CHARGE = { client: "הלקוח", owner: "בעל הדירה", maglard: "מגלארד" };
 const SYNC = { synced: ["סונכרן ל-Planfix", "good"], pending: ["ממתין לסנכרון", "warn"], failed: ["סנכרון נכשל", "bad"] };
 const JOB = {
@@ -740,7 +742,7 @@ function contactFields(kind) {
       ["serviceAreas", "service_areas", "תחומי שירות", "text", true],
       ["regions", "regions", "אזורים", "text", false],
       ["withholdingCertUntil", "withholding_cert_until", "אישור ניכוי במקור בתוקף עד", "date", true],
-      ["paymentTerms", "payment_terms", "תנאי תשלום", "text", true],
+      ["paymentTerms", "payment_terms", "תנאי תשלום", "terms", true],
     );
   }
   if (kind !== "client" && allowed("bank.view")) {
@@ -765,6 +767,14 @@ function contactDialog(kind, c, onSaved) {
     if (type === "company") {
       return `<label>${esc(label)}<select name="${key}"><option value="true" ${v !== false ? "selected" : ""}>תאגיד</option>
         <option value="false" ${v === false ? "selected" : ""}>פרטי</option></select></label>`;
+    }
+    if (type === "terms") {
+      // A value saved before the list existed stays selectable.
+      const terms = PAYMENT_TERMS.includes(v) || !v ? PAYMENT_TERMS : [v, ...PAYMENT_TERMS];
+      return `<label>${esc(label + mark)}<select name="${key}"><option value="">—</option>${options(
+        terms.map((t) => [t, t]),
+        v,
+      )}</select></label>`;
     }
     if (type === "textarea") return `<label class="full">${esc(label)}<textarea name="${key}" rows="2">${esc(v ?? "")}</textarea></label>`;
     const attrs = `type="${type}" value="${esc(v ?? "")}" ${key === "name" ? "required" : ""} ${type === "number" ? 'step="0.01" min="0" max="100"' : ""}`;
@@ -799,7 +809,6 @@ function contactDialog(kind, c, onSaved) {
   );
 }
 
-// Details, missing fields and contact people, on the client, owner and supplier cards.
 // ---------- archive ----------
 
 // Active cards or the archive, on top of each list.
@@ -849,6 +858,7 @@ function wireRecordActions(type, rec, back) {
   );
 }
 
+// Details, missing fields and contact people, on the client, owner and supplier cards.
 function contactSection(c) {
   const shown = contactFields(c.kind).filter(([key]) => key !== "name" && key !== "notes");
   const value = ([, col, , type]) =>
