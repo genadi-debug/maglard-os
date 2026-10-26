@@ -64,5 +64,10 @@ describe.skipIf(!url)("screens API", () => {
     expect((await post(`/sync/${wc.syncFailures[0].id}/retry`)).statusCode).toBe(200);
     expect((await get("/work-center")).counts).toMatchObject({ sync_failed: 0, sync_pending: 2 });
     expect((await post("/sync/999999/retry")).statusCode).toBe(404);
+
+    // The sync screen retries by the id it gets from /sync/status.
+    await runOnce(db, failing);
+    const failed = (await get("/sync/status")).jobs.find((j: any) => j.status === "failed");
+    expect((await post(`/sync/${failed.id}/retry`)).statusCode).toBe(200);
   });
 });

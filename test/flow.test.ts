@@ -43,6 +43,17 @@ describe.skipIf(!url)("intake and supplier invoice flow", () => {
   };
   const post = (path: string, payload: object) => app.inject({ method: "POST", url: path, payload });
 
+  it("picks up a job left running by a restart", async () => {
+    await post("/intakes", intake);
+    await db.query("UPDATE outbox SET status = 'running', attempts = 1, updated_at = now()");
+    expect(await runOnce(db, crm)).toBe(false);
+
+    await db.query("UPDATE outbox SET updated_at = now() - interval '11 minutes'");
+    await drain();
+    expect((await db.query("SELECT status FROM outbox")).rows).toEqual([{ status: "done" }]);
+    expect(crm.calls.map((c) => c.method)).toContain("createEngagement");
+  });
+
   it("saves locally, then pushes owner, client, property and engagement to Planfix", async () => {
     const res = await post("/intakes", intake);
     expect(res.statusCode).toBe(201);

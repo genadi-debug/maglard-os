@@ -7,6 +7,10 @@ export const MAX_ATTEMPTS = 5;
 // Backoff before attempt n+1: 30s, 2m, 8m, 32m.
 export const backoffSeconds = (attempts: number) => 30 * 4 ** (attempts - 1);
 
+// A job still marked running after this long was cut off by a restart or a
+// crash (a normal run takes seconds), so the worker picks it up again.
+export const STALE_RUNNING_MINUTES = 10;
+
 type Job = { id: number; job_type: string; entity_id: string; attempts: number };
 
 // Each ensure* function pushes one record if it has no Planfix id yet. It locks
@@ -196,7 +200,8 @@ async function claim(db: Db): Promise<Job | undefined> {
     `UPDATE outbox SET status = 'running', attempts = attempts + 1, claimed_seq = request_seq, updated_at = now()
       WHERE id = (
         SELECT id FROM outbox
-         WHERE status = 'pending' AND run_after <= now()
+         WHERE (status = 'pending' AND run_after <= now())
+            OR (status = 'running' AND updated_at < now() - make_interval(mins => ${STALE_RUNNING_MINUTES}))
          ORDER BY id
          LIMIT 1
            FOR UPDATE SKIP LOCKED)
