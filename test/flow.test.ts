@@ -67,6 +67,7 @@ describe.skipIf(!url)("intake and supplier invoice flow", () => {
       "createProperty",
       "createEngagement",
     ]);
+    expect(crm.calls.slice(0, 2).map((c) => c.input.kind).sort()).toEqual(["client", "owner"]);
     const prop = (await db.query("SELECT planfix_task_id FROM properties WHERE id = $1", [propertyId])).rows[0];
     const eng = crm.calls[3].input;
     expect(eng.propertyTaskId).toBe(prop.planfix_task_id);
