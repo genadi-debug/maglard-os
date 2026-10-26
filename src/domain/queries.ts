@@ -52,19 +52,6 @@ export async function listServiceRequests(db: Db) {
   return rows;
 }
 
-export async function listSupplierInvoices(db: Db) {
-  const { rows } = await db.query(
-    `SELECT i.id, i.invoice_number, i.invoice_date, i.amount_net, i.amount_vat, i.amount_total, i.handling,
-            e.apartment_code, p.address, s.name AS supplier_name, i.planfix_task_id, ${syncState("i")} AS sync
-       FROM supplier_invoices i
-       JOIN engagements e ON e.id = i.engagement_id
-       JOIN properties p ON p.id = e.property_id
-       JOIN contacts s ON s.id = i.supplier_id
-      ORDER BY i.created_at DESC`,
-  );
-  return rows;
-}
-
 // The work center (spec section 4): what I must do, what is urgent, what waits
 // on someone else; and, for managers and management, the team and the company.
 export async function workCenter(db: Db, actor: { id: string; role: Role }) {

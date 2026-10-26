@@ -3,6 +3,7 @@ import type {
   ImportedEngagement,
   ImportedProperty,
   ImportedServiceRequest,
+  ImportedSupplierInvoice,
 } from "../src/planfix/adapter.js";
 
 export class FakeCrm implements CrmAdapter {
@@ -44,5 +45,7 @@ export class FakeCrm implements CrmAdapter {
   readEngagements = async () => this.engagements;
   serviceRequests: ImportedServiceRequest[] = [];
   readServiceRequests = async () => this.serviceRequests;
+  supplierInvoices: ImportedSupplierInvoice[] = [];
+  readSupplierInvoices = async () => this.supplierInvoices;
   count = (m: string) => this.calls.filter((c) => c.method === m).length;
 }

@@ -4,6 +4,7 @@ import { enqueue } from "../domain/services.js";
 import { RuleError } from "../domain/serviceRequests.js";
 import type { ContactRef, CrmAdapter } from "../planfix/adapter.js";
 import { SERVICE_REQUEST_STATUS } from "../planfix/fields.js";
+import { refreshPlanfixInvoices } from "./planfixInvoices.js";
 
 // Reading changes back from Planfix (spec: periodic scan and a conflict queue).
 // Every poll reads the property, intake and service request tasks, and
@@ -496,10 +497,14 @@ export function startReadback(
   minutes: number,
 ): () => void {
   if (minutes <= 0) return () => {};
-  const tick = () =>
-    runReadback(db, crm).catch((err) =>
+  const tick = async () => {
+    await runReadback(db, crm).catch((err) =>
       console.error("planfix readback error", (err as Error).message),
     );
+    await refreshPlanfixInvoices(db, crm).catch((err) =>
+      console.error("planfix invoices read error", (err as Error).message),
+    );
+  };
   const first = setTimeout(tick, 30_000);
   const timer = setInterval(tick, minutes * 60_000);
   return () => {
