@@ -55,6 +55,13 @@ main a:not(.btn){color:var(--accent)}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:8px}
 .kpi{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
 .kpi b{display:block;font-size:26px}
+a.kpi{color:inherit;text-decoration:none}
+a.kpi:hover{border-color:var(--accent)}
+.kpi.bad b{color:var(--bad)}
+.kpi.warn b{color:var(--warn)}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.tabs .btn{text-decoration:none;color:inherit}
+.tabs .btn.primary{color:var(--accent-ink)}
 .kpi span{color:var(--muted);font-size:13px}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 16px;display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
 .card .grow{flex:1;min-width:200px}
@@ -108,6 +115,7 @@ input,select,textarea{border:1px solid var(--line);border-radius:8px;padding:8px
   <nav class="rail" aria-label="ניווט ראשי">
     <div class="brand">MAGLARD OS<small>ניהול דירות ותפעול</small></div>
     <a class="nav" href="#/">מרכז עבודה <span class="cnt" id="cnt-work"></span></a>
+    <a class="nav" href="#/tasks" data-perm="tasks.use">משימות <span class="cnt" id="cnt-tasks"></span></a>
     <a class="nav" href="#/apartments" data-perm="apartments.view">דירות</a>
     <a class="nav" href="#/clients" data-perm="apartments.view">לקוחות</a>
     <a class="nav" href="#/requests" data-perm="requests.view">קריאות שירות <span class="cnt" id="cnt-req"></span></a>

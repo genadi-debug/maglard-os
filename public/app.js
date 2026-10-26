@@ -222,41 +222,220 @@ async function stepDialog(r, action) {
 
 // ---------- views ----------
 
+// A number on the work center that opens the list it was counted from.
+const kpi = (n, label, href, tone = "") =>
+  `<a class="kpi ${tone}" href="${href}"><b>${n}</b><span>${esc(label)}</span></a>`;
+
+function taskCard(t) {
+  return `<div class="card"><div class="grow"><b><a href="#/tasks/${t.id}">${esc(t.title)}</a></b>
+    ${t.urgent ? pill(["דחוף", "bad"]) : ""} ${t.overdue ? pill(["באיחור", "bad"]) : ""}<br>
+    <small>${t.due_on ? `עד ${date(t.due_on)}` : "ללא מועד"}${t.apartment_code ? ` · דירה ${esc(t.apartment_code)}` : ""}</small></div>
+    <a class="btn" href="#/tasks/${t.id}">פתיחה</a></div>`;
+}
+
 async function workCenterView() {
   const w = await api("GET", "/work-center");
   const c = w.counts;
+  const hour = new Date().getHours();
+  const hello = hour < 12 ? "בוקר טוב" : hour < 18 ? "צהריים טובים" : "ערב טוב";
+  const requests = w.requests.map((r) => {
+    const n = nextStep(r);
+    return `<div class="card"><div class="grow"><b>${esc(r.subject)}</b> ${pill(STATUS[r.status])}<br>
+      <small>${esc(r.apartment_code)} · ${esc(r.address)} · נפתחה ${date(r.created_at)}</small><br>${esc(n.text)}</div>
+      <a class="btn primary" href="#/requests/${r.id}">${esc(n.label)}</a></div>`;
+  });
   view.innerHTML = `
-    <h1>מרכז עבודה</h1>
-    <p class="sub">כל מה שמחכה לך עכשיו, מהישן לחדש.</p>
+    <div class="head"><div><h1>${hello}, ${esc(me.name)}</h1>
+    <p class="sub">מה עליך לעשות, מה דחוף, ומה מחכה למישהו אחר.</p></div>
+    <div class="actions" style="margin:0">
+      <button class="btn primary" id="new-task">משימה חדשה</button>
+      ${allowed("requests.manage") ? `<button class="btn" id="new-req">קריאת שירות</button>` : ""}
+    </div></div>
     <div class="kpis">
-      <div class="kpi"><b>${c.open_requests}</b><span>קריאות פתוחות</span></div>
-      <div class="kpi"><b>${c.engagements}</b><span>דירות בהתקשרות</span></div>
-      <div class="kpi"><b>${c.sync_pending}</b><span>ממתינים לסנכרון</span></div>
-      <div class="kpi"><b>${c.sync_failed}</b><span>כשלי סנכרון</span></div>
+      ${kpi(c.my_today, "המשימות שלי להיום", "#/tasks?filter=mine")}
+      ${kpi(c.my_overdue, "באיחור", "#/tasks?filter=overdue", c.my_overdue ? "bad" : "")}
+      ${kpi(c.my_urgent, "דחופות", "#/tasks?filter=urgent", c.my_urgent ? "bad" : "")}
+      ${allowed("requests.view") ? kpi(c.awaiting_client, "ממתינות לאישור לקוח", "#/requests") : ""}
+      ${allowed("requests.view") ? kpi(c.open_requests, "קריאות שירות פתוחות", "#/requests") : ""}
     </div>
+    <h2>המשימות הבאות שלי</h2>
+    ${w.myTasks.length ? w.myTasks.map(taskCard).join("") : `<div class="empty">אין לך משימות פתוחות</div>`}
     ${
       w.syncFailures.length
         ? `<h2>כשלי סנכרון</h2>${w.syncFailures
             .map(
               (f) => `<div class="card"><div class="grow"><b>${esc(JOB[f.job_type] || f.job_type)}</b><br>
-              <small>${esc(f.last_error)}</small></div>${allowed("sync.view") ? `<a class="btn" href="#/sync">לטיפול</a>` : ""}</div>`,
+              <small>${esc(f.last_error)}</small></div><a class="btn" href="#/sync">לטיפול</a></div>`,
             )
             .join("")}`
         : ""
     }
-    <h2>קריאות שמחכות לפעולה</h2>
+    ${allowed("requests.view") ? `<h2>קריאות שמחכות לפעולה</h2>${requests.length ? requests.join("") : `<div class="empty">אין קריאות פתוחות</div>`}` : ""}
+    ${w.workload ? teamSection(w) : ""}
+    ${w.company ? companySection(w.company) : ""}`;
+  view.querySelector("#new-task").onclick = () => newTaskDialog();
+  view.querySelector("#new-req")?.addEventListener("click", () => newRequestDialog());
+}
+
+// Department manager and up: who carries what, and what has not moved.
+function teamSection(w) {
+  const pct = (u) => (u.done_30d ? `${Math.round((100 * u.on_time_30d) / u.done_30d)}%` : "—");
+  return `<h2>הצוות</h2>
+    <div class="wrap"><table class="table"><thead><tr><th>עובד</th><th>משימות פתוחות</th><th>באיחור</th><th>הושלמו ב-30 יום</th><th>בזמן</th></tr></thead><tbody>${w.workload
+      .map(
+        (u) => `<tr><td>${esc(u.name)}</td><td>${u.open}</td><td>${u.overdue ? pill([String(u.overdue), "bad"]) : "0"}</td>
+        <td>${u.done_30d}</td><td>${pct(u)}</td></tr>`,
+      )
+      .join("")}</tbody></table></div>
+    <h2>קריאות תקועות (לא זזו 3 ימים)</h2>
     ${
-      w.requests.length
-        ? w.requests
-            .map((r) => {
-              const n = nextStep(r);
-              return `<div class="card"><div class="grow"><b>${esc(r.subject)}</b> ${pill(STATUS[r.status])}<br>
-                <small>${esc(r.apartment_code)} · ${esc(r.address)} · נפתחה ${date(r.created_at)}</small><br>${esc(n.text)}</div>
-                <a class="btn primary" href="#/requests/${r.id}">${esc(n.label)}</a></div>`;
-            })
+      w.stuck.length
+        ? w.stuck
+            .map(
+              (r) => `<div class="card"><div class="grow"><b>${esc(r.subject)}</b> ${pill(STATUS[r.status])}<br>
+              <small>דירה ${esc(r.apartment_code)} · שינוי אחרון ${date(r.last_move)}</small></div>
+              <a class="btn" href="#/requests/${r.id}">פתיחה</a></div>`,
+            )
             .join("")
-        : `<div class="empty">אין קריאות פתוחות</div>`
+        : `<div class="empty">אין קריאות תקועות</div>`
     }`;
+}
+
+// Management: the company at a glance.
+function companySection(co) {
+  return `<h2>החברה</h2>
+    <div class="kpis">
+      ${kpi(co.active_properties, "דירות בהתקשרות בתוקף", "#/apartments")}
+      ${kpi(co.active_clients, "לקוחות פעילים", "#/clients")}
+      ${kpi(co.ending.length, "חוזים שמסתיימים ב-90 יום", "#/apartments", co.ending.length ? "warn" : "")}
+    </div>
+    ${
+      co.ending.length
+        ? `<div class="wrap"><table class="table"><thead><tr><th>דירה</th><th>כתובת</th><th>לקוח</th><th>מסתיים</th></tr></thead><tbody>${co.ending
+            .map(
+              (e) => `<tr><td>${esc(e.apartment_code)}</td><td><a href="#/properties/${e.property_id}">${esc(e.address)}</a></td>
+              <td>${esc(e.client_name)}</td><td>${date(e.ends_on)}</td></tr>`,
+            )
+            .join("")}</tbody></table></div>`
+        : ""
+    }`;
+}
+
+// ---------- tasks ----------
+
+const TASK_STATUS = { open: ["פתוחה", "warn"], in_progress: ["בטיפול", ""], done: ["הושלמה", "good"] };
+
+async function newTaskDialog(prefill = {}) {
+  const team = await api("GET", "/team");
+  const assignees = team
+    .map((u) => `<option value="${u.id}" ${u.id === me.id ? "selected" : ""}>${esc(u.name)}${u.id === me.id ? " (אני)" : ""}</option>`)
+    .join("");
+  dialog(
+    "משימה חדשה",
+    field("title", "מה צריך לעשות", "required", true) +
+      `<label>אחראי<select name="assigneeId">${assignees}</select></label>` +
+      field("dueOn", "עד מתי", 'type="date"') +
+      `<label class="full">פירוט<textarea name="description" rows="3"></textarea></label>` +
+      `<label style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="urgent" value="1"> דחוף</label>`,
+    async (v) => {
+      const { id } = await api("POST", "/tasks", {
+        title: v.title,
+        assigneeId: v.assigneeId,
+        dueOn: v.dueOn || undefined,
+        description: v.description || undefined,
+        urgent: v.urgent === "1",
+        ...prefill,
+      });
+      toast("המשימה נוצרה");
+      location.hash = `#/tasks/${id}`;
+    },
+    "יצירה",
+  );
+}
+
+async function tasksView(params) {
+  const filter = params.get("filter") || "mine";
+  const rows = await api("GET", `/tasks?filter=${encodeURIComponent(filter)}`);
+  const tabs = [
+    ["mine", "שלי"],
+    ["overdue", "באיחור"],
+    ["urgent", "דחופות"],
+    ...(allowed("tasks.manage_all") ? [["all", "של כולם"]] : []),
+    ["done", "הושלמו"],
+  ];
+  view.innerHTML = `
+    <div class="head"><div><h1>משימות</h1><p class="sub">${
+      allowed("tasks.manage_all") ? "המשימות שלך ושל הצוות." : "המשימות שלך."
+    }</p></div><button class="btn primary" id="add">משימה חדשה</button></div>
+    <div class="tabs">${tabs
+      .map(([k, label]) => `<a class="btn ${k === filter ? "primary" : ""}" href="#/tasks?filter=${k}">${label}</a>`)
+      .join("")}</div>
+    ${
+      rows.length
+        ? `<div class="wrap"><table class="table"><thead><tr><th>משימה</th><th>אחראי</th><th>עד</th><th>סטטוס</th><th>דירה</th></tr></thead><tbody>${rows
+            .map(
+              (t) => `<tr class="click" data-href="#/tasks/${t.id}" tabindex="0"><td>${esc(t.title)} ${t.urgent ? pill(["דחוף", "bad"]) : ""}</td>
+              <td>${esc(t.assignee_name)}</td><td>${t.due_on ? date(t.due_on) : "—"} ${t.overdue ? pill(["באיחור", "bad"]) : ""}</td>
+              <td>${pill(TASK_STATUS[t.status])}</td><td>${esc(t.apartment_code || "")}</td></tr>`,
+            )
+            .join("")}</tbody></table></div>`
+        : `<div class="empty">אין משימות כאן</div>`
+    }`;
+  view.querySelector("#add").onclick = () => newTaskDialog();
+  clickableRows();
+}
+
+async function taskView(id) {
+  const t = await api("GET", `/tasks/${id}`);
+  const team = await api("GET", "/team");
+  const next = { open: ["in_progress", "התחלת טיפול"], in_progress: ["done", "סימון כהושלמה"], done: ["open", "פתיחה מחדש"] }[t.status];
+  view.innerHTML = `
+    <p><a href="#/tasks">→ כל המשימות</a></p>
+    <h1>${esc(t.title)}</h1>
+    <p class="sub">${pill(TASK_STATUS[t.status])} ${t.urgent ? pill(["דחוף", "bad"]) : ""} ${t.overdue ? pill(["באיחור", "bad"]) : ""}</p>
+    <div class="next"><div class="grow" style="flex:1">אחראי: <b>${esc(t.assignee_name)}</b> · ${t.due_on ? `עד ${date(t.due_on)}` : "ללא מועד"}
+      ${t.apartment_code ? ` · <a href="#/properties/${t.property_id}">דירה ${esc(t.apartment_code)}</a>` : ""}
+      ${t.service_request_id ? ` · <a href="#/requests/${t.service_request_id}">הקריאה</a>` : ""}</div>
+      <button class="btn primary" id="advance">${next[1]}</button></div>
+    ${t.description ? `<p>${esc(t.description)}</p>` : ""}
+    <div class="facts">
+      <div><span>העברה לאחראי אחר</span><select id="assignee">${team
+        .map((u) => `<option value="${u.id}" ${u.id === t.assignee_id ? "selected" : ""}>${esc(u.name)}</option>`)
+        .join("")}</select></div>
+      <div><span>מועד יעד</span><input type="date" id="due" value="${t.due_on || ""}"></div>
+    </div>
+    <h2>הערות והיסטוריה</h2>
+    <ul class="timeline">${t.notes
+      .map(
+        (n) => `<li>${n.system ? `<small>${esc(n.body)}</small>` : esc(n.body)}
+        <small> · ${esc(n.user_name || "")} · ${new Date(n.created_at).toLocaleString("he-IL")}</small></li>`,
+      )
+      .join("")}</ul>
+    <form id="note" class="card" style="margin-top:12px"><input name="body" class="grow" placeholder="הערה פנימית" required>
+      <button class="btn">הוספה</button></form>`;
+  const change = async (body, msg) => {
+    try {
+      await api("POST", `/tasks/${id}`, body);
+      toast(msg);
+    } catch (err) {
+      toast(err.message);
+    }
+    route();
+  };
+  view.querySelector("#advance").onclick = () => change({ status: next[0] }, "עודכן");
+  view.querySelector("#assignee").onchange = (e) => change({ assigneeId: e.target.value }, "המשימה הועברה");
+  view.querySelector("#due").onchange = (e) => change({ dueOn: e.target.value || null }, "המועד עודכן");
+  view.querySelector("#note").onsubmit = async (e) => {
+    e.preventDefault();
+    const body = new FormData(e.target).get("body");
+    if (!String(body).trim()) return;
+    try {
+      await api("POST", `/tasks/${id}/notes`, { body });
+    } catch (err) {
+      return toast(err.message);
+    }
+    route();
+  };
 }
 
 async function apartmentsView() {
@@ -546,7 +725,10 @@ async function propertyView(id) {
     <div class="head"><div><h1>${esc(p.address)}</h1>
       <p class="sub">דירה ${p.base_number} · ${current ? activePill(current) : pill(["אין התקשרות", "warn"])}
       ${p.planfix_task_id ? ` · משימה ${p.planfix_task_id} ב-Planfix` : ""}</p></div>
-    ${allowed("requests.manage") && current ? `<button class="btn primary" id="new-req">פתיחת קריאת שירות</button>` : ""}</div>
+    <div class="actions" style="margin:0">
+      ${allowed("requests.manage") && current ? `<button class="btn primary" id="new-req">פתיחת קריאת שירות</button>` : ""}
+      ${current ? `<button class="btn" id="new-task">משימה לדירה</button>` : ""}
+    </div></div>
     ${gaps.length ? `<div class="missing"><b>מה חסר:</b> ${esc(gaps.join(" · "))}</div>` : ""}
     <div class="facts">
       <div><span>בעל הדירה</span><b>${esc(p.owner_name)}</b></div>
@@ -568,6 +750,7 @@ async function propertyView(id) {
         : ""
     }`;
   view.querySelector("#new-req")?.addEventListener("click", () => newRequestDialog(current.id));
+  view.querySelector("#new-task")?.addEventListener("click", () => newTaskDialog({ engagementId: current.id }));
 }
 
 function clickableRows() {
@@ -711,6 +894,9 @@ const AUDIT_ACTION = {
   "POST /users": "יצירת משתמש",
   "POST /users/:id": "עדכון משתמש",
   "POST /import/planfix": "ייבוא מ-Planfix",
+  "POST /tasks": "יצירת משימה",
+  "POST /tasks/:id": "עדכון משימה",
+  "POST /tasks/:id/notes": "הערה במשימה",
 };
 
 async function auditView() {
@@ -748,7 +934,8 @@ function showUser() {
 async function refreshCounts() {
   try {
     const { counts } = await api("GET", "/work-center");
-    document.getElementById("cnt-work").textContent = counts.open_requests + counts.sync_failed || "";
+    document.getElementById("cnt-work").textContent = counts.my_urgent || "";
+    document.getElementById("cnt-tasks").textContent = counts.my_open || "";
     document.getElementById("cnt-req").textContent = counts.open_requests || "";
     document.getElementById("cnt-sync").textContent = counts.sync_failed || "";
   } catch {
@@ -757,10 +944,11 @@ async function refreshCounts() {
 }
 
 async function route() {
-  const hash = location.hash.replace(/^#/, "") || "/";
-  const [, section, id] = hash.split("/");
+  const [path, query] = (location.hash.replace(/^#/, "") || "/").split("?");
+  const params = new URLSearchParams(query || "");
+  const [, section, id] = path.split("/");
   document.querySelectorAll(".nav").forEach((a) => {
-    const target = a.getAttribute("href").replace(/^#/, "").split("/")[1];
+    const target = a.getAttribute("href").replace(/^#/, "").split("?")[0].split("/")[1];
     const current = section === "properties" ? "apartments" : section || "";
     a.toggleAttribute("aria-current", target === current);
     if (target === current) a.setAttribute("aria-current", "page");
@@ -768,6 +956,8 @@ async function route() {
   try {
     if (!section) await workCenterView();
     else if (section === "apartments") await apartmentsView();
+    else if (section === "tasks" && id) await taskView(id);
+    else if (section === "tasks") await tasksView(params);
     else if (section === "clients" && id) await clientView(id);
     else if (section === "clients") await clientsView();
     else if (section === "properties" && id) await propertyView(id);

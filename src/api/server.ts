@@ -10,6 +10,7 @@ import { intakeInput, supplierInvoiceInput } from "../domain/schemas.js";
 import * as cards from "../domain/cards.js";
 import * as q from "../domain/queries.js";
 import * as sr from "../domain/serviceRequests.js";
+import * as tasks from "../domain/tasks.js";
 import { createIntake, createSupplierInvoice, NotFoundError } from "../domain/services.js";
 import type { CrmAdapter } from "../planfix/adapter.js";
 import { importFromCrm } from "../sync/importer.js";
@@ -36,6 +37,12 @@ const ROUTES: Record<string, Permission | null> = {
   "GET /clients/:id": "apartments.view",
   "GET /properties/:id": "apartments.view",
   "GET /search": null,
+  "GET /tasks": "tasks.use",
+  "GET /tasks/:id": "tasks.use",
+  "POST /tasks": "tasks.use",
+  "POST /tasks/:id": "tasks.use",
+  "POST /tasks/:id/notes": "tasks.use",
+  "GET /team": "tasks.use",
   "POST /intakes": "apartments.create",
   "GET /service-requests": "requests.view",
   "GET /service-requests/:id": "requests.view",
@@ -146,6 +153,7 @@ export function buildServer(
     if (err instanceof NotFoundError) return reply.status(404).send({ error: err.message });
     if ((err as { code?: string }).code === "22P02") return reply.status(400).send({ error: "invalid id" });
     if (err instanceof sr.RuleError) return reply.status(409).send({ error: err.message });
+    if (err instanceof tasks.ForbiddenError) return reply.status(403).send({ error: err.message });
     if (err instanceof auth.AuthError) return reply.status(400).send({ error: err.message });
     if ((err as { code?: string }).code === "23505") return reply.status(409).send({ error: "already exists" });
     reply.log.error(err);
@@ -190,7 +198,7 @@ export function buildServer(
   }));
   app.get("/service-requests", async () => q.listServiceRequests(db));
   app.get("/supplier-invoices", async () => q.listSupplierInvoices(db));
-  app.get("/work-center", async () => q.workCenter(db));
+  app.get("/work-center", async (req) => q.workCenter(db, req.user!));
 
   // Saved locally first; Planfix sync happens in the background ("saved, waiting for sync").
   app.post("/intakes", async (req, reply) => {
@@ -238,6 +246,26 @@ export function buildServer(
          FROM outbox ORDER BY id DESC LIMIT 100`,
     );
     return { jobs: rows };
+  });
+
+  // Tasks. Everyone has their own; managers see and reassign everyone's.
+  app.get<{ Querystring: { filter?: string } }>("/tasks", async (req) =>
+    tasks.listTasks(db, req.user!, req.query.filter ?? "mine"),
+  );
+  app.get<IdParams>("/tasks/:id", async (req) => tasks.getTask(db, req.user!, req.params.id));
+  app.post("/tasks", async (req, reply) =>
+    reply.status(201).send(await tasks.createTask(db, req.user!, tasks.taskInput.parse(req.body))),
+  );
+  app.post<IdParams>("/tasks/:id", async (req) =>
+    tasks.updateTask(db, req.user!, req.params.id, tasks.taskChange.parse(req.body)),
+  );
+  app.post<IdParams>("/tasks/:id/notes", async (req, reply) =>
+    reply.status(201).send(await tasks.addNote(db, req.user!, req.params.id, tasks.noteInput.parse(req.body).body)),
+  );
+  // Who a task can be given to.
+  app.get("/team", async () => {
+    const { rows } = await db.query("SELECT id, name FROM users WHERE active ORDER BY name");
+    return rows;
   });
 
   // Users and roles (admin only).
