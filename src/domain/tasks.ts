@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { withTx, type Db } from "../db/pool.js";
 import { can, type Role } from "../permissions.js";
-import { isoDate, NotFoundError } from "./common.js";
+import { ForbiddenError, isoDate, NotFoundError } from "./common.js";
+import { notify } from "./notifications.js";
 import { RuleError } from "./serviceRequests.js";
 
 export const taskInput = z.object({
@@ -51,6 +52,7 @@ export async function createTask(db: Db, actor: Actor, input: z.infer<typeof tas
       actor.id || null,
       `נוצרה ושויכה ל${user.rows[0].name}`,
     ]);
+    if (assignee !== actor.id) await notify(tx, [assignee], `משימה חדשה: ${input.title}`, `#/tasks/${rows[0].id}`);
     return { id: rows[0].id as string };
   });
 }
@@ -71,6 +73,7 @@ export async function updateTask(db: Db, actor: Actor, id: string, change: z.inf
       const user = await tx.query("SELECT name FROM users WHERE id = $1 AND active", [change.assigneeId]);
       if (!user.rows[0]) throw new NotFoundError("assignee not found");
       notes.push(`הועברה ל${user.rows[0].name}`);
+      if (change.assigneeId !== actor.id) await notify(tx, [change.assigneeId], `הועברה אליך משימה: ${task.title}`, `#/tasks/${id}`);
     }
     if (change.dueOn !== undefined && change.dueOn !== task.due_on) notes.push(`מועד יעד: ${change.dueOn ?? "ללא"}`);
     if (change.urgent !== undefined && change.urgent !== task.urgent) notes.push(change.urgent ? "סומנה דחופה" : "לא דחופה");
@@ -146,5 +149,4 @@ export async function getTask(db: Db, actor: Actor, id: string) {
   return { ...rows[0], ...desc.rows[0], notes: notes.rows };
 }
 
-export class ForbiddenError extends Error {}
-export { RuleError };
+export { ForbiddenError, RuleError };

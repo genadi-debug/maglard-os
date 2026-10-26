@@ -53,6 +53,10 @@ export interface ServiceRequestPush {
   subject: string;
   description: string | null;
   reportedBy: string;
+  // Hebrew labels. Template 20 has no verified fields for them, so they go
+  // in the task description.
+  urgency?: string;
+  category?: string;
 }
 
 export interface ServiceRequestUpdate {
@@ -214,7 +218,14 @@ export class PlanfixAdapter implements CrmAdapter {
 
   createServiceRequest(r: ServiceRequestPush): Promise<number> {
     const f = FIELD.serviceRequest;
-    const details = [`פותח הקריאה: ${r.reportedBy}`, r.description].filter(Boolean).join("\n");
+    const details = [
+      `פותח הקריאה: ${r.reportedBy}`,
+      r.urgency && `דחיפות: ${r.urgency}`,
+      r.category && `סוג תקלה: ${r.category}`,
+      r.description,
+    ]
+      .filter(Boolean)
+      .join("\n");
     return this.createTask({
       name: `${r.apartmentCode} — ${r.address} — ${r.subject}`,
       description: `${details}\n\n${describe(r.ref)}`,

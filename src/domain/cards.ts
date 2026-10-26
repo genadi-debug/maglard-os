@@ -33,8 +33,8 @@ const ENGAGEMENTS = `
     JOIN contacts c ON c.id = e.client_id`;
 
 const REQUESTS = `
-  SELECT r.id, r.subject, r.status, r.charge_to, r.client_approved_at, r.created_at, r.closed_at,
-         e.apartment_code, s.name AS supplier_name
+  SELECT r.id, r.subject, r.status, r.urgency, r.category, r.charge_to, r.client_approved_at, r.created_at,
+         r.closed_at, e.apartment_code, s.name AS supplier_name
     FROM service_requests r
     JOIN engagements e ON e.id = r.engagement_id
     LEFT JOIN contacts s ON s.id = r.supplier_id`;
@@ -83,6 +83,54 @@ export async function propertyCard(db: Db, id: string) {
     requests: requests.rows,
     invoices: invoices.rows,
     suppliers: suppliers.rows,
+  };
+}
+
+export async function listSuppliers(db: Db) {
+  const { rows } = await db.query(
+    `SELECT c.id, c.name, c.planfix_id,
+            count(r.id) FILTER (WHERE r.status <> 'closed')::int AS open_jobs,
+            count(r.id) FILTER (WHERE r.status = 'closed')::int AS closed_jobs,
+            max(r.created_at) AS last_job
+       FROM contacts c LEFT JOIN service_requests r ON r.supplier_id = c.id
+      WHERE c.kind = 'supplier'
+      GROUP BY c.id ORDER BY c.name`,
+  );
+  return rows;
+}
+
+// The supplier card: their jobs, the apartments they worked in, how long a job
+// takes them, and their invoices (for roles that see invoices).
+export async function supplierCard(db: Db, id: string) {
+  const supplier = await db.query(
+    "SELECT id, name, is_company, planfix_id FROM contacts WHERE id = $1 AND kind = 'supplier'",
+    [id],
+  );
+  if (!supplier.rows[0]) throw new NotFoundError(`supplier ${id} not found`);
+  const [requests, invoices, properties, stats] = await Promise.all([
+    db.query(`${REQUESTS} WHERE r.supplier_id = $1 ORDER BY (r.status = 'closed'), r.created_at DESC`, [id]),
+    db.query(`${INVOICES} WHERE i.supplier_id = $1 ORDER BY i.invoice_date DESC`, [id]),
+    db.query(
+      `SELECT p.id, p.address, count(*)::int AS jobs FROM service_requests r
+         JOIN engagements e ON e.id = r.engagement_id JOIN properties p ON p.id = e.property_id
+        WHERE r.supplier_id = $1 GROUP BY p.id ORDER BY count(*) DESC, p.address`,
+      [id],
+    ),
+    db.query(
+      `SELECT count(*) FILTER (WHERE status <> 'closed')::int AS open_jobs,
+              count(*) FILTER (WHERE status = 'closed')::int AS closed_jobs,
+              round(avg(extract(epoch FROM closed_at - created_at) / 86400) FILTER (WHERE status = 'closed'), 1)::float
+                AS avg_days_to_close
+         FROM service_requests WHERE supplier_id = $1`,
+      [id],
+    ),
+  ]);
+  return {
+    ...supplier.rows[0],
+    ...stats.rows[0],
+    requests: requests.rows,
+    invoices: invoices.rows,
+    properties: properties.rows,
   };
 }
 

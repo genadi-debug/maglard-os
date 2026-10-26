@@ -55,7 +55,7 @@ describe.skipIf(!url)("client and property cards, search", () => {
     await open.inject({
       method: "POST",
       url: `/service-requests/${req.json().id}/assign`,
-      payload: { supplier: { name: "אינסטלטור" }, chargeTo: "maglard" },
+      payload: { supplier: { name: "אינסטלטור" }, chargeTo: "maglard", estimatedCost: 400 },
     });
     await open.inject({
       method: "POST",

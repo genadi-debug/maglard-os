@@ -11,6 +11,9 @@ const syncState = (table: string, idCol = "id") => `
     ELSE 'pending'
   END`;
 
+// Emergencies first, then high, normal and low.
+const URGENCY_ORDER = "array_position(ARRAY['emergency','high','normal','low'], r.urgency)";
+
 export async function listContacts(db: Db, kind?: string) {
   const { rows } = await db.query(
     `SELECT id, kind, name, is_company, planfix_id FROM contacts
@@ -35,13 +38,14 @@ export async function listEngagements(db: Db) {
 
 export async function listServiceRequests(db: Db) {
   const { rows } = await db.query(
-    `SELECT r.id, r.subject, r.status, r.charge_to, r.client_approved_at, r.reported_by, r.created_at,
-            e.apartment_code, p.address, s.name AS supplier_name
+    `SELECT r.id, r.subject, r.status, r.urgency, r.category, r.charge_to, r.client_approved_at, r.reported_by,
+            r.estimated_cost, r.created_at, e.apartment_code, p.address, s.name AS supplier_name,
+            EXISTS (SELECT 1 FROM approvals a WHERE a.service_request_id = r.id AND a.status = 'pending') AS awaiting_approval
        FROM service_requests r
        JOIN engagements e ON e.id = r.engagement_id
        JOIN properties p ON p.id = e.property_id
        LEFT JOIN contacts s ON s.id = r.supplier_id
-      ORDER BY (r.status = 'closed'), r.created_at DESC`,
+      ORDER BY (r.status = 'closed'), ${URGENCY_ORDER}, r.created_at DESC`,
   );
   return rows;
 }
@@ -64,13 +68,14 @@ export async function listSupplierInvoices(db: Db) {
 export async function workCenter(db: Db, actor: { id: string; role: Role }) {
   const me = actor.id || null;
   const requests = await db.query(
-    `SELECT r.id, r.subject, r.status, r.charge_to, r.client_approved_at, r.supplier_id, r.created_at,
-            e.apartment_code, p.address
+    `SELECT r.id, r.subject, r.status, r.urgency, r.charge_to, r.client_approved_at, r.supplier_id, r.created_at,
+            e.apartment_code, p.address,
+            EXISTS (SELECT 1 FROM approvals a WHERE a.service_request_id = r.id AND a.status = 'pending') AS awaiting_approval
        FROM service_requests r
        JOIN engagements e ON e.id = r.engagement_id
        JOIN properties p ON p.id = e.property_id
       WHERE r.status <> 'closed'
-      ORDER BY r.created_at`,
+      ORDER BY ${URGENCY_ORDER}, r.created_at`,
   );
   const myTasks = await db.query(
     `SELECT t.id, t.title, t.status, t.urgent, t.due_on, e.apartment_code,
@@ -95,7 +100,10 @@ export async function workCenter(db: Db, actor: { id: string; role: Role }) {
           AND due_on < current_date)::int AS my_overdue,
        (SELECT count(*) FROM tasks WHERE assignee_id = $1 AND status <> 'done'
           AND (urgent OR due_on < current_date))::int AS my_urgent,
-       (SELECT count(*) FROM tasks WHERE assignee_id = $1 AND status <> 'done')::int AS my_open`,
+       (SELECT count(*) FROM tasks WHERE assignee_id = $1 AND status <> 'done')::int AS my_open,
+       (SELECT count(*) FROM service_requests WHERE status <> 'closed' AND urgency = 'emergency')::int AS emergencies,
+       (SELECT count(*) FROM approvals WHERE status = 'pending')::int AS pending_approvals,
+       (SELECT count(*) FROM notifications WHERE user_id = $1 AND read_at IS NULL)::int AS unread`,
     [me],
   );
   const result: Record<string, unknown> = {

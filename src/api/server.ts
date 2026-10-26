@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import { ZodError } from "zod";
 import * as auth from "../auth.js";
+import * as files from "../domain/attachments.js";
+import { ForbiddenError } from "../domain/common.js";
+import * as notifications from "../domain/notifications.js";
 import type { Db } from "../db/pool.js";
 import { can, isRole, permissionsOf, ROLES, type Permission } from "../permissions.js";
 import { intakeInput, supplierInvoiceInput } from "../domain/schemas.js";
@@ -60,6 +63,18 @@ const ROUTES: Record<string, Permission | null> = {
   "POST /users/:id": "users.manage",
   "GET /audit": "audit.view",
   "POST /import/planfix": "import.run",
+  "GET /suppliers": "requests.view",
+  "GET /suppliers/:id": "requests.view",
+  "GET /approvals": "approvals.decide",
+  "POST /approvals/:id": "approvals.decide",
+  "GET /settings": null,
+  "POST /settings": "settings.manage",
+  "GET /notifications": null,
+  "POST /notifications/read": null,
+  // Access to files follows the record they belong to (domain/attachments.ts).
+  "GET /files/:type/:id": null,
+  "POST /files/:type/:id": null,
+  "GET /files/:id": null,
 };
 
 // Used when auth is switched off (tests of the screens and flows).
@@ -153,7 +168,13 @@ export function buildServer(
     if (err instanceof NotFoundError) return reply.status(404).send({ error: err.message });
     if ((err as { code?: string }).code === "22P02") return reply.status(400).send({ error: "invalid id" });
     if (err instanceof sr.RuleError) return reply.status(409).send({ error: err.message });
-    if (err instanceof tasks.ForbiddenError) return reply.status(403).send({ error: err.message });
+    if (err instanceof ForbiddenError) return reply.status(403).send({ error: err.message });
+    if ((err as { code?: string }).code === "FST_ERR_CTP_BODY_TOO_LARGE") {
+      return reply.status(413).send({ error: "הקובץ גדול מדי (עד 10MB)" });
+    }
+    if ((err as { code?: string }).code === "FST_ERR_CTP_INVALID_MEDIA_TYPE") {
+      return reply.status(415).send({ error: "סוג קובץ לא נתמך: תמונה, PDF, Word או Excel" });
+    }
     if (err instanceof auth.AuthError) return reply.status(400).send({ error: err.message });
     if ((err as { code?: string }).code === "23505") return reply.status(409).send({ error: "already exists" });
     reply.log.error(err);
@@ -197,6 +218,12 @@ export function buildServer(
     hits: await cards.search(db, req.query.q ?? "", { invoices: can(req.user!.role, "invoices.view") }),
   }));
   app.get("/service-requests", async () => q.listServiceRequests(db));
+  app.get("/suppliers", async () => cards.listSuppliers(db));
+  app.get<IdParams>("/suppliers/:id", async (req) => {
+    const card = await cards.supplierCard(db, req.params.id);
+    const role = req.user!.role;
+    return { ...card, invoices: can(role, "invoices.view") ? hideAmounts(role, card.invoices) : [] };
+  });
   app.get("/supplier-invoices", async () => q.listSupplierInvoices(db));
   app.get("/work-center", async (req) => q.workCenter(db, req.user!));
 
@@ -216,11 +243,11 @@ export function buildServer(
   type IdParams = { Params: { id: string } };
 
   app.post("/service-requests", async (req, reply) => {
-    return reply.status(201).send(await sr.openRequest(db, sr.openInput.parse(req.body)));
+    return reply.status(201).send(await sr.openRequest(db, req.user!, sr.openInput.parse(req.body)));
   });
   app.get<IdParams>("/service-requests/:id", async (req) => sr.getRequest(db, req.params.id));
   app.post<IdParams>("/service-requests/:id/assign", async (req) =>
-    sr.assignSupplier(db, req.params.id, sr.assignInput.parse(req.body)),
+    sr.assignSupplier(db, req.user!, req.params.id, sr.assignInput.parse(req.body)),
   );
   app.post<IdParams>("/service-requests/:id/client-approval", async (req) =>
     sr.recordClientApproval(db, req.params.id, sr.approvalInput.parse(req.body)),
@@ -266,6 +293,81 @@ export function buildServer(
   app.get("/team", async () => {
     const { rows } = await db.query("SELECT id, name FROM users WHERE active ORDER BY name");
     return rows;
+  });
+
+  // Costs above the threshold, waiting for a manager.
+  app.get<{ Querystring: { which?: string } }>("/approvals", async (req) =>
+    sr.listApprovals(db, req.query.which === "decided" ? "decided" : "pending"),
+  );
+  app.post<IdParams>("/approvals/:id", async (req) =>
+    sr.decideApproval(db, req.user!, req.params.id, sr.decisionInput.parse(req.body)),
+  );
+
+  app.get("/settings", async () => ({ approvalThreshold: await sr.approvalThreshold(db) }));
+  app.post("/settings", async (req, reply) => {
+    const { approvalThreshold } = (req.body ?? {}) as { approvalThreshold?: unknown };
+    if (typeof approvalThreshold !== "number" || !(approvalThreshold >= 0)) {
+      return reply.status(400).send({ error: "סף האישור צריך להיות מספר" });
+    }
+    await db.query(
+      `INSERT INTO settings (key, value, updated_by, updated_at) VALUES ('approval_threshold', $1, $2, now())
+       ON CONFLICT (key) DO UPDATE SET value = $1, updated_by = $2, updated_at = now()`,
+      [JSON.stringify(approvalThreshold), req.user!.id || null],
+    );
+    return { approvalThreshold };
+  });
+
+  app.get("/notifications", async (req) => notifications.listNotifications(db, req.user!.id));
+  app.post("/notifications/read", async (req) => {
+    const { id } = (req.body ?? {}) as { id?: number };
+    await notifications.markRead(db, req.user!.id, typeof id === "number" ? id : undefined);
+    return { ok: true };
+  });
+
+  // Files. The body is the file itself; its name travels in X-Filename.
+  app.addContentTypeParser([...files.MIME_TYPES], { parseAs: "buffer", bodyLimit: files.MAX_BYTES }, (_req, body, done) =>
+    done(null, body),
+  );
+  type FileParams = { Params: { type: string; id: string } };
+  const entityType = (type: string) => {
+    if (!files.isEntityType(type)) throw new NotFoundError(`no files for ${type}`);
+    return type;
+  };
+  app.get<FileParams>("/files/:type/:id", async (req) =>
+    files.listAttachments(db, req.user!, entityType(req.params.type), req.params.id),
+  );
+  app.post<FileParams>("/files/:type/:id", async (req, reply) => {
+    const mime = String(req.headers["content-type"] ?? "").split(";")[0].trim();
+    if (!Buffer.isBuffer(req.body) || !(files.MIME_TYPES as readonly string[]).includes(mime)) {
+      return reply.status(415).send({ error: "סוג קובץ לא נתמך: תמונה, PDF, Word או Excel" });
+    }
+    if (!req.body.length) return reply.status(400).send({ error: "הקובץ ריק" });
+    const raw = String(req.headers["x-filename"] ?? "file");
+    let filename: string;
+    try {
+      filename = decodeURIComponent(raw);
+    } catch {
+      filename = raw;
+    }
+    filename = filename.replace(/[\\/\r\n"]/g, "_").slice(0, 200) || "file";
+    const type = entityType(req.params.type);
+    return reply.status(201).send(await files.addAttachment(db, req.user!, type, req.params.id, { filename, mime, data: req.body }));
+  });
+  app.get<IdParams>("/files/:id", async (req, reply) => {
+    const f = await files.readAttachment(db, req.user!, req.params.id);
+    // Photos and PDFs open in the browser; other documents download.
+    const image = f.mime.startsWith("image/");
+    const inline = image || f.mime === "application/pdf";
+    if (image) reply.header("Content-Security-Policy", "sandbox; default-src 'none'; img-src 'self'");
+    return reply
+      .type(f.mime)
+      .header("X-Content-Type-Options", "nosniff")
+      .header("Cache-Control", "private, max-age=3600")
+      .header(
+        "Content-Disposition",
+        `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(f.filename)}`,
+      )
+      .send(f.data);
   });
 
   // Users and roles (admin only).

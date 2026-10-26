@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { Tx } from "../db/pool.js";
 
 export class NotFoundError extends Error {}
+export class ForbiddenError extends Error {}
 
 export const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY-MM-DD");
 export const money = z.number().nonnegative().multipleOf(0.01);
