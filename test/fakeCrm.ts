@@ -1,5 +1,6 @@
 import type {
   CrmAdapter,
+  ImportedBilling,
   ImportedEngagement,
   ImportedProperty,
   ImportedServiceRequest,
@@ -47,5 +48,7 @@ export class FakeCrm implements CrmAdapter {
   readServiceRequests = async () => this.serviceRequests;
   supplierInvoices: ImportedSupplierInvoice[] = [];
   readSupplierInvoices = async () => this.supplierInvoices;
+  billing: ImportedBilling = { contracts: [], charges: [], bills: [] };
+  readBilling = async () => this.billing;
   count = (m: string) => this.calls.filter((c) => c.method === m).length;
 }

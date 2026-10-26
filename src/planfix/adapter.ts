@@ -22,6 +22,59 @@ export interface CrmAdapter {
   readEngagements(): Promise<ImportedEngagement[]>;
   readServiceRequests(): Promise<ImportedServiceRequest[]>;
   readSupplierInvoices(): Promise<ImportedSupplierInvoice[]>;
+  // The client's contracts, charges and accumulated bills, as Planfix computes them.
+  readBilling(): Promise<ImportedBilling>;
+}
+
+type TaskRef = { planfixTaskId: number; name: string };
+
+export interface ImportedBilling {
+  contracts: {
+    planfixTaskId: number;
+    name: string;
+    status: string | null;
+    client: ContactRef | null;
+    engagement: TaskRef | null;
+    moveInOn: string | null;
+    moveOutOn: string | null;
+    monthlyPrice: number | null;
+    setupFee: number | null;
+    deposit: number | null;
+  }[];
+  charges: {
+    planfixTaskId: number;
+    name: string;
+    status: string | null;
+    client: ContactRef | null;
+    engagement: TaskRef | null;
+    contractTaskId: number | null;
+    chargeType: string | null;
+    vatType: string | null;
+    periodFrom: string | null;
+    periodTo: string | null;
+    amountNet: number | null;
+    amountVat: number | null;
+    amountTotal: number | null;
+    received: number | null;
+    balance: number | null;
+    billTaskIds: number[];
+  }[];
+  bills: {
+    planfixTaskId: number;
+    name: string;
+    status: string | null;
+    client: ContactRef | null;
+    periodFrom: string | null;
+    periodTo: string | null;
+    submittedOn: string | null;
+    amount: number | null;
+    computedTotal: number | null;
+    balance: number | null;
+    missingCharges: number | null;
+    approved: boolean | null;
+    submissionVerified: boolean | null;
+    chargeTaskIds: number[];
+  }[];
 }
 
 export interface ImportedSupplierInvoice {
@@ -144,11 +197,26 @@ export const pfDate = (iso: string) => ({ date: iso.split("-").reverse().join("-
 type RawTask = {
   id: number;
   parent?: { id: number };
-  status?: { id: number };
+  name?: string;
+  status?: { id: number; name?: string };
   customFieldData?: { field: { id: number }; value: unknown }[] };
 const fieldOf = (t: RawTask, id: number) => t.customFieldData?.find((c) => c.field.id === id)?.value;
 const readText = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
 const readNumber = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+// Formula fields come back as strings ("708.00").
+const readAmount = (v: unknown) => {
+  const n = typeof v === "string" && v.trim() ? Number(v) : v;
+  return typeof n === "number" && Number.isFinite(n) ? n : null;
+};
+const readBool = (v: unknown) => (typeof v === "boolean" ? v : null);
+// A directory entry ({id, value}) or a plain text value.
+const readLabel = (v: unknown) => readText((v as { value?: unknown } | null)?.value) ?? readText(v);
+const readTaskRef = (v: unknown) => {
+  const t = v as { id?: unknown; name?: unknown } | null;
+  return typeof t?.id === "number" ? { planfixTaskId: t.id, name: String(t.name ?? "") } : null;
+};
+const readTaskIds = (v: unknown) =>
+  Array.isArray(v) ? v.map((t) => (t as { id?: unknown })?.id).filter((id): id is number => typeof id === "number") : [];
 const readTaskId = (v: unknown) => (v && typeof (v as { id?: unknown }).id === "number" ? (v as { id: number }).id : null);
 export function readContact(v: unknown): ContactRef | null {
   const ref = v as { id?: string; name?: string } | null;
@@ -347,6 +415,61 @@ export class PlanfixAdapter implements CrmAdapter {
         engagement: typeof eng?.id === "number" ? { planfixTaskId: eng.id, name: String(eng.name ?? "") } : null,
       };
     });
+  }
+
+  async readBilling(): Promise<ImportedBilling> {
+    const k = FIELD.clientContract;
+    const c = FIELD.charge;
+    const b = FIELD.bill;
+    const extra = ["name", "status"];
+    const [contracts, charges, bills] = await Promise.all([
+      this.listByTemplate(TEMPLATE.clientContract, Object.values(k), extra),
+      this.listByTemplate(TEMPLATE.charge, Object.values(c), extra),
+      this.listByTemplate(TEMPLATE.bill, Object.values(b), extra),
+    ]);
+    const head = (t: RawTask) => ({ planfixTaskId: t.id, name: t.name ?? "", status: readText(t.status?.name) });
+    return {
+      contracts: contracts.map((t) => ({
+        ...head(t),
+        client: readContact(fieldOf(t, k.client)),
+        engagement: readTaskRef(fieldOf(t, k.engagement)),
+        moveInOn: readDate(fieldOf(t, k.moveInOn)),
+        moveOutOn: readDate(fieldOf(t, k.moveOutOn)),
+        monthlyPrice: readAmount(fieldOf(t, k.monthlyPrice)),
+        setupFee: readAmount(fieldOf(t, k.setupFee)),
+        deposit: readAmount(fieldOf(t, k.deposit)),
+      })),
+      charges: charges.map((t) => ({
+        ...head(t),
+        client: readContact(fieldOf(t, c.client)),
+        engagement: readTaskRef(fieldOf(t, c.engagement)),
+        contractTaskId: readTaskId(fieldOf(t, c.contract)),
+        chargeType: readLabel(fieldOf(t, c.chargeType)),
+        vatType: readLabel(fieldOf(t, c.vatType)),
+        periodFrom: readDate(fieldOf(t, c.periodFrom)),
+        periodTo: readDate(fieldOf(t, c.periodTo)),
+        amountNet: readAmount(fieldOf(t, c.amountNet)),
+        amountVat: readAmount(fieldOf(t, c.amountVat)),
+        amountTotal: readAmount(fieldOf(t, c.amountTotal)),
+        received: readAmount(fieldOf(t, c.received)),
+        balance: readAmount(fieldOf(t, c.balance)),
+        billTaskIds: readTaskIds(fieldOf(t, c.bills)),
+      })),
+      bills: bills.map((t) => ({
+        ...head(t),
+        client: readContact(fieldOf(t, b.client)),
+        periodFrom: readDate(fieldOf(t, b.periodFrom)),
+        periodTo: readDate(fieldOf(t, b.periodTo)),
+        submittedOn: readDate(fieldOf(t, b.submittedOn)),
+        amount: readAmount(fieldOf(t, b.amount)),
+        computedTotal: readAmount(fieldOf(t, b.computedTotal)),
+        balance: readAmount(fieldOf(t, b.balance)),
+        missingCharges: readAmount(fieldOf(t, b.missingCharges)),
+        approved: readBool(fieldOf(t, b.approved)),
+        submissionVerified: readBool(fieldOf(t, b.submissionVerified)),
+        chargeTaskIds: readTaskIds(fieldOf(t, b.charges)),
+      })),
+    };
   }
 
   // Filter type 51 = task template (verified read-only on maglardsand: 55 tasks

@@ -4,6 +4,7 @@ import { enqueue } from "../domain/services.js";
 import { RuleError } from "../domain/serviceRequests.js";
 import type { ContactRef, CrmAdapter } from "../planfix/adapter.js";
 import { SERVICE_REQUEST_STATUS } from "../planfix/fields.js";
+import { refreshPlanfixBilling } from "./planfixBilling.js";
 import { refreshPlanfixInvoices } from "./planfixInvoices.js";
 
 // Reading changes back from Planfix (spec: periodic scan and a conflict queue).
@@ -503,6 +504,9 @@ export function startReadback(
     );
     await refreshPlanfixInvoices(db, crm).catch((err) =>
       console.error("planfix invoices read error", (err as Error).message),
+    );
+    await refreshPlanfixBilling(db, crm).catch((err) =>
+      console.error("planfix billing read error", (err as Error).message),
     );
   };
   const first = setTimeout(tick, 30_000);

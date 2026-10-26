@@ -7,6 +7,10 @@ export const TEMPLATE = {
   supplierInvoice: 22,
   // "מגלארד — מוקד תקלות", verified 2026-10-26 (task 336). The UI's object id 128526 is not the API id.
   serviceRequest: 20,
+  // Billing, read only (verified 2026-10-26 on tasks 115-123 of maglardsand).
+  clientContract: 83,
+  charge: 21,
+  bill: 23,
 } as const;
 
 // Contact templates by kind, verified against maglardsand 2026-10-26 (contacts
@@ -59,5 +63,46 @@ export const FIELD = {
     subject: 9878,
     supplier: 9882,
     lastUpdate: 9886,
+  },
+  // Client rental contract (template 83).
+  clientContract: {
+    client: 9844,
+    engagement: 9868,
+    moveInOn: 10022,
+    moveOutOn: 10024,
+    monthlyPrice: 10026,
+    setupFee: 10028,
+    deposit: 10030,
+  },
+  // Charge or credit (template 21). Net, VAT and balance are Planfix formulas.
+  charge: {
+    client: 9844,
+    engagement: 9868,
+    contract: 10116,
+    chargeType: 9890,
+    vatType: 10310,
+    periodFrom: 9892,
+    periodTo: 9894,
+    amountTotal: 9896,
+    received: 9898,
+    amountNet: 10190,
+    amountVat: 10192,
+    balance: 9938,
+    bills: 9976,
+  },
+  // Accumulated bill (template 23). The computed total, balance and missing
+  // count are Planfix formulas.
+  bill: {
+    client: 9844,
+    charges: 9920,
+    periodFrom: 9892,
+    periodTo: 9894,
+    submittedOn: 9926,
+    amount: 9922,
+    computedTotal: 9970,
+    balance: 9972,
+    missingCharges: 10040,
+    approved: 10324,
+    submissionVerified: 9974,
   },
 } as const;
