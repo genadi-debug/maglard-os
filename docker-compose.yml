@@ -1,0 +1,8 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: maglard
+      POSTGRES_PASSWORD: maglard
+      POSTGRES_DB: maglard_os
+    ports: ["5432:5432"]
