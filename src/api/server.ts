@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import { ZodError } from "zod";
+import * as auth from "../auth.js";
 import type { Db } from "../db/pool.js";
 import { intakeInput, supplierInvoiceInput } from "../domain/schemas.js";
 import * as q from "../domain/queries.js";
@@ -16,8 +17,35 @@ const assets: Record<string, string> = {
 };
 const types: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8" };
 
-export function buildServer(db: Db) {
+// Reachable without a session: the app shell (it shows the login form), health and login.
+const PUBLIC = new Set(["GET /", "GET /app.js", "GET /health", "POST /auth/login"]);
+
+export function buildServer(db: Db, opts: { requireAuth?: boolean; secureCookie?: boolean } = {}) {
   const app = Fastify({ logger: false });
+  const requireAuth = opts.requireAuth ?? true;
+  const cookie = (value: string, maxAge: number) =>
+    `${auth.SESSION_COOKIE}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}` +
+    (opts.secureCookie ?? true ? "; Secure" : "");
+
+  app.addHook("onRequest", async (req, reply) => {
+    if (!requireAuth || PUBLIC.has(`${req.method} ${req.routeOptions.url}`)) return;
+    const user = await auth.userForToken(db, auth.readCookie(req.headers.cookie, auth.SESSION_COOKIE));
+    if (!user) return reply.status(401).send({ error: "login required" });
+  });
+
+  app.post("/auth/login", async (req, reply) => {
+    const { email, password } = (req.body ?? {}) as { email?: string; password?: string };
+    const token = email && password ? await auth.login(db, email, password) : null;
+    if (!token) return reply.status(401).send({ error: "אימייל או סיסמה שגויים" });
+    return reply.header("Set-Cookie", cookie(token, auth.SESSION_DAYS * 86400)).send({ ok: true });
+  });
+
+  app.post("/auth/logout", async (req, reply) => {
+    await auth.logout(db, auth.readCookie(req.headers.cookie, auth.SESSION_COOKIE));
+    return reply.header("Set-Cookie", cookie("", 0)).send({ ok: true });
+  });
+
+  app.get("/auth/me", async (req) => auth.userForToken(db, auth.readCookie(req.headers.cookie, auth.SESSION_COOKIE)));
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) return reply.status(400).send({ error: "validation", issues: err.issues });

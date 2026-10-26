@@ -9,7 +9,7 @@ const url = process.env.TEST_DATABASE_URL;
 
 describe.skipIf(!url)("paid service request", () => {
   const db = createPool(url ?? "");
-  const app = buildServer(db);
+  const app = buildServer(db, { requireAuth: false });
   let engagementId: string;
 
   beforeAll(async () => {
