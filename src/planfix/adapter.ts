@@ -15,6 +15,34 @@ export interface CrmAdapter {
   createSupplierInvoice(input: SupplierInvoicePush): Promise<number>;
   createServiceRequest(input: ServiceRequestPush): Promise<number>;
   updateServiceRequest(taskId: number, input: ServiceRequestUpdate): Promise<void>;
+  // Read side, for the one-off import of what already lives in the CRM.
+  readProperties(): Promise<ImportedProperty[]>;
+  readEngagements(): Promise<ImportedEngagement[]>;
+}
+
+export interface ContactRef {
+  planfixId: number;
+  name: string;
+}
+
+export interface ImportedProperty {
+  planfixTaskId: number;
+  baseNumber: number | null;
+  address: string | null;
+  owner: ContactRef | null;
+  client: ContactRef | null;
+}
+
+export interface ImportedEngagement {
+  planfixTaskId: number;
+  propertyTaskId: number | null;
+  apartmentCode: string | null;
+  owner: ContactRef | null;
+  client: ContactRef | null;
+  startsOn: string | null;
+  endsOn: string | null;
+  moveInOn: string | null;
+  monthlyRent: number | null;
 }
 
 export interface ServiceRequestPush {
@@ -79,6 +107,23 @@ const contact = (id: number) => ({ id: `contact:${id}` });
 const task = (id: number) => ({ id });
 // ISO 'YYYY-MM-DD' -> Planfix 'DD-MM-YYYY'
 export const pfDate = (iso: string) => ({ date: iso.split("-").reverse().join("-") });
+
+// Reading values back, in the shapes maglardsand returns (seen on tasks 113-347).
+type RawTask = { id: number; parent?: { id: number }; customFieldData?: { field: { id: number }; value: unknown }[] };
+const fieldOf = (t: RawTask, id: number) => t.customFieldData?.find((c) => c.field.id === id)?.value;
+const readText = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+const readNumber = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+const readTaskId = (v: unknown) => (v && typeof (v as { id?: unknown }).id === "number" ? (v as { id: number }).id : null);
+export function readContact(v: unknown): ContactRef | null {
+  const ref = v as { id?: string; name?: string } | null;
+  const m = /^contact:(\d+)$/.exec(ref?.id ?? "");
+  return m ? { planfixId: Number(m[1]), name: (ref?.name ?? "").trim() } : null;
+}
+// Planfix {date: 'DD-MM-YYYY'} -> ISO 'YYYY-MM-DD'
+export function readDate(v: unknown): string | null {
+  const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec((v as { date?: string } | null)?.date ?? "");
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : null;
+}
 
 const describe = (ref: string) => `Created by MAGLARD OS (${ref}).`;
 
@@ -190,6 +235,51 @@ export class PlanfixAdapter implements CrmAdapter {
       status: { id: SERVICE_REQUEST_STATUS[u.status] },
       ...(fields.length ? { customFieldData: fields } : {}),
     });
+  }
+
+  async readProperties(): Promise<ImportedProperty[]> {
+    const f = FIELD.property;
+    const tasks = await this.listByTemplate(TEMPLATE.property, [f.baseNumber, f.address, f.currentOwner, f.client]);
+    return tasks.map((t) => ({
+      planfixTaskId: t.id,
+      baseNumber: readNumber(fieldOf(t, f.baseNumber)),
+      address: readText(fieldOf(t, f.address)),
+      owner: readContact(fieldOf(t, f.currentOwner)),
+      client: readContact(fieldOf(t, f.client)),
+    }));
+  }
+
+  async readEngagements(): Promise<ImportedEngagement[]> {
+    const f = FIELD.engagement;
+    const tasks = await this.listByTemplate(TEMPLATE.engagement, Object.values(f));
+    return tasks.map((t) => ({
+      planfixTaskId: t.id,
+      propertyTaskId: readTaskId(fieldOf(t, f.property)) ?? t.parent?.id ?? null,
+      apartmentCode: readText(fieldOf(t, f.apartmentCode)),
+      owner: readContact(fieldOf(t, f.owner)),
+      client: readContact(fieldOf(t, f.client)),
+      startsOn: readDate(fieldOf(t, f.startsOn)),
+      endsOn: readDate(fieldOf(t, f.endsOn)),
+      moveInOn: readDate(fieldOf(t, f.moveInOn)),
+      monthlyRent: readNumber(fieldOf(t, f.monthlyRent)),
+    }));
+  }
+
+  // Filter type 51 = task template (verified read-only on maglardsand: 55 tasks
+  // of template 11, all of that template).
+  private async listByTemplate(templateId: number, fieldIds: number[]): Promise<RawTask[]> {
+    const pageSize = 100;
+    const all: RawTask[] = [];
+    for (let offset = 0; ; offset += pageSize) {
+      const res = await this.client.request<{ tasks: RawTask[] }>("POST", "task/list", {
+        pageSize,
+        offset,
+        fields: ["id", "parent", ...fieldIds].join(","),
+        filters: [{ type: 51, operator: "equal", value: templateId }],
+      });
+      all.push(...res.tasks);
+      if (res.tasks.length < pageSize) return all;
+    }
   }
 
   private async createTask(body: {

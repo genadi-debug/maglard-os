@@ -28,6 +28,7 @@ export const PERMISSIONS = {
   "sync.view": ["admin", "management", "finance"],
   "sync.retry": ["admin", "management"],
   "users.manage": ["admin"],
+  "import.run": ["admin"],
   "audit.view": ["admin", "management"],
 } satisfies Record<string, readonly Role[]>;
 export type Permission = keyof typeof PERMISSIONS;

@@ -142,3 +142,44 @@ describe("PlanfixAdapter", () => {
     expect(body.filters).toEqual([{ type: 73, operator: "equal", value: 337 }]);
   });
 });
+
+describe("PlanfixAdapter reads", () => {
+  it("reads engagements in the shapes maglardsand returns, page by page", async () => {
+    const task = {
+      id: 114,
+      parent: { id: 113 },
+      customFieldData: [
+        { field: { id: 9832 }, value: "10015" },
+        { field: { id: 9834 }, value: { id: 113, name: "10015 — ..." } },
+        { field: { id: 9842 }, value: { id: "contact:16", name: "תומר רובין" } },
+        { field: { id: 9844 }, value: { id: "contact:15", name: "תאגיד" } },
+        { field: { id: 9838 }, value: { datetime: "2026-10-01T00:00Z", date: "01-10-2026", time: "00:00" } },
+        { field: { id: 9840 }, value: { date: "30-06-2028" } },
+        { field: { id: 10022 }, value: null },
+        { field: { id: 9864 }, value: 5200.0 },
+      ],
+    };
+    const pages = [Array.from({ length: 100 }, (_, i) => ({ id: i + 1000 })), [task]];
+    const bodies: any[] = [];
+    const impl: Fetch = async (_url, init) => {
+      bodies.push(JSON.parse(String(init!.body)));
+      return new Response(JSON.stringify({ result: "success", tasks: pages[bodies.length - 1] }));
+    };
+    const rows = await new PlanfixAdapter(new PlanfixClient("https://x/rest/", "t", impl)).readEngagements();
+    expect(bodies.map((b) => b.offset)).toEqual([0, 100]);
+    expect(bodies[0].filters).toEqual([{ type: 51, operator: "equal", value: 12 }]);
+    expect(rows).toHaveLength(101);
+    expect(rows[100]).toEqual({
+      planfixTaskId: 114,
+      propertyTaskId: 113,
+      apartmentCode: "10015",
+      owner: { planfixId: 16, name: "תומר רובין" },
+      client: { planfixId: 15, name: "תאגיד" },
+      startsOn: "2026-10-01",
+      endsOn: "2028-06-30",
+      moveInOn: null,
+      monthlyRent: 5200,
+    });
+    expect(rows[0]).toMatchObject({ apartmentCode: null, owner: null, startsOn: null });
+  });
+});

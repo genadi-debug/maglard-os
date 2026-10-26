@@ -34,6 +34,7 @@ sees only the screens and buttons their role allows. The screens are:
 - **Service requests:** a list, and a detail page with one next-action button and the request's history.
 - **Supplier invoices:** amounts, handling and sync state.
 - **Planfix sync:** the queue, with a resend button on failed jobs.
+- **Import from Planfix** (admin, on the sync screen): a dry run that reports what would be imported and skipped, then the real import.
 - **Users** (admin): add users, change roles, block, set a new password.
 - **Audit log** (admin, management): every change and login attempt, including refused ones.
 
@@ -140,6 +141,17 @@ is safe but wasteful.
   (9978): לחיוב = client, בעלים = owner, נספג = MAGLARD (confirmed).
 - If a record changes while its sync job is running, the job runs again
   (`request_seq`), so Planfix always ends on the latest state.
+
+## Import from Planfix
+
+`src/sync/importer.ts` reads the property (11) and intake (12) tasks and
+their owners and clients, and upserts them by Planfix id. Running it again
+updates the same rows. Imported rows carry their Planfix ids, so the worker
+never pushes them back. A record that misses required data or clashes with
+another (same base number or apartment code) is skipped and listed in the
+report. A dry run on maglardsand (2026-10-26): 58 contacts, 55 properties,
+54 of 59 engagements, 5 skipped. Contracts (82/83) and supplier invoices are
+not imported yet.
 
 ## Known gaps
 
