@@ -277,3 +277,84 @@ export async function getBill(db: Db, clientId: string, billTaskId: number) {
     totals: { net: sum("amount_net"), vat: sum("amount_vat"), total: sum("amount_total"), balance: sum("balance") },
   };
 }
+
+const MONTH = z.string().regex(/^\d{4}-\d{2}$/, "חודש בפורמט YYYY-MM");
+export const rentInput = z.object({ month: MONTH });
+
+// The month's rent per client contract: each contract with a monthly price
+// that runs in the month, over the days it runs. `charged` when a rent charge
+// on that contract already covers part of the month.
+export async function rentPlan(db: Db, clientId: string, month: string) {
+  MONTH.parse(month);
+  const client = await db.query("SELECT name, planfix_id FROM contacts WHERE id = $1 AND kind = 'client'", [clientId]);
+  if (!client.rows[0]) throw new NotFoundError(`client ${clientId} not found`);
+  const { rows } = await db.query(
+    `WITH m AS (SELECT $2::date AS first, ($2::date + interval '1 month - 1 day')::date AS last)
+     SELECT x.planfix_task_id AS contract_task_id, x.name AS contract_name, x.engagement_task_id, x.monthly_price,
+            coalesce(e.apartment_code, nullif(split_part(x.engagement_name, ' — ', 1), '')) AS apartment_code,
+            to_char(greatest(m.first, coalesce(x.move_in_on, m.first)), 'YYYY-MM-DD') AS period_from,
+            to_char(least(m.last, coalesce(x.move_out_on, m.last)), 'YYYY-MM-DD') AS period_to,
+            EXISTS (SELECT 1 FROM planfix_charges c
+                     WHERE c.contract_task_id = x.planfix_task_id AND c.charge_type = 'שכר דירה'
+                       AND c.period_from <= m.last AND c.period_to >= m.first) AS charged
+       FROM planfix_client_contracts x CROSS JOIN m
+       LEFT JOIN engagements e ON e.planfix_task_id = x.engagement_task_id
+      WHERE x.client_planfix_id = $1 AND x.monthly_price > 0 AND x.engagement_task_id IS NOT NULL
+        AND coalesce(x.move_in_on, m.first) <= m.last AND coalesce(x.move_out_on, m.last) >= m.first
+      ORDER BY apartment_code, x.planfix_task_id`,
+    [client.rows[0].planfix_id, `${month}-01`],
+  );
+  return { client: client.rows[0], month, contracts: rows };
+}
+
+// Opens the month's rent charges in Planfix, one per contract not yet charged.
+// Planfix computes the rent by days from the contract; the amount is set to
+// that figure and split by the client's VAT on rent.
+export async function createRentCharges(
+  db: Db,
+  crm: CrmAdapter,
+  userId: string | null,
+  clientId: string,
+  month: string,
+) {
+  const plan = await rentPlan(db, clientId, month);
+  const pf = plan.client.planfix_id as number | null;
+  if (!pf) throw new RuleError("הלקוח עוד לא נשלח ל־Planfix. אפשר לחייב אחרי הסנכרון.");
+  const todo = plan.contracts.filter((k) => !k.charged);
+  if (!todo.length) throw new RuleError("אין חוזים שעוד לא חויבו בשכ״ד לחודש הזה");
+  const [rules, rate] = await Promise.all([vatRules(db, clientId), vatRate(db)]);
+  const rule = rules.get("שכר דירה")!;
+  const [y, m] = month.split("-");
+  const results = [];
+  for (const k of todo) {
+    const name = `${k.apartment_code ?? "—"} — שכר דירה — ${m}/${y} — ${plan.client.name}`;
+    const planfixTaskId = await crm.createCharge({
+      name,
+      ref: `rent for client ${clientId}`,
+      clientPlanfixId: pf,
+      engagementTaskId: k.engagement_task_id,
+      contractTaskId: k.contract_task_id,
+      chargeType: "שכר דירה",
+      expenseTypeKey: rule.key,
+      periodFrom: k.period_from,
+      periodTo: k.period_to,
+      amountTotal: 0,
+      split: null,
+    });
+    const rent = await crm.readRentByDays(planfixTaskId);
+    if (rent == null) {
+      results.push({ planfixTaskId, apartment_code: k.apartment_code, amount: null, problem: "Planfix לא חישב שכ״ד לחיוב. יש להשלים את הסכום ב־Planfix." });
+      continue;
+    }
+    const split = rule.vat === null ? null : rule.vat ? splitVat(rent, rate) : { net: rent, vat: 0 };
+    await crm.setChargeAmount(planfixTaskId, rent, split);
+    results.push({ planfixTaskId, apartment_code: k.apartment_code, amount: rent, problem: null });
+  }
+  await db.query("INSERT INTO audit_log (user_id, action, entity_id, ok, detail) VALUES ($1, 'rent.charged', $2, true, $3)", [
+    userId,
+    clientId,
+    { month, charges: results },
+  ]);
+  await refreshPlanfixBilling(db, crm).catch(() => undefined);
+  return { month, created: results };
+}

@@ -30,6 +30,12 @@ export class FakeCrm implements CrmAdapter {
   createServiceRequest = (i: any) => this.record("createServiceRequest", i);
   createCharge = (i: any) => this.record("createCharge", i);
   createBill = (i: any) => this.record("createBill", i);
+  // Planfix's rent by days, by charge task id (default: the rule below).
+  rentByDays = new Map<number, number | null>();
+  readRentByDays = async (id: number) => (this.rentByDays.has(id) ? this.rentByDays.get(id)! : 1000);
+  setChargeAmount = async (taskId: number, amountTotal: number, split: unknown) => {
+    await this.record("setChargeAmount", { taskId, amountTotal, split });
+  };
   // Planfix auto-created intake tasks, by property task id.
   autoEngagements = new Map<number, number[]>();
   findEngagementTasks = async (propertyTaskId: number) => this.autoEngagements.get(propertyTaskId) ?? [];

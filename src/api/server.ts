@@ -69,6 +69,8 @@ const ROUTES: Record<string, Permission | null> = {
   "POST /billing/refresh": "billing.view",
   "POST /clients/:id/charges": "billing.manage",
   "POST /clients/:id/bills": "billing.manage",
+  "GET /clients/:id/rent-charges": "billing.manage",
+  "POST /clients/:id/rent-charges": "billing.manage",
   "GET /clients/:id/bills/:billId": "billing.view",
   "GET /sync/status": "sync.view",
   "POST /sync/:id/retry": "sync.retry",
@@ -334,6 +336,15 @@ export function buildServer(
   app.get<{ Params: { id: string; billId: string } }>("/clients/:id/bills/:billId", async (req) =>
     billing.getBill(db, req.params.id, Number(req.params.billId)),
   );
+  // The month's rent per contract, then opening the missing rent charges.
+  app.get<{ Params: { id: string }; Querystring: { month?: string } }>("/clients/:id/rent-charges", async (req) =>
+    billing.rentPlan(db, req.params.id, req.query.month ?? new Date().toISOString().slice(0, 7)),
+  );
+  app.post<IdParams>("/clients/:id/rent-charges", async (req, reply) => {
+    if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
+    const { month } = billing.rentInput.parse(req.body);
+    return reply.status(201).send(await billing.createRentCharges(db, opts.crm, req.user?.id || null, req.params.id, month));
+  });
   app.get("/work-center", async (req) => q.workCenter(db, req.user!));
 
   // Saved locally first; Planfix sync happens in the background ("saved, waiting for sync").

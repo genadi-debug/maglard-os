@@ -27,6 +27,9 @@ export interface CrmAdapter {
   readExpenseTypes(): Promise<ExpenseType[]>;
   createCharge(input: ChargePush): Promise<number>;
   createBill(input: BillPush): Promise<number>;
+  // Planfix's rent by days for a rent charge, and setting a charge's amount.
+  readRentByDays(chargeTaskId: number): Promise<number | null>;
+  setChargeAmount(chargeTaskId: number, amountTotal: number, split: { net: number; vat: number } | null): Promise<void>;
 }
 
 export interface BillPush {
@@ -540,6 +543,22 @@ export class PlanfixAdapter implements CrmAdapter {
       data.push({ field: { id: f.amountNet }, value: c.split.net }, { field: { id: f.amountVat }, value: c.split.vat });
     }
     return this.createTask({ name: c.name, description: describe(c.ref), template: { id: TEMPLATE.charge }, customFieldData: data });
+  }
+
+  // Verified on maglardsand task 351: a rent charge linked to a contract gets
+  // its rent by days at once; the amount (9896) is required, so the charge is
+  // opened at 0 and set to Planfix's figure.
+  async readRentByDays(chargeTaskId: number): Promise<number | null> {
+    const f = FIELD.charge.rentByDays;
+    const res = await this.client.request<{ task: RawTask }>("GET", `task/${chargeTaskId}?fields=id,${f}`);
+    return readAmount(fieldOf(res.task, f));
+  }
+
+  async setChargeAmount(chargeTaskId: number, amountTotal: number, split: { net: number; vat: number } | null) {
+    const f = FIELD.charge;
+    const data: FieldValue[] = [{ field: { id: f.amountTotal }, value: amountTotal }];
+    if (split) data.push({ field: { id: f.amountNet }, value: split.net }, { field: { id: f.amountVat }, value: split.vat });
+    await this.client.request("POST", `task/${chargeTaskId}`, { customFieldData: data });
   }
 
   // Verified on maglardsand task 349: Planfix sums the linked charges, counts

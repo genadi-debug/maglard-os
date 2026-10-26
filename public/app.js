@@ -1417,6 +1417,7 @@ async function billingSection(clientId) {
   const canCharge = allowed("billing.manage") && b.linked && b.apartments.length;
   const head = `<div class="head" style="align-items:end"><h2 style="margin:16px 0 0">חיובים וחשבונות</h2>
     <div class="actions" style="margin:0">${canCharge ? `<button class="btn primary" id="new-charge">חיוב חדש</button>` : ""}
+    ${allowed("billing.manage") && b.linked && b.contracts.length ? `<button class="btn" id="rent-charges">חיובי שכירות</button>` : ""}
     ${allowed("billing.manage") && b.unbilled.length ? `<button class="btn primary" id="issue-bill">הפקת חשבון</button>` : ""}
     <button class="btn" id="billing-refresh">רענון מ־Planfix</button></div></div>
     <p class="sub">מוצג כפי ש־Planfix מחשב אותו, לקריאה בלבד. שינוי סכום נעשה ב־Planfix.${
@@ -1549,6 +1550,43 @@ function billDialog(clientId) {
   total();
 }
 
+// The month's rent, one charge per contract not yet charged. Planfix computes
+// the rent by days from the contract.
+function rentDialog(clientId) {
+  const d = dialog(
+    "חיובי שכירות לחודש",
+    field("month", "חודש", `type="month" required value="${today().slice(0, 7)}"`) + `<div class="full" id="rent-plan"></div>`,
+    async (v) => {
+      const r = await api("POST", `/clients/${clientId}/rent-charges`, { month: v.month });
+      const problems = r.created.filter((c) => c.problem);
+      toast(`נפתחו ${r.created.length} חיובי שכ״ד ב־Planfix${problems.length ? `, ${problems.length} צריכים השלמה ב־Planfix` : ""}`);
+      view.querySelector("#billing").innerHTML = await billingSection(clientId);
+      wireBilling(clientId);
+    },
+    "פתיחת חיובים",
+  );
+  const box = d.querySelector("#rent-plan");
+  const load = async () => {
+    box.textContent = "בודק…";
+    try {
+      const p = await api("GET", `/clients/${clientId}/rent-charges?month=${d.querySelector("form").month.value}`);
+      const todo = p.contracts.filter((k) => !k.charged);
+      box.innerHTML = p.contracts.length
+        ? `${p.contracts
+            .map(
+              (k) => `<div>${esc(k.apartment_code || "—")} · ${span(k.period_from, k.period_to)} · ${money(k.monthly_price)} לחודש ·
+                ${k.charged ? pill(["כבר חויב", ""]) : pill(["ייפתח", "good"])}</div>`,
+            )
+            .join("")}<p class="sub">${todo.length} חיובים ייפתחו. הסכום לפי ימים יחושב ב־Planfix מתוך החוזה.</p>`
+        : `<p class="sub">אין חוזים עם מחיר חודשי שפעילים בחודש הזה</p>`;
+    } catch (err) {
+      box.textContent = err.message;
+    }
+  };
+  d.querySelector("form").month.addEventListener("change", load);
+  load();
+}
+
 // One bill as the client receives it, ready to print.
 async function billView(clientId, billId) {
   const { client, bill, charges, totals } = await api("GET", `/clients/${clientId}/bills/${billId}`);
@@ -1580,6 +1618,7 @@ async function billView(clientId, billId) {
 function wireBilling(clientId) {
   view.querySelector("#new-charge")?.addEventListener("click", () => chargeDialog(clientId));
   view.querySelector("#issue-bill")?.addEventListener("click", () => billDialog(clientId));
+  view.querySelector("#rent-charges")?.addEventListener("click", () => rentDialog(clientId));
   view.querySelectorAll("#billing tr[data-href]").forEach((tr) => {
     const go = () => (location.hash = tr.dataset.href);
     tr.addEventListener("click", go);
