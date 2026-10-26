@@ -17,13 +17,13 @@ const URGENCY_ORDER = "array_position(ARRAY['emergency','high','normal','low'], 
 export async function listContacts(db: Db, kind?: string) {
   const { rows } = await db.query(
     `SELECT id, kind, name, is_company, planfix_id FROM contacts
-      WHERE ($1::text IS NULL OR kind = $1) ORDER BY name`,
+      WHERE ($1::text IS NULL OR kind = $1) AND archived_at IS NULL ORDER BY name`,
     [kind ?? null],
   );
   return rows;
 }
 
-export async function listEngagements(db: Db) {
+export async function listEngagements(db: Db, archived = false) {
   const { rows } = await db.query(
     `SELECT e.id, e.property_id, e.client_id, e.apartment_code, p.address, o.name AS owner_name, c.name AS client_name,
             e.starts_on, e.ends_on, e.monthly_rent, e.planfix_task_id, ${syncState("e")} AS sync
@@ -31,7 +31,9 @@ export async function listEngagements(db: Db) {
        JOIN properties p ON p.id = e.property_id
        JOIN contacts o ON o.id = e.owner_id
        JOIN contacts c ON c.id = e.client_id
+      WHERE (p.archived_at IS NOT NULL) = $1
       ORDER BY e.created_at DESC`,
+    [archived],
   );
   return rows;
 }

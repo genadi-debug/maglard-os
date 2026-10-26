@@ -195,8 +195,11 @@ export async function removePerson(db: Db, contactId: string, personId: string) 
 }
 
 // The list for a kind, with whether each card is complete.
-export async function listByKind(db: Db, kind: Kind) {
-  const { rows } = await db.query("SELECT * FROM contacts WHERE kind = $1 ORDER BY name", [kind]);
+export async function listByKind(db: Db, kind: Kind, archived = false) {
+  const { rows } = await db.query(
+    "SELECT * FROM contacts WHERE kind = $1 AND (archived_at IS NOT NULL) = $2 ORDER BY name",
+    [kind, archived],
+  );
   return rows.map((c) => ({
     id: c.id,
     name: c.name,

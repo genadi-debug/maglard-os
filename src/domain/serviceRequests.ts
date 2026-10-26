@@ -1,11 +1,11 @@
 import { z } from "zod";
 import { withTx, type Db, type Tx } from "../db/pool.js";
 import type { Role } from "../permissions.js";
-import { contactRef, ForbiddenError, isoDate, money, NotFoundError, resolveContact } from "./common.js";
+import { contactRef, ForbiddenError, isoDate, money, NotFoundError, resolveContact, RuleError } from "./common.js";
 import { notify, notifyPermission } from "./notifications.js";
 import { enqueue } from "./services.js";
 
-export class RuleError extends Error {}
+export { RuleError };
 
 type Actor = { id: string; role: Role; name: string };
 
@@ -107,8 +107,13 @@ function expect(sr: { status: Status }, ...allowed: Status[]) {
 
 export async function openRequest(db: Db, actor: Actor, input: z.infer<typeof openInput>) {
   return withTx(db, async (tx) => {
-    const eng = await tx.query("SELECT id, apartment_code FROM engagements WHERE id = $1", [input.engagementId]);
+    const eng = await tx.query(
+      `SELECT e.id, e.apartment_code, p.archived_at FROM engagements e JOIN properties p ON p.id = e.property_id
+        WHERE e.id = $1`,
+      [input.engagementId],
+    );
     if (!eng.rows[0]) throw new NotFoundError(`engagement ${input.engagementId} not found`);
+    if (eng.rows[0].archived_at) throw new RuleError("הדירה בארכיון. יש להחזיר אותה מהארכיון קודם.");
     const { rows } = await tx.query(
       `INSERT INTO service_requests (engagement_id, subject, description, reported_by, urgency, category, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, status`,

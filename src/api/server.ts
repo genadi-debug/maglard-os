@@ -2,8 +2,9 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
 import * as auth from "../auth.js";
+import * as archive from "../domain/archive.js";
 import * as files from "../domain/attachments.js";
 import * as contacts from "../domain/contacts.js";
 import { ForbiddenError } from "../domain/common.js";
@@ -73,6 +74,10 @@ const ROUTES: Record<string, Permission | null> = {
   "POST /contacts/:id": "contacts.manage",
   "POST /contacts/:id/people": "contacts.manage",
   "POST /contacts/:id/people/:personId/remove": "contacts.manage",
+  "POST /contacts/:id/archive": "records.archive",
+  "POST /contacts/:id/delete": "records.delete",
+  "POST /properties/:id/archive": "records.archive",
+  "POST /properties/:id/delete": "records.delete",
   "GET /owners": "apartments.view",
   "GET /owners/:id": "apartments.view",
   "GET /suppliers": "requests.view",
@@ -210,9 +215,14 @@ export function buildServer(
       ? rows
       : rows.map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => !AMOUNTS.includes(k))) as T);
 
-  app.get("/engagements", async (req) => hideAmounts(req.user!.role, await q.listEngagements(db)));
+  // Lists show active cards; ?archived=1 shows the archive instead.
+  type ListQuery = { Querystring: { archived?: string } };
+  const archivedOf = (req: { query: { archived?: string } }) => req.query.archived === "1";
+  app.get<ListQuery>("/engagements", async (req) =>
+    hideAmounts(req.user!.role, await q.listEngagements(db, archivedOf(req))),
+  );
 
-  app.get("/clients", async () => cards.listClients(db));
+  app.get<ListQuery>("/clients", async (req) => cards.listClients(db, archivedOf(req)));
 
   // Cards: everything about one client or one property on a single screen.
   // Supplier invoices appear only for roles that see invoices.
@@ -222,15 +232,16 @@ export function buildServer(
     invoices: can(role, "invoices.view") ? hideAmounts(role, card.invoices) : [],
   });
   app.get<IdParams>("/clients/:id", async (req) => cardFor(req.user!.role, await cards.clientCard(db, req.params.id)));
-  app.get<IdParams>("/properties/:id", async (req) =>
-    cardFor(req.user!.role, await cards.propertyCard(db, req.params.id)),
-  );
+  app.get<IdParams>("/properties/:id", async (req) => ({
+    ...cardFor(req.user!.role, await cards.propertyCard(db, req.params.id)),
+    deletable: await archive.canDelete(db, "property", req.params.id),
+  }));
 
   app.get<{ Querystring: { q?: string } }>("/search", async (req) => ({
     hits: await cards.search(db, req.query.q ?? "", { invoices: can(req.user!.role, "invoices.view") }),
   }));
   app.get("/service-requests", async () => q.listServiceRequests(db));
-  app.get("/suppliers", async () => cards.listSuppliers(db));
+  app.get<ListQuery>("/suppliers", async (req) => cards.listSuppliers(db, archivedOf(req)));
 
   // Client, owner and supplier cards: details, contact people, what is missing.
   const bankOf = (req: { user: auth.User | null }) => ({ bank: can(req.user!.role, "bank.view") });
@@ -239,7 +250,10 @@ export function buildServer(
     if (!bankOf(req).bank) for (const k of ["bankName", "bankBranch", "bankAccount"] as const) delete input[k];
     return reply.status(201).send(await contacts.createContact(db, input));
   });
-  app.get<IdParams>("/contacts/:id", async (req) => contacts.getContact(db, req.params.id, bankOf(req)));
+  app.get<IdParams>("/contacts/:id", async (req) => ({
+    ...(await contacts.getContact(db, req.params.id, bankOf(req))),
+    deletable: await archive.canDelete(db, "contact", req.params.id),
+  }));
   app.post<IdParams>("/contacts/:id", async (req) =>
     contacts.updateContact(db, req.params.id, contacts.contactInput.parse(req.body), bankOf(req)),
   );
@@ -249,8 +263,17 @@ export function buildServer(
   app.post<{ Params: { id: string; personId: string } }>("/contacts/:id/people/:personId/remove", async (req) =>
     contacts.removePerson(db, req.params.id, req.params.personId),
   );
-  app.get("/owners", async () => {
-    const owners = await contacts.listByKind(db, "owner");
+  // Archive and restore; delete only what was opened by mistake.
+  const archiveInput = z.object({ archived: z.boolean() });
+  for (const type of ["contact", "property"] as const) {
+    const base = type === "contact" ? "/contacts" : "/properties";
+    app.post<IdParams>(`${base}/:id/archive`, async (req) =>
+      archive.setArchived(db, req.user!.id, type, req.params.id, archiveInput.parse(req.body).archived),
+    );
+    app.post<IdParams>(`${base}/:id/delete`, async (req) => archive.deleteRecord(db, req.user!.id, type, req.params.id));
+  }
+  app.get<ListQuery>("/owners", async (req) => {
+    const owners = await contacts.listByKind(db, "owner", archivedOf(req));
     const { rows } = await db.query("SELECT owner_id, count(*)::int AS n FROM properties GROUP BY owner_id");
     const props = new Map(rows.map((r) => [r.owner_id, r.n]));
     return owners.map((o) => ({ ...o, properties: props.get(o.id) ?? 0 }));
