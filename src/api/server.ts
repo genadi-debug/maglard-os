@@ -7,6 +7,7 @@ import * as auth from "../auth.js";
 import type { Db } from "../db/pool.js";
 import { can, isRole, permissionsOf, ROLES, type Permission } from "../permissions.js";
 import { intakeInput, supplierInvoiceInput } from "../domain/schemas.js";
+import * as cards from "../domain/cards.js";
 import * as q from "../domain/queries.js";
 import * as sr from "../domain/serviceRequests.js";
 import { createIntake, createSupplierInvoice, NotFoundError } from "../domain/services.js";
@@ -31,6 +32,10 @@ const ROUTES: Record<string, Permission | null> = {
   "GET /contacts": null,
   "GET /work-center": null,
   "GET /engagements": "apartments.view",
+  "GET /clients": "apartments.view",
+  "GET /clients/:id": "apartments.view",
+  "GET /properties/:id": "apartments.view",
+  "GET /search": null,
   "POST /intakes": "apartments.create",
   "GET /service-requests": "requests.view",
   "GET /service-requests/:id": "requests.view",
@@ -157,10 +162,32 @@ export function buildServer(
 
   // Read models for the screens.
   app.get<{ Querystring: { kind?: string } }>("/contacts", async (req) => q.listContacts(db, req.query.kind));
-  app.get("/engagements", async (req) => {
-    const rows = await q.listEngagements(db);
-    return can(req.user!.role, "amounts.view") ? rows : rows.map(({ monthly_rent: _hidden, ...rest }) => rest);
+  // Rent and invoice amounts, removed for roles that may not see them.
+  const AMOUNTS = ["monthly_rent", "amount_total", "amount_net", "amount_vat"];
+  const hideAmounts = <T extends object>(role: auth.User["role"], rows: T[]): T[] =>
+    can(role, "amounts.view")
+      ? rows
+      : rows.map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => !AMOUNTS.includes(k))) as T);
+
+  app.get("/engagements", async (req) => hideAmounts(req.user!.role, await q.listEngagements(db)));
+
+  app.get("/clients", async () => cards.listClients(db));
+
+  // Cards: everything about one client or one property on a single screen.
+  // Supplier invoices appear only for roles that see invoices.
+  const cardFor = <T extends { engagements: object[]; invoices: object[] }>(role: auth.User["role"], card: T): T => ({
+    ...card,
+    engagements: hideAmounts(role, card.engagements),
+    invoices: can(role, "invoices.view") ? hideAmounts(role, card.invoices) : [],
   });
+  app.get<IdParams>("/clients/:id", async (req) => cardFor(req.user!.role, await cards.clientCard(db, req.params.id)));
+  app.get<IdParams>("/properties/:id", async (req) =>
+    cardFor(req.user!.role, await cards.propertyCard(db, req.params.id)),
+  );
+
+  app.get<{ Querystring: { q?: string } }>("/search", async (req) => ({
+    hits: await cards.search(db, req.query.q ?? "", { invoices: can(req.user!.role, "invoices.view") }),
+  }));
   app.get("/service-requests", async () => q.listServiceRequests(db));
   app.get("/supplier-invoices", async () => q.listSupplierInvoices(db));
   app.get("/work-center", async () => q.workCenter(db));
