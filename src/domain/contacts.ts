@@ -55,6 +55,10 @@ export function missingFields(c: Record<string, unknown>): string[] {
 
 const text = z.string().trim().max(500).nullable().optional();
 
+// Supplier payment terms, as Israeli invoices write them: "שוטף+30" is paid
+// 30 days after the end of the invoice month.
+export const PAYMENT_TERMS = ["מיידי", "שוטף", "שוטף+30", "שוטף+45", "שוטף+60", "שוטף+90", "שוטף+120"] as const;
+
 export const contactInput = z
   .object({
     name: z.string().trim().min(1).max(200).optional(),
@@ -80,7 +84,7 @@ export const contactInput = z
     supplierType: text,
     serviceAreas: text,
     regions: text,
-    paymentTerms: text,
+    paymentTerms: z.enum(PAYMENT_TERMS, { message: "תנאי תשלום: לבחור מהרשימה" }).nullable().optional(),
     notes: z.string().trim().max(4000).nullable().optional(),
   })
   .strict();

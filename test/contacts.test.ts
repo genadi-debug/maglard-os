@@ -101,5 +101,10 @@ describe.skipIf(!url)("client, owner and supplier cards", () => {
     const card = (await call("fin", "GET", `/contacts/${id}`)).json();
     expect(card.missing).toEqual(["ת.ז / ח.פ", "סוג ספק", "תחומי שירות", "תוקף אישור ניכוי במקור", "פרטי בנק", "תנאי תשלום"]);
     expect((await call("pm", "GET", "/suppliers")).json()[0].missing).toHaveLength(6);
+    // Payment terms come from the list ("שוטף+30"), not free text.
+    expect((await call("pm", "POST", `/contacts/${id}`, { paymentTerms: "30 יום" })).statusCode).toBe(400);
+    const saved = (await call("pm", "POST", `/contacts/${id}`, { paymentTerms: "שוטף+30" })).json();
+    expect(saved).toMatchObject({ payment_terms: "שוטף+30" });
+    expect(saved.missing).not.toContain("תנאי תשלום");
   });
 });
