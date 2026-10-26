@@ -26,6 +26,16 @@ export interface CrmAdapter {
   readBilling(): Promise<ImportedBilling>;
   readExpenseTypes(): Promise<ExpenseType[]>;
   createCharge(input: ChargePush): Promise<number>;
+  createBill(input: BillPush): Promise<number>;
+}
+
+export interface BillPush {
+  name: string;
+  ref: string;
+  clientPlanfixId: number;
+  periodFrom: string;
+  periodTo: string;
+  chargeTaskIds: number[];
 }
 
 // An entry of Planfix's expense-type directory: a charge type and whether it carries VAT.
@@ -530,6 +540,24 @@ export class PlanfixAdapter implements CrmAdapter {
       data.push({ field: { id: f.amountNet }, value: c.split.net }, { field: { id: f.amountVat }, value: c.split.vat });
     }
     return this.createTask({ name: c.name, description: describe(c.ref), template: { id: TEMPLATE.charge }, customFieldData: data });
+  }
+
+  // Verified on maglardsand task 349: Planfix sums the linked charges, counts
+  // the missing details, links each charge back to the bill, and opens the
+  // bill in "חשבון — איסוף חיובים לדירות".
+  createBill(b: BillPush): Promise<number> {
+    const f = FIELD.bill;
+    return this.createTask({
+      name: b.name,
+      description: describe(b.ref),
+      template: { id: TEMPLATE.bill },
+      customFieldData: [
+        { field: { id: f.client }, value: contact(b.clientPlanfixId) },
+        { field: { id: f.periodFrom }, value: pfDate(b.periodFrom) },
+        { field: { id: f.periodTo }, value: pfDate(b.periodTo) },
+        { field: { id: f.charges }, value: b.chargeTaskIds.map(task) },
+      ],
+    });
   }
 
   // Filter type 51 = task template (verified read-only on maglardsand: 55 tasks

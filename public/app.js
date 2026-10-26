@@ -1401,13 +1401,13 @@ async function clientView(id) {
 // The client's contracts, charges and accumulated bills as Planfix computes
 // them. Read only: amounts are changed in Planfix.
 const span = (from, to) => (from || to ? `${date(from)} עד ${date(to)}` : "—");
-const chargesTable = (rows) =>
+const chargesTable = (rows, status = true) =>
   `<div class="wrap"><table class="table"><thead><tr><th>דירה</th><th>סוג</th><th>תקופה</th><th>לפני מע״מ</th><th>מע״מ</th>
-    <th>סה״כ</th><th>התקבל</th><th>יתרה</th><th>סטטוס</th></tr></thead><tbody>${rows
+    <th>סה״כ</th><th>התקבל</th><th>יתרה</th>${status ? "<th>סטטוס</th>" : ""}</tr></thead><tbody>${rows
       .map(
         (c) => `<tr><td>${esc(c.apartment_code || "—")}</td><td>${esc(c.charge_type || c.name)}</td><td>${span(c.period_from, c.period_to)}</td>
         <td>${money(c.amount_net)}</td><td>${money(c.amount_vat)}</td><td>${money(c.amount_total)}</td><td>${money(c.received)}</td>
-        <td><b>${money(c.balance)}</b></td><td>${esc(c.status || "")}</td></tr>`,
+        <td><b>${money(c.balance)}</b></td>${status ? `<td>${esc(c.status || "")}</td>` : ""}</tr>`,
       )
       .join("")}</tbody></table></div>`;
 
@@ -1417,6 +1417,7 @@ async function billingSection(clientId) {
   const canCharge = allowed("billing.manage") && b.linked && b.apartments.length;
   const head = `<div class="head" style="align-items:end"><h2 style="margin:16px 0 0">חיובים וחשבונות</h2>
     <div class="actions" style="margin:0">${canCharge ? `<button class="btn primary" id="new-charge">חיוב חדש</button>` : ""}
+    ${allowed("billing.manage") && b.unbilled.length ? `<button class="btn primary" id="issue-bill">הפקת חשבון</button>` : ""}
     <button class="btn" id="billing-refresh">רענון מ־Planfix</button></div></div>
     <p class="sub">מוצג כפי ש־Planfix מחשב אותו, לקריאה בלבד. שינוי סכום נעשה ב־Planfix.${
       b.readAt ? ` נקרא לאחרונה: ${new Date(b.readAt).toLocaleString("he-IL")}` : ""
@@ -1449,7 +1450,7 @@ async function billingSection(clientId) {
         ? `<div class="wrap"><table class="table"><thead><tr><th>חשבון</th><th>תקופה</th><th>סכום</th><th>יתרה לגבייה</th>
           <th>חיובים חסרים</th><th>הוגש</th><th>סטטוס</th></tr></thead><tbody>${b.bills
             .map(
-              (x) => `<tr><td>${esc(x.name)}</td><td>${span(x.period_from, x.period_to)}</td><td>${money(x.computed_total ?? x.amount)}</td>
+              (x) => `<tr class="click" data-href="#/clients/${clientId}/bills/${x.planfix_task_id}" tabindex="0"><td>${esc(x.name)}</td><td>${span(x.period_from, x.period_to)}</td><td>${money(x.computed_total ?? x.amount)}</td>
               <td><b>${money(x.balance)}</b></td><td>${x.missing_charges ? pill([`${x.missing_charges} חסרים`, "warn"]) : "—"}</td>
               <td>${x.submitted_on ? date(x.submitted_on) : "—"}</td><td>${esc(x.status || "")}</td></tr>`,
             )
@@ -1508,8 +1509,82 @@ function chargeDialog(clientId) {
   showSplit();
 }
 
+// An accumulated bill issued in Planfix over the charges picked here. Planfix
+// sums them; submitting the bill to the client stays a step in Planfix.
+function billDialog(clientId) {
+  const b = billing;
+  const now = today();
+  const end = new Date(Date.UTC(Number(now.slice(0, 4)), Number(now.slice(5, 7)), 0)).toISOString().slice(0, 10);
+  const d = dialog(
+    "הפקת חשבון מצטבר ב־Planfix",
+    field("periodFrom", "תקופה מתאריך", `type="date" required value="${now.slice(0, 8)}01"`) +
+      field("periodTo", "עד תאריך", `type="date" required value="${end}"`) +
+      `<div class="full"><b>חיובים שייכללו בחשבון</b>${b.unbilled
+        .map(
+          (c) => `<label style="display:flex;flex-direction:row;gap:8px;align-items:center;font-weight:400;margin-top:6px"><input type="checkbox" style="width:auto" data-charge="${c.planfix_task_id}"
+            data-from="${c.period_from || ""}" data-total="${c.amount_total ?? 0}">
+            ${esc(c.apartment_code || "—")} · ${esc(c.charge_type || c.name)} · ${span(c.period_from, c.period_to)} · ${money(c.amount_total)}</label>`,
+        )
+        .join("")}</div>
+      <p class="full sub" id="bill-total"></p>`,
+    async (v) => {
+      const charges = [...d.querySelectorAll("[data-charge]:checked")].map((x) => Number(x.dataset.charge));
+      const r = await api("POST", `/clients/${clientId}/bills`, { periodFrom: v.periodFrom, periodTo: v.periodTo, charges });
+      toast("החשבון הופק ב־Planfix");
+      location.hash = `#/clients/${clientId}/bills/${r.planfixTaskId}`;
+    },
+    "הפקת חשבון",
+  );
+  const form = d.querySelector("form");
+  const boxes = [...d.querySelectorAll("[data-charge]")];
+  // Everything that starts by the end of the period is picked by default.
+  const pick = () => boxes.forEach((x) => (x.checked = !x.dataset.from || x.dataset.from <= form.periodTo.value));
+  const total = () => {
+    const picked = boxes.filter((x) => x.checked);
+    d.querySelector("#bill-total").textContent = `${picked.length} חיובים · ${money(picked.reduce((t, x) => t + Number(x.dataset.total), 0))} (Planfix מחשב את הסכום הסופי)`;
+  };
+  form.periodTo.addEventListener("change", () => (pick(), total()));
+  form.addEventListener("change", total);
+  pick();
+  total();
+}
+
+// One bill as the client receives it, ready to print.
+async function billView(clientId, billId) {
+  const { client, bill, charges, totals } = await api("GET", `/clients/${clientId}/bills/${billId}`);
+  const byApartment = new Map();
+  for (const c of charges) byApartment.set(c.apartment_code || "—", [...(byApartment.get(c.apartment_code || "—") || []), c]);
+  view.innerHTML = `
+    <p class="no-print"><a href="#/clients/${clientId}">→ ${esc(client.name)}</a></p>
+    <div class="head"><div><h1>${esc(bill.name)}</h1>
+      <p class="sub">${esc(client.name)}${client.id_number ? ` · ח.פ ${esc(client.id_number)}` : ""}${client.address ? ` · ${esc(client.address)}` : ""}</p>
+      <p class="sub">תקופה: ${span(bill.period_from, bill.period_to)} · ${esc(bill.status || "")}${bill.submitted_on ? ` · הוגש ${date(bill.submitted_on)}` : ""}</p></div>
+      <button class="btn no-print" id="print">הדפסה</button></div>
+    ${bill.missing_charges ? `<div class="missing">ב־Planfix חסרים פרטים ב־${bill.missing_charges} חיובים בחשבון הזה</div>` : ""}
+    ${
+      charges.length
+        ? [...byApartment]
+            .map(([code, rows]) => `<h3>דירה ${esc(code)}</h3>${chargesTable(rows, false)}`)
+            .join("")
+        : `<div class="empty">אין חיובים בחשבון</div>`
+    }
+    <div class="facts">
+      <div><span>לפני מע״מ</span><b>${money(totals.net)}</b></div>
+      <div><span>מע״מ</span><b>${money(totals.vat)}</b></div>
+      <div><span>סה״כ לפי Planfix</span><b>${money(bill.computed_total ?? totals.total)}</b></div>
+      <div><span>יתרה לגבייה</span><b>${money(bill.balance ?? totals.balance)}</b></div>
+    </div>`;
+  view.querySelector("#print").addEventListener("click", () => window.print());
+}
+
 function wireBilling(clientId) {
   view.querySelector("#new-charge")?.addEventListener("click", () => chargeDialog(clientId));
+  view.querySelector("#issue-bill")?.addEventListener("click", () => billDialog(clientId));
+  view.querySelectorAll("#billing tr[data-href]").forEach((tr) => {
+    const go = () => (location.hash = tr.dataset.href);
+    tr.addEventListener("click", go);
+    tr.addEventListener("keydown", (e) => e.key === "Enter" && go());
+  });
   const btn = view.querySelector("#billing-refresh");
   btn?.addEventListener("click", async () => {
     btn.disabled = true;
@@ -1777,7 +1852,7 @@ async function refreshCounts() {
 async function route() {
   const [path, query] = (location.hash.replace(/^#/, "") || "/").split("?");
   const params = new URLSearchParams(query || "");
-  const [, section, id] = path.split("/");
+  const [, section, id, sub, subId] = path.split("/");
   document.querySelectorAll(".nav").forEach((a) => {
     const target = a.getAttribute("href").replace(/^#/, "").split("?")[0].split("/")[1];
     const current = section === "properties" ? "apartments" : section || "";
@@ -1789,6 +1864,7 @@ async function route() {
     else if (section === "apartments") await apartmentsView(params);
     else if (section === "tasks" && id) await taskView(id);
     else if (section === "tasks") await tasksView(params);
+    else if (section === "clients" && id && sub === "bills" && subId) await billView(id, subId);
     else if (section === "clients" && id) await clientView(id);
     else if (section === "clients") await clientsView(params);
     else if (section === "properties" && id) await propertyView(id);
