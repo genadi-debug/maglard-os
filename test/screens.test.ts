@@ -3,7 +3,7 @@ import { buildServer } from "../src/api/server.js";
 import { migrate } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
 import { PlanfixError } from "../src/planfix/client.js";
-import { runOnce } from "../src/sync/worker.js";
+import { runOnce, timing } from "../src/sync/worker.js";
 
 const url = process.env.TEST_DATABASE_URL;
 
@@ -14,6 +14,7 @@ describe.skipIf(!url)("screens API", () => {
   const post = (u: string, payload?: object) => app.inject({ method: "POST", url: u, payload });
 
   beforeAll(async () => {
+    timing.autoTaskTries = 1;
     await db.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
     await migrate(db);
   });
@@ -61,7 +62,7 @@ describe.skipIf(!url)("screens API", () => {
     expect((await get("/engagements"))[0].sync).toBe("failed");
 
     expect((await post(`/sync/${wc.syncFailures[0].id}/retry`)).statusCode).toBe(200);
-    expect((await get("/work-center")).counts).toMatchObject({ sync_failed: 0, sync_pending: 1 });
+    expect((await get("/work-center")).counts).toMatchObject({ sync_failed: 0, sync_pending: 2 });
     expect((await post("/sync/999999/retry")).statusCode).toBe(404);
   });
 });

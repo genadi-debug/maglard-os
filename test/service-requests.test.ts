@@ -2,6 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { buildServer } from "../src/api/server.js";
 import { migrate } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
+import { runOnce, timing } from "../src/sync/worker.js";
+import { FakeCrm } from "./fakeCrm.js";
 
 const url = process.env.TEST_DATABASE_URL;
 
@@ -11,6 +13,7 @@ describe.skipIf(!url)("paid service request", () => {
   let engagementId: string;
 
   beforeAll(async () => {
+    timing.autoTaskTries = 1;
     await db.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
     await migrate(db);
   });
@@ -108,5 +111,57 @@ describe.skipIf(!url)("paid service request", () => {
       (await call("POST", "/service-requests", { engagementId: "00000000-0000-0000-0000-000000000000", subject: "x", reportedBy: "y" }))
         .statusCode,
     ).toBe(404);
+  });
+
+  it("creates the request in Planfix once and keeps its status in step", async () => {
+    const crm = new FakeCrm();
+    const drain = async () => {
+      while (await runOnce(db, crm));
+    };
+    const id = await open();
+    await drain();
+    expect(crm.count("createServiceRequest")).toBe(1);
+    expect(crm.calls.find((c) => c.method === "createServiceRequest")!.input).toMatchObject({
+      subject: "דוד שמש לא עובד",
+      reportedBy: "דייר",
+    });
+    const taskId = (await db.query("SELECT planfix_task_id FROM service_requests WHERE id = $1", [id])).rows[0]
+      .planfix_task_id;
+    const updates = () => crm.calls.filter((c) => c.method === "updateServiceRequest").map((c) => c.input);
+    expect(updates().at(-1)).toEqual({ taskId, status: "new", supplierPlanfixId: null, chargeTo: null });
+
+    await call("POST", `/service-requests/${id}/assign`, { supplier: { name: "ספק" }, chargeTo: "owner" });
+    await drain();
+    expect(crm.count("createServiceRequest")).toBe(1);
+    expect(updates().at(-1)).toMatchObject({ taskId, status: "with_supplier", chargeTo: "owner" });
+    expect(updates().at(-1).supplierPlanfixId).toBeGreaterThan(0);
+
+    await call("POST", `/service-requests/${id}/invoice`, invoice);
+    await call("POST", `/service-requests/${id}/close`);
+    await drain();
+    expect(updates().at(-1)).toMatchObject({ status: "closed" });
+    const jobs = (await db.query("SELECT status FROM outbox")).rows.map((r) => r.status);
+    expect(jobs.every((s) => s === "done")).toBe(true);
+  });
+
+  it("runs the sync again when the request changes while it is being pushed", async () => {
+    const id = await open();
+    const crm = new FakeCrm();
+    // Change the request while the first push is in flight.
+    const original = crm.updateServiceRequest;
+    let changed = false;
+    crm.updateServiceRequest = async (taskId: number, i: any) => {
+      if (!changed) {
+        changed = true;
+        await call("POST", `/service-requests/${id}/assign`, { supplier: { name: "ספק" }, chargeTo: "maglard" });
+      }
+      return original(taskId, i);
+    };
+    await runOnce(db, crm);
+    const job = (await db.query("SELECT status FROM outbox WHERE job_type = 'service_request.sync'")).rows[0];
+    expect(job.status).toBe("pending");
+    while (await runOnce(db, crm));
+    const last = crm.calls.filter((c) => c.method === "updateServiceRequest").at(-1)!.input;
+    expect(last).toMatchObject({ status: "with_supplier", chargeTo: "maglard" });
   });
 });

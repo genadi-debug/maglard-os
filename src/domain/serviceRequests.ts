@@ -60,6 +60,7 @@ async function move(tx: Tx, sr: { id: string; status: Status }, to: Status, note
     "INSERT INTO service_request_events (service_request_id, from_status, to_status, note) VALUES ($1, $2, $3, $4)",
     [sr.id, sr.status, to, note ?? null],
   );
+  await enqueue(tx, "service_request.sync", sr.id);
 }
 
 function expect(sr: { status: Status }, ...allowed: Status[]) {
@@ -81,6 +82,7 @@ export async function openRequest(db: Db, input: z.infer<typeof openInput>) {
       "INSERT INTO service_request_events (service_request_id, to_status) VALUES ($1, 'new')",
       [rows[0].id],
     );
+    await enqueue(tx, "service_request.sync", rows[0].id);
     return { id: rows[0].id as string };
   });
 }
