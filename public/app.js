@@ -514,11 +514,13 @@ async function taskView(id) {
   };
 }
 
-async function apartmentsView() {
-  const rows = await api("GET", "/engagements");
+async function apartmentsView(params) {
+  const archived = params.get("archived") === "1";
+  const rows = await api("GET", `/engagements${archived ? "?archived=1" : ""}`);
   view.innerHTML = `
     <div class="head"><div><h1>דירות</h1><p class="sub">דירות בהתקשרות וסטטוס הסנכרון שלהן ל-Planfix.</p></div>
     ${allowed("apartments.create") ? `<button class="btn primary" id="add">קליטת דירה</button>` : ""}</div>
+    ${archiveTabs("apartments", archived)}
     ${
       rows.length
         ? `<div class="wrap"><table class="table"><thead><tr><th>קוד</th><th>כתובת</th><th>בעל דירה</th><th>לקוח</th>
@@ -529,7 +531,7 @@ async function apartmentsView() {
               <td>${pill(SYNC[e.sync])}${e.planfix_task_id ? ` <small>#${e.planfix_task_id}</small>` : ""}</td></tr>`,
             )
             .join("")}</tbody></table></div>`
-        : `<div class="empty">עדיין אין דירות.</div>`
+        : `<div class="empty">${archived ? "אין דירות בארכיון" : "עדיין אין דירות."}</div>`
     }`;
   view.querySelector("#add")?.addEventListener("click", intakeDialog);
 }
@@ -798,12 +800,62 @@ function contactDialog(kind, c, onSaved) {
 }
 
 // Details, missing fields and contact people, on the client, owner and supplier cards.
+// ---------- archive ----------
+
+// Active cards or the archive, on top of each list.
+const archiveTabs = (base, archived) => `
+  <div class="tabs">
+    <a class="btn ${archived ? "" : "primary"}" href="#/${base}">פעילים</a>
+    <a class="btn ${archived ? "primary" : ""}" href="#/${base}?archived=1">ארכיון</a>
+  </div>`;
+
+// Archive, restore, and delete for a card opened by mistake. The server
+// decides what is allowed; these buttons only follow it.
+function recordActions(rec) {
+  const archive = allowed("records.archive");
+  const del = allowed("records.delete") && rec.deletable;
+  return `
+    ${rec.archived_at ? `<div class="missing"><b>בארכיון</b> מאז ${date(rec.archived_at)}. לא מופיע ברשימות ובחיפוש, וההיסטוריה נשמרת.</div>` : ""}
+    ${
+      archive || del
+        ? `<p class="actions">${archive ? `<button class="btn" id="archive">${rec.archived_at ? "החזרה מהארכיון" : "העברה לארכיון"}</button>` : ""}
+           ${del ? `<button class="btn" id="delete">מחיקה</button>` : ""}</p>`
+        : ""
+    }`;
+}
+
+function wireRecordActions(type, rec, back) {
+  const base = type === "contact" ? "/contacts" : "/properties";
+  view.querySelector("#archive")?.addEventListener("click", async () => {
+    try {
+      await api("POST", `${base}/${rec.id}/archive`, { archived: !rec.archived_at });
+      toast(rec.archived_at ? "הוחזר מהארכיון" : "הועבר לארכיון");
+      route();
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+  view.querySelector("#delete")?.addEventListener("click", () =>
+    dialog(
+      "מחיקת כרטיס",
+      `<p class="full">${esc(rec.name ?? rec.address)} יימחק לצמיתות. אפשר למחוק רק כרטיס שנפתח בטעות: אין לו קישורים והוא לא נשלח ל-Planfix.</p>`,
+      async () => {
+        await api("POST", `${base}/${rec.id}/delete`);
+        toast("הכרטיס נמחק");
+        location.hash = back;
+      },
+      "מחיקה",
+    ),
+  );
+}
+
 function contactSection(c) {
   const shown = contactFields(c.kind).filter(([key]) => key !== "name" && key !== "notes");
   const value = ([, col, , type]) =>
     type === "bool" ? yesNo(c[col]) : type === "company" ? (c[col] ? "תאגיד" : "פרטי") : type === "date" ? date(c[col]) || "—" : esc(c[col] ?? "—");
   const edit = allowed("contacts.manage");
   return `
+    ${recordActions(c)}
     ${c.missing.length ? `<div class="missing"><b>כרטיס לא מלא. חסר:</b> ${esc(c.missing.join(" · "))}</div>` : ""}
     <div class="head" style="align-items:center"><h2 style="margin:16px 0 0">פרטים</h2>
       ${edit ? `<button class="btn" id="edit-contact">עריכת פרטים</button>` : ""}</div>
@@ -826,6 +878,7 @@ function contactSection(c) {
 }
 
 function wireContact(c) {
+  wireRecordActions("contact", c, { client: "#/clients", owner: "#/owners", supplier: "#/suppliers" }[c.kind]);
   view.querySelector("#edit-contact")?.addEventListener("click", () => contactDialog(c.kind, c, () => route()));
   view.querySelector("#add-person")?.addEventListener("click", () =>
     dialog(
@@ -857,11 +910,13 @@ function wireContact(c) {
   });
 }
 
-async function ownersView() {
-  const rows = await api("GET", "/owners");
+async function ownersView(params) {
+  const archived = params.get("archived") === "1";
+  const rows = await api("GET", `/owners${archived ? "?archived=1" : ""}`);
   view.innerHTML = `
     <div class="head"><div><h1>בעלי דירות</h1><p class="sub">בעלי הדירות שמגלארד שוכרת מהם, ומה חסר בכרטיס של כל אחד.</p></div>
     ${allowed("contacts.manage") ? `<button class="btn primary" id="add">בעל דירה חדש</button>` : ""}</div>
+    ${archiveTabs("owners", archived)}
     ${
       rows.length
         ? `<div class="wrap"><table class="table"><thead><tr><th>שם</th><th>ת.ז / ח.פ</th><th>טלפון</th><th>דירות</th><th>כרטיס</th></tr></thead><tbody>${rows
@@ -870,7 +925,7 @@ async function ownersView() {
               <td>${esc(o.phone || "")}</td><td>${o.properties}</td><td>${cardPill(o.missing)}</td></tr>`,
             )
             .join("")}</tbody></table></div>`
-        : `<div class="empty">אין בעלי דירות עדיין</div>`
+        : `<div class="empty">${archived ? "אין בעלי דירות בארכיון" : "אין בעלי דירות עדיין"}</div>`
     }`;
   view.querySelector("#add")?.addEventListener("click", () => contactDialog("owner", null, (id) => (location.hash = `#/owners/${id}`)));
   clickableRows();
@@ -892,11 +947,13 @@ async function ownerView(id) {
   wireContact(c);
 }
 
-async function suppliersView() {
-  const rows = await api("GET", "/suppliers");
+async function suppliersView(params) {
+  const archived = params.get("archived") === "1";
+  const rows = await api("GET", `/suppliers${archived ? "?archived=1" : ""}`);
   view.innerHTML = `
     <div class="head"><div><h1>ספקים</h1><p class="sub">ספקים וטכנאים, ועבודות פתוחות אצל כל אחד.</p></div>
     ${allowed("contacts.manage") ? `<button class="btn primary" id="add">ספק חדש</button>` : ""}</div>
+    ${archiveTabs("suppliers", archived)}
     ${
       rows.length
         ? `<div class="wrap"><table class="table"><thead><tr><th>ספק</th><th>עבודות פתוחות</th><th>עבודות שנסגרו</th><th>עבודה אחרונה</th><th>כרטיס</th></tr></thead><tbody>${rows
@@ -905,7 +962,7 @@ async function suppliersView() {
               <td>${s.closed_jobs}</td><td>${s.last_job ? date(s.last_job) : "—"}</td><td>${cardPill(s.missing)}</td></tr>`,
             )
             .join("")}</tbody></table></div>`
-        : `<div class="empty">עדיין אין ספקים</div>`
+        : `<div class="empty">${archived ? "אין ספקים בארכיון" : "עדיין אין ספקים"}</div>`
     }`;
   view.querySelector("#add")?.addEventListener("click", () => contactDialog("supplier", null, (id) => (location.hash = `#/suppliers/${id}`)));
   clickableRows();
@@ -1181,11 +1238,13 @@ function missingFor(e) {
   return gaps;
 }
 
-async function clientsView() {
-  const rows = await api("GET", "/clients");
+async function clientsView(params) {
+  const archived = params.get("archived") === "1";
+  const rows = await api("GET", `/clients${archived ? "?archived=1" : ""}`);
   view.innerHTML = `
     <div class="head"><div><h1>לקוחות</h1><p class="sub">התאגידים שמגלארד מנהלת עבורם דירות.</p></div>
     ${allowed("contacts.manage") ? `<button class="btn primary" id="add">קליטת לקוח</button>` : ""}</div>
+    ${archiveTabs("clients", archived)}
     ${
       rows.length
         ? `<div class="wrap"><table class="table"><thead><tr><th>לקוח</th><th>דירות בתוקף</th><th>כל הדירות</th><th>קריאות פתוחות</th><th>כרטיס</th></tr></thead><tbody>${rows
@@ -1194,7 +1253,7 @@ async function clientsView() {
               <td>${c.apartments}</td><td>${c.open_requests || ""}</td><td>${cardPill(c.missing)}</td></tr>`,
             )
             .join("")}</tbody></table></div>`
-        : `<div class="empty">אין לקוחות עדיין</div>`
+        : `<div class="empty">${archived ? "אין לקוחות בארכיון" : "אין לקוחות עדיין"}</div>`
     }`;
   view.querySelector("#add")?.addEventListener("click", () => contactDialog("client", null, (id) => (location.hash = `#/clients/${id}`)));
   clickableRows();
@@ -1248,10 +1307,11 @@ async function propertyView(id) {
       <p class="sub">דירה ${p.base_number} · ${current ? activePill(current) : pill(["אין התקשרות", "warn"])}
       ${p.planfix_task_id ? ` · משימה ${p.planfix_task_id} ב-Planfix` : ""}</p></div>
     <div class="actions" style="margin:0">
-      ${allowed("requests.manage") && current ? `<button class="btn primary" id="new-req">פתיחת קריאת שירות</button>` : ""}
-      ${current ? `<button class="btn" id="new-task">משימה לדירה</button>` : ""}
+      ${allowed("requests.manage") && current && !p.archived_at ? `<button class="btn primary" id="new-req">פתיחת קריאת שירות</button>` : ""}
+      ${current && !p.archived_at ? `<button class="btn" id="new-task">משימה לדירה</button>` : ""}
     </div></div>
-    ${gaps.length ? `<div class="missing"><b>מה חסר:</b> ${esc(gaps.join(" · "))}</div>` : ""}
+    ${recordActions(p)}
+    ${gaps.length && !p.archived_at ? `<div class="missing"><b>מה חסר:</b> ${esc(gaps.join(" · "))}</div>` : ""}
     <div class="facts">
       <div><span>בעל הדירה</span><b>${esc(p.owner_name)}</b></div>
       ${current ? `<div><span>לקוח</span><b><a href="#/clients/${current.client_id}">${esc(current.client_name)}</a></b></div>
@@ -1273,6 +1333,7 @@ async function propertyView(id) {
         : ""
     }`;
   wireFiles();
+  wireRecordActions("property", p, "#/apartments");
   view.querySelector("#new-req")?.addEventListener("click", () => newRequestDialog(current.id));
   view.querySelector("#new-task")?.addEventListener("click", () => newTaskDialog({ engagementId: current.id }));
 }
@@ -1495,19 +1556,19 @@ async function route() {
   });
   try {
     if (!section) await workCenterView();
-    else if (section === "apartments") await apartmentsView();
+    else if (section === "apartments") await apartmentsView(params);
     else if (section === "tasks" && id) await taskView(id);
     else if (section === "tasks") await tasksView(params);
     else if (section === "clients" && id) await clientView(id);
-    else if (section === "clients") await clientsView();
+    else if (section === "clients") await clientsView(params);
     else if (section === "properties" && id) await propertyView(id);
     else if (section === "requests" && id) await requestView(id);
     else if (section === "requests") await requestsView();
     else if (section === "invoices") await invoicesView();
     else if (section === "suppliers" && id) await supplierView(id);
     else if (section === "owners" && id) await ownerView(id);
-    else if (section === "owners") await ownersView();
-    else if (section === "suppliers") await suppliersView();
+    else if (section === "owners") await ownersView(params);
+    else if (section === "suppliers") await suppliersView(params);
     else if (section === "approvals") await approvalsView(params);
     else if (section === "notifications") await notificationsView();
     else if (section === "sync") await syncView();

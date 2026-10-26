@@ -3,6 +3,8 @@ import type { Tx } from "../db/pool.js";
 
 export class NotFoundError extends Error {}
 export class ForbiddenError extends Error {}
+// A business rule refused the change (409).
+export class RuleError extends Error {}
 
 export const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY-MM-DD");
 export const money = z.number().nonnegative().multipleOf(0.01);
@@ -20,8 +22,9 @@ type ContactRef = { id: string } | { name: string; isCompany: boolean };
 
 export async function resolveContact(tx: Tx, kind: ContactKind, ref: ContactRef): Promise<string> {
   if ("id" in ref) {
-    const { rows } = await tx.query("SELECT id FROM contacts WHERE id = $1 AND kind = $2", [ref.id, kind]);
+    const { rows } = await tx.query("SELECT id, archived_at FROM contacts WHERE id = $1 AND kind = $2", [ref.id, kind]);
     if (!rows[0]) throw new NotFoundError(`${kind} ${ref.id} not found`);
+    if (rows[0].archived_at) throw new RuleError("הכרטיס בארכיון. יש להחזיר אותו מהארכיון קודם.");
     return rows[0].id;
   }
   const { rows } = await tx.query(

@@ -27,6 +27,10 @@ export const PERMISSIONS = {
   "approvals.decide": ["admin", "management", "dept_manager"],
   // Open and edit client, owner and supplier cards (spec process 1).
   "contacts.manage": ["admin", "management", "dept_manager", "finance", "property_manager"],
+  // Move a client, owner, supplier or apartment to the archive, and back.
+  "records.archive": ["admin", "management", "dept_manager"],
+  // Delete a card opened by mistake: nothing links to it and it is not in Planfix.
+  "records.delete": ["admin"],
   // Bank details on owner and supplier cards.
   "bank.view": ["admin", "management", "finance"],
   "invoices.view": ["admin", "management", "dept_manager", "finance"],

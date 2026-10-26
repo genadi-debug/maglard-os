@@ -184,6 +184,16 @@ request waits in triage for a manager. A rejection needs a reason and sends
 the request back for a new estimate. Work the client pays for also still
 needs the client's approval: the supplier starts once both are in.
 
+## Archive and delete
+
+Clients, owners, suppliers and apartments are archived, not deleted. An
+archived card leaves the lists, search and pickers (each list has an
+"ארכיון" tab), keeps its history, and can be restored. Admin, management and
+department managers archive; a card with an active engagement or an open
+service request cannot be archived. An admin can delete a card only when it
+was opened by mistake: nothing links to it and it never reached Planfix,
+where nothing is deleted. The audit log keeps the name of what was deleted.
+
 ## Files
 
 Photos and documents (JPEG, PNG, WebP, HEIC, PDF, Word, Excel, up to 10MB)

@@ -8,7 +8,7 @@ import { missingFields } from "./contacts.js";
 
 const ACTIVE = "e.starts_on <= current_date AND e.ends_on >= current_date";
 
-export async function listClients(db: Db) {
+export async function listClients(db: Db, archived = false) {
   const { rows } = await db.query(
     `SELECT c.*,
             count(DISTINCT e.id) FILTER (WHERE ${ACTIVE})::int AS active_apartments,
@@ -17,9 +17,10 @@ export async function listClients(db: Db) {
        FROM contacts c
        LEFT JOIN engagements e ON e.client_id = c.id
        LEFT JOIN service_requests r ON r.engagement_id = e.id
-      WHERE c.kind = 'client'
+      WHERE c.kind = 'client' AND (c.archived_at IS NOT NULL) = $1
       GROUP BY c.id
       ORDER BY c.name`,
+    [archived],
   );
   return rows.map((c) => ({
     id: c.id,
@@ -56,7 +57,7 @@ const INVOICES = `
     JOIN contacts s ON s.id = i.supplier_id`;
 
 export async function clientCard(db: Db, id: string) {
-  const client = await db.query("SELECT id, name, is_company, planfix_id FROM contacts WHERE id = $1 AND kind = 'client'", [
+  const client = await db.query("SELECT id, name, is_company, planfix_id, archived_at FROM contacts WHERE id = $1 AND kind = 'client'", [
     id,
   ]);
   if (!client.rows[0]) throw new NotFoundError(`client ${id} not found`);
@@ -70,7 +71,7 @@ export async function clientCard(db: Db, id: string) {
 
 export async function propertyCard(db: Db, id: string) {
   const property = await db.query(
-    `SELECT p.id, p.base_number, p.address, p.planfix_task_id, o.id AS owner_id, o.name AS owner_name
+    `SELECT p.id, p.base_number, p.address, p.planfix_task_id, p.archived_at, o.id AS owner_id, o.name AS owner_name
        FROM properties p JOIN contacts o ON o.id = p.owner_id WHERE p.id = $1`,
     [id],
   );
@@ -95,15 +96,16 @@ export async function propertyCard(db: Db, id: string) {
   };
 }
 
-export async function listSuppliers(db: Db) {
+export async function listSuppliers(db: Db, archived = false) {
   const { rows } = await db.query(
     `SELECT c.*,
             count(r.id) FILTER (WHERE r.status <> 'closed')::int AS open_jobs,
             count(r.id) FILTER (WHERE r.status = 'closed')::int AS closed_jobs,
             max(r.created_at) AS last_job
        FROM contacts c LEFT JOIN service_requests r ON r.supplier_id = c.id
-      WHERE c.kind = 'supplier'
+      WHERE c.kind = 'supplier' AND (c.archived_at IS NOT NULL) = $1
       GROUP BY c.id ORDER BY c.name`,
+    [archived],
   );
   return rows.map((c) => ({
     id: c.id,
@@ -120,7 +122,7 @@ export async function listSuppliers(db: Db) {
 // takes them, and their invoices (for roles that see invoices).
 export async function supplierCard(db: Db, id: string) {
   const supplier = await db.query(
-    "SELECT id, name, is_company, planfix_id FROM contacts WHERE id = $1 AND kind = 'supplier'",
+    "SELECT id, name, is_company, planfix_id, archived_at FROM contacts WHERE id = $1 AND kind = 'supplier'",
     [id],
   );
   if (!supplier.rows[0]) throw new NotFoundError(`supplier ${id} not found`);
@@ -155,7 +157,7 @@ export type SearchHit = { type: string; id: string; title: string; detail: strin
 
 // One box for everything a new employee looks for (spec section 8): clients,
 // owners, suppliers, apartments by address, base number or code, service
-// requests and supplier invoice numbers.
+// requests and supplier invoice numbers. Archived cards are left out.
 export async function search(db: Db, q: string, opts: { invoices: boolean }): Promise<SearchHit[]> {
   const term = q.trim();
   if (term.length < 2) return [];
@@ -164,22 +166,23 @@ export async function search(db: Db, q: string, opts: { invoices: boolean }): Pr
     db.query(
       `SELECT CASE kind WHEN 'client' THEN 'client' ELSE 'supplier' END AS type, id::text, name AS title,
               CASE kind WHEN 'client' THEN 'לקוח' ELSE 'ספק' END AS detail
-         FROM contacts WHERE kind <> 'owner' AND name ILIKE $1 ORDER BY name LIMIT 8`,
+         FROM contacts WHERE kind <> 'owner' AND archived_at IS NULL AND name ILIKE $1 ORDER BY name LIMIT 8`,
       [like],
     ),
     db.query(
       `SELECT 'owner' AS type, o.id::text, o.name AS title,
               'בעל דירה' || coalesce(' · ' || (SELECT p.address FROM properties p WHERE p.owner_id = o.id LIMIT 1), '') AS detail
          FROM contacts o
-        WHERE o.kind = 'owner' AND (o.name ILIKE $1 OR o.id_number LIKE $2) ORDER BY o.name LIMIT 8`,
+        WHERE o.kind = 'owner' AND o.archived_at IS NULL AND (o.name ILIKE $1 OR o.id_number LIKE $2) ORDER BY o.name LIMIT 8`,
       [like, `${term.replace(/[\\%_]/g, "")}%`],
     ),
     db.query(
       `SELECT 'property' AS type, p.id::text, p.address AS title,
               'דירה ' || p.base_number || ' · ' || o.name AS detail
          FROM properties p JOIN contacts o ON o.id = p.owner_id
-        WHERE p.address ILIKE $1 OR p.base_number::text LIKE $2
-           OR EXISTS (SELECT 1 FROM engagements e WHERE e.property_id = p.id AND e.apartment_code LIKE $2)
+        WHERE p.archived_at IS NULL
+          AND (p.address ILIKE $1 OR p.base_number::text LIKE $2
+           OR EXISTS (SELECT 1 FROM engagements e WHERE e.property_id = p.id AND e.apartment_code LIKE $2))
         ORDER BY p.base_number LIMIT 8`,
       [like, `${term.replace(/[\\%_]/g, "")}%`],
     ),
