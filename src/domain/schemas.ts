@@ -1,14 +1,5 @@
 import { z } from "zod";
-
-const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY-MM-DD");
-const money = z.number().nonnegative().multipleOf(0.01);
-
-// Either link an existing MAGLARD OS contact or create a new one inline.
-const contactRef = (kind: "owner" | "client" | "supplier") =>
-  z.union([
-    z.object({ id: z.string().uuid() }),
-    z.object({ name: z.string().min(1), isCompany: z.boolean().default(kind !== "owner") }),
-  ]);
+import { contactRef, isoDate, money } from "./common.js";
 
 export const intakeInput = z
   .object({

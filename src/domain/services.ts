@@ -1,22 +1,8 @@
 import { withTx, type Db, type Tx } from "../db/pool.js";
+import { NotFoundError, resolveContact } from "./common.js";
 import type { IntakeInput, SupplierInvoiceInput } from "./schemas.js";
 
-export class NotFoundError extends Error {}
-
-type ContactRef = { id: string } | { name: string; isCompany: boolean };
-
-async function resolveContact(tx: Tx, kind: string, ref: ContactRef): Promise<string> {
-  if ("id" in ref) {
-    const { rows } = await tx.query("SELECT id FROM contacts WHERE id = $1 AND kind = $2", [ref.id, kind]);
-    if (!rows[0]) throw new NotFoundError(`${kind} ${ref.id} not found`);
-    return rows[0].id;
-  }
-  const { rows } = await tx.query(
-    "INSERT INTO contacts (kind, name, is_company) VALUES ($1, $2, $3) RETURNING id",
-    [kind, ref.name, ref.isCompany],
-  );
-  return rows[0].id;
-}
+export { NotFoundError };
 
 export async function enqueue(tx: Tx, jobType: string, entityId: string): Promise<void> {
   await tx.query(
