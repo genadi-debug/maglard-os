@@ -57,7 +57,7 @@ const text = z.string().trim().max(500).nullable().optional();
 
 // Supplier payment terms, as Israeli invoices write them: "שוטף+30" is paid
 // 30 days after the end of the invoice month.
-export const PAYMENT_TERMS = ["מיידי", "שוטף", "שוטף+30", "שוטף+45", "שוטף+60", "שוטף+90", "שוטף+120"] as const;
+export const PAYMENT_TERMS = ["מיידי", "שוטף", "שוטף+15", "שוטף+30", "שוטף+45", "שוטף+60", "שוטף+90", "שוטף+120"] as const;
 
 export const contactInput = z
   .object({

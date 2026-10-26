@@ -34,7 +34,7 @@ const urgencyPill = (u) => (u && u !== "normal" ? pill(URGENCY[u]) : "");
 const options = (entries, selected) =>
   entries.map(([k, label]) => `<option value="${k}" ${k === selected ? "selected" : ""}>${esc(label)}</option>`).join("");
 // Same list as the server (src/domain/contacts.ts).
-const PAYMENT_TERMS = ["מיידי", "שוטף", "שוטף+30", "שוטף+45", "שוטף+60", "שוטף+90", "שוטף+120"];
+const PAYMENT_TERMS = ["מיידי", "שוטף", "שוטף+15", "שוטף+30", "שוטף+45", "שוטף+60", "שוטף+90", "שוטף+120"];
 const CHARGE = { client: "הלקוח", owner: "בעל הדירה", maglard: "מגלארד" };
 const SYNC = { synced: ["סונכרן ל-Planfix", "good"], pending: ["ממתין לסנכרון", "warn"], failed: ["סנכרון נכשל", "bad"] };
 const JOB = {
