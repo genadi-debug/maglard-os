@@ -724,6 +724,7 @@ function contactFields(kind) {
   if (kind === "client") {
     f.push(
       ["vatOnRent", "vat_on_rent", "מע״מ על שכירות", "bool", true],
+      ["vatOnExpenses", "vat_on_expenses", "מע״מ על הוצאות (טכנאים, חשמל, מים וכד׳)", "bool", true],
       ["withholdingTax", "withholding_tax", "ניכוי מס במקור", "bool", true],
       ["withholdingRate", "withholding_rate", "שיעור ניכוי במקור (%)", "number", false],
       ["ledgerCard", "ledger_card", "מספר כרטיס", "text", true],
@@ -1410,10 +1411,13 @@ const chargesTable = (rows) =>
       )
       .join("")}</tbody></table></div>`;
 
+let billing = null;
 async function billingSection(clientId) {
-  const b = await api("GET", `/clients/${clientId}/billing`);
+  const b = (billing = await api("GET", `/clients/${clientId}/billing`));
+  const canCharge = allowed("billing.manage") && b.linked && b.apartments.length;
   const head = `<div class="head" style="align-items:end"><h2 style="margin:16px 0 0">חיובים וחשבונות</h2>
-    <button class="btn" id="billing-refresh">רענון מ־Planfix</button></div>
+    <div class="actions" style="margin:0">${canCharge ? `<button class="btn primary" id="new-charge">חיוב חדש</button>` : ""}
+    <button class="btn" id="billing-refresh">רענון מ־Planfix</button></div></div>
     <p class="sub">מוצג כפי ש־Planfix מחשב אותו, לקריאה בלבד. שינוי סכום נעשה ב־Planfix.${
       b.readAt ? ` נקרא לאחרונה: ${new Date(b.readAt).toLocaleString("he-IL")}` : ""
     }</p>`;
@@ -1455,7 +1459,57 @@ async function billingSection(clientId) {
     ${b.billed.length ? `<details><summary>חיובים שכבר בחשבון (${b.billed.length})</summary>${chargesTable(b.billed)}</details>` : ""}`;
 }
 
+// A charge or credit opened in Planfix. The VAT split shown follows Planfix's
+// expense-type table; the server makes the same split.
+function chargeDialog(clientId) {
+  const b = billing;
+  const now = today();
+  const end = new Date(Date.UTC(Number(now.slice(0, 4)), Number(now.slice(5, 7)), 0)).toISOString().slice(0, 10);
+  const d = dialog(
+    "חיוב חדש ב־Planfix",
+    `<label class="full">דירה<select name="engagementId" required>${b.apartments
+      .map((a) => `<option value="${a.id}">${esc(a.apartment_code)} — ${esc(a.address)}</option>`)
+      .join("")}</select></label>
+    <label>סוג חיוב<select name="chargeType">${options(b.chargeTypes.map((t) => [t.name, t.name]), b.chargeTypes[0].name)}</select></label>` +
+      field("note", "פירוט (לא חובה)", 'maxlength="80" placeholder="למשל: בלון גז"') +
+      field("periodFrom", "תקופה מתאריך", `type="date" required value="${now.slice(0, 8)}01"`) +
+      field("periodTo", "עד תאריך", `type="date" required value="${end}"`) +
+      field("amountTotal", "סכום כולל מע״מ (זיכוי במינוס)", 'type="number" required step="0.01"') +
+      `<p class="full sub" id="split"></p>`,
+    async (v) => {
+      const r = await api("POST", `/clients/${clientId}/charges`, {
+        engagementId: v.engagementId,
+        chargeType: v.chargeType,
+        note: v.note || undefined,
+        periodFrom: v.periodFrom,
+        periodTo: v.periodTo,
+        amountTotal: Number(v.amountTotal),
+      });
+      toast(`החיוב נפתח ב־Planfix (#${r.planfixTaskId})`);
+      view.querySelector("#billing").innerHTML = await billingSection(clientId);
+      wireBilling(clientId);
+    },
+    "פתיחת חיוב",
+  );
+  const form = d.querySelector("form");
+  const showSplit = () => {
+    const type = b.chargeTypes.find((t) => t.name === form.chargeType.value);
+    const total = Number(form.amountTotal.value);
+    const box = d.querySelector("#split");
+    const from = { client_rent: "כרטיס הלקוח (מע״מ על שכירות)", client_expenses: "כרטיס הלקוח (מע״מ על הוצאות)", planfix: "טבלת סוגי ההוצאה ב־Planfix" }[type.source];
+    if (type.vat === null) box.textContent = `ב${from} לא הוגדר אם יש מע״מ. יישלח הסכום הכולל, ואת הפיצול משלימים ב־Planfix.`;
+    else if (!total) box.textContent = `${type.vat ? `חייב במע״מ (${b.vatRate}%)` : "לא חייב במע״מ"} לפי ${from}`;
+    else {
+      const net = type.vat ? Math.round((total / (1 + b.vatRate / 100)) * 100) / 100 : total;
+      box.textContent = `לפני מע״מ ${money(net)} · מע״מ ${money(Math.round((total - net) * 100) / 100)} (לפי ${from})`;
+    }
+  };
+  form.addEventListener("input", showSplit);
+  showSplit();
+}
+
 function wireBilling(clientId) {
+  view.querySelector("#new-charge")?.addEventListener("click", () => chargeDialog(clientId));
   const btn = view.querySelector("#billing-refresh");
   btn?.addEventListener("click", async () => {
     btn.disabled = true;
@@ -1603,12 +1657,15 @@ async function usersView() {
     <h2>הגדרות</h2>
     <form id="settings" class="card"><label class="grow">סף אישור לעלות קריאת שירות (₪, כולל מע״מ). מעליו נדרשים נימוק ואישור מנהל.
       <input name="approvalThreshold" type="number" min="0" step="1" required value="${settings.approvalThreshold}"></label>
+      <label class="grow">שיעור מע״מ (%) לפיצול חיוב חדש, בסוגים שמוגדרים ב־Planfix כחייבים במע״מ.
+      <input name="vatRate" type="number" min="0" max="100" step="0.01" required value="${settings.vatRate}"></label>
       <button class="btn">שמירה</button></form>`;
   view.querySelector("#settings").onsubmit = async (e) => {
     e.preventDefault();
+    const f = new FormData(e.target);
     try {
-      await api("POST", "/settings", { approvalThreshold: Number(new FormData(e.target).get("approvalThreshold")) });
-      toast("סף האישור עודכן");
+      await api("POST", "/settings", { approvalThreshold: Number(f.get("approvalThreshold")), vatRate: Number(f.get("vatRate")) });
+      toast("ההגדרות עודכנו");
     } catch (err) {
       toast(err.message);
     }

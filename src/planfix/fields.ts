@@ -28,6 +28,9 @@ export const SERVICE_REQUEST_STATUS = {
   closed: 117,
 } as const;
 
+// "מגלארד — סוגי הוצאה ומע״מ": which charge types carry VAT. Read 2026-10-26.
+export const EXPENSE_TYPES = { directory: 572, name: 1614, vatable: 1616 } as const;
+
 export const FIELD = {
   property: {
     baseNumber: 9828,

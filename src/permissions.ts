@@ -35,6 +35,8 @@ export const PERMISSIONS = {
   "bank.view": ["admin", "management", "finance"],
   // The client's contracts, charges and bills, read from Planfix.
   "billing.view": ["admin", "management", "dept_manager", "finance"],
+  // Open a charge or credit in Planfix.
+  "billing.manage": ["admin", "management", "finance"],
   "invoices.view": ["admin", "management", "dept_manager", "finance"],
   "invoices.create": ["admin", "management", "finance", "operations"],
   "tasks.use": ALL,

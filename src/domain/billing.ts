@@ -1,5 +1,8 @@
+import { z } from "zod";
 import type { Db } from "../db/pool.js";
-import { NotFoundError } from "./common.js";
+import type { CrmAdapter } from "../planfix/adapter.js";
+import { refreshPlanfixBilling } from "../sync/planfixBilling.js";
+import { isoDate, NotFoundError, RuleError } from "./common.js";
 
 // The client's billing screen, read from the Planfix mirror. Every amount is
 // Planfix's own: MAGLARD OS adds totals for display and computes nothing else.
@@ -54,9 +57,21 @@ export async function clientBilling(db: Db, clientId: string) {
   const sum = (rows: Record<string, unknown>[], k: string) =>
     Math.round(rows.reduce((t, r) => t + Number(r[k] ?? 0), 0) * 100) / 100;
   const unbilled = charges.rows.filter((c) => !c.on_bill);
+  // What a new charge can be opened on: the client's apartments that are in Planfix.
+  const [apartments, rules] = await Promise.all([
+    db.query(
+      `SELECT e.id, e.apartment_code, p.address FROM engagements e JOIN properties p ON p.id = e.property_id
+        WHERE e.client_id = $1 AND e.planfix_task_id IS NOT NULL ORDER BY e.ends_on DESC`,
+      [clientId],
+    ),
+    vatRules(db, clientId),
+  ]);
   return {
     client: client.rows[0],
     linked: pf != null,
+    apartments: apartments.rows,
+    chargeTypes: CHARGE_TYPES.map((name) => ({ name, vat: rules.get(name)!.vat, source: rules.get(name)!.source })),
+    vatRate: await vatRate(db),
     readAt: read.rows[0].read_at,
     contracts: contracts.rows,
     unbilled,
@@ -67,4 +82,130 @@ export async function clientBilling(db: Db, clientId: string) {
       balance: sum(charges.rows, "balance"),
     },
   };
+}
+
+// What the client is charged for. "סוג חיוב או זיכוי" (9890) is free text in
+// Planfix; these are the kinds the client's bill is made of. Whether a charge
+// carries VAT depends on its group: rent and expenses follow the client's card
+// (clients differ in both), MAGLARD's own services follow Planfix's
+// expense-type table.
+const CHARGE_GROUP = {
+  "שכר דירה": "rent",
+  "דמי ניהול": "service",
+  "דמי תיווך והקמה": "service",
+  "תפעול ואחזקה": "expense",
+  "חשמל": "expense",
+  "מים": "expense",
+  "גז": "expense",
+  "אינטרנט": "expense",
+  "התחשבנות עם בעל הדירה": "expense",
+  "אחר": "expense",
+} as const;
+export const CHARGE_TYPES = Object.keys(CHARGE_GROUP) as [keyof typeof CHARGE_GROUP, ...(keyof typeof CHARGE_GROUP)[]];
+
+type VatRule = { vat: boolean | null; source: "client_rent" | "client_expenses" | "planfix" };
+
+// null: not set yet (an empty card field, or a type Planfix does not list), so
+// the split is left to Planfix.
+async function vatRules(db: Db, clientId: string): Promise<Map<string, VatRule & { key: number | null }>> {
+  const [client, types] = await Promise.all([
+    db.query("SELECT vat_on_rent, vat_on_expenses FROM contacts WHERE id = $1", [clientId]),
+    db.query("SELECT key, name, vatable FROM planfix_expense_types"),
+  ]);
+  const card = client.rows[0] ?? {};
+  const listed = new Map(types.rows.map((t) => [t.name, t]));
+  return new Map(
+    CHARGE_TYPES.map((name) => {
+      const group = CHARGE_GROUP[name];
+      const key = listed.get(name)?.key ?? null;
+      const rule: VatRule =
+        group === "rent"
+          ? { vat: card.vat_on_rent ?? null, source: "client_rent" }
+          : group === "expense"
+            ? { vat: card.vat_on_expenses ?? null, source: "client_expenses" }
+            : { vat: listed.get(name)?.vatable ?? null, source: "planfix" };
+      return [name, { ...rule, key }];
+    }),
+  );
+}
+
+export async function vatRate(db: Db): Promise<number> {
+  const { rows } = await db.query("SELECT value FROM settings WHERE key = 'vat_rate'");
+  return Number(rows[0]?.value ?? 18);
+}
+
+// A VAT-inclusive total split at the rate: net rounded to the agora, VAT the rest.
+export function splitVat(total: number, rate: number) {
+  const net = Math.round((total / (1 + rate / 100)) * 100) / 100;
+  return { net, vat: Math.round((total - net) * 100) / 100 };
+}
+
+export const chargeInput = z
+  .object({
+    engagementId: z.string().uuid(),
+    chargeType: z.enum(CHARGE_TYPES),
+    note: z.string().trim().max(80).optional(),
+    periodFrom: isoDate,
+    periodTo: isoDate,
+    // VAT included; a credit is negative.
+    amountTotal: z.number().multipleOf(0.01).refine((n) => n !== 0, "הסכום לא יכול להיות 0"),
+  })
+  .refine((v) => v.periodTo >= v.periodFrom, { message: "התקופה מסתיימת לפני שהיא מתחילה", path: ["periodTo"] });
+
+// Opens a charge in Planfix (template 21), where it is billed and collected.
+// Planfix computes the balance. The VAT split follows vatRules, and is left to
+// Planfix when the rule is not set.
+export async function createCharge(
+  db: Db,
+  crm: CrmAdapter,
+  userId: string | null,
+  clientId: string,
+  input: z.infer<typeof chargeInput>,
+) {
+  const client = await db.query("SELECT name, planfix_id FROM contacts WHERE id = $1 AND kind = 'client'", [clientId]);
+  if (!client.rows[0]) throw new NotFoundError(`client ${clientId} not found`);
+  const { name: clientName, planfix_id: clientPf } = client.rows[0];
+  if (!clientPf) throw new RuleError("הלקוח עוד לא נשלח ל־Planfix. אפשר לחייב אחרי הסנכרון.");
+  const e = await db.query("SELECT apartment_code, planfix_task_id FROM engagements WHERE id = $1 AND client_id = $2", [
+    input.engagementId,
+    clientId,
+  ]);
+  if (!e.rows[0]) throw new NotFoundError(`engagement ${input.engagementId} not found for this client`);
+  const { apartment_code: code, planfix_task_id: engagementPf } = e.rows[0];
+  if (!engagementPf) throw new RuleError("הדירה עוד לא נשלחה ל־Planfix. אפשר לחייב אחרי הסנכרון.");
+  const [contract, type, rate] = await Promise.all([
+    db.query(
+      `SELECT planfix_task_id FROM planfix_client_contracts WHERE engagement_task_id = $1 AND client_planfix_id = $2
+        ORDER BY move_in_on DESC NULLS LAST LIMIT 1`,
+      [engagementPf, clientPf],
+    ),
+    vatRules(db, clientId),
+    vatRate(db),
+  ]);
+  const rule = type.get(input.chargeType)!;
+  const split = rule.vat === null ? null : rule.vat ? splitVat(input.amountTotal, rate) : { net: input.amountTotal, vat: 0 };
+  const [y, m] = input.periodFrom.split("-");
+  const what = input.note ? `${input.chargeType} (${input.note})` : input.chargeType;
+  const name = `${code} — ${what} — ${m}/${y} — ${clientName}`;
+  const planfixTaskId = await crm.createCharge({
+    name,
+    ref: `charge for client ${clientId}`,
+    clientPlanfixId: clientPf,
+    engagementTaskId: engagementPf,
+    contractTaskId: contract.rows[0]?.planfix_task_id ?? null,
+    chargeType: input.chargeType,
+    expenseTypeKey: rule.key,
+    periodFrom: input.periodFrom,
+    periodTo: input.periodTo,
+    amountTotal: input.amountTotal,
+    split,
+  });
+  await db.query("INSERT INTO audit_log (user_id, action, entity_id, ok, detail) VALUES ($1, 'charge.created', $2, true, $3)", [
+    userId,
+    clientId,
+    { planfixTaskId, name, amountTotal: input.amountTotal, split },
+  ]);
+  // Show it right away, as Planfix now has it.
+  await refreshPlanfixBilling(db, crm).catch(() => undefined);
+  return { planfixTaskId, name, split };
 }

@@ -67,6 +67,7 @@ const ROUTES: Record<string, Permission | null> = {
   "GET /suppliers/:id/statement": "invoices.view",
   "GET /clients/:id/billing": "billing.view",
   "POST /billing/refresh": "billing.view",
+  "POST /clients/:id/charges": "billing.manage",
   "GET /sync/status": "sync.view",
   "POST /sync/:id/retry": "sync.retry",
   "GET /users": "users.manage",
@@ -318,6 +319,11 @@ export function buildServer(
     if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
     return refreshPlanfixBilling(db, opts.crm);
   });
+  app.post<IdParams>("/clients/:id/charges", async (req, reply) => {
+    if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
+    const input = billing.chargeInput.parse(req.body);
+    return reply.status(201).send(await billing.createCharge(db, opts.crm, req.user?.id || null, req.params.id, input));
+  });
   app.get("/work-center", async (req) => q.workCenter(db, req.user!));
 
   // Saved locally first; Planfix sync happens in the background ("saved, waiting for sync").
@@ -396,18 +402,28 @@ export function buildServer(
     sr.decideApproval(db, req.user!, req.params.id, sr.decisionInput.parse(req.body)),
   );
 
-  app.get("/settings", async () => ({ approvalThreshold: await sr.approvalThreshold(db) }));
+  app.get("/settings", async () => ({ approvalThreshold: await sr.approvalThreshold(db), vatRate: await billing.vatRate(db) }));
+  // Either setting, or both.
   app.post("/settings", async (req, reply) => {
-    const { approvalThreshold } = (req.body ?? {}) as { approvalThreshold?: unknown };
-    if (typeof approvalThreshold !== "number" || !(approvalThreshold >= 0)) {
-      return reply.status(400).send({ error: "סף האישור צריך להיות מספר" });
+    const body = (req.body ?? {}) as { approvalThreshold?: unknown; vatRate?: unknown };
+    const checks = [
+      ["approvalThreshold", "approval_threshold", "סף האישור צריך להיות מספר", (n: number) => n >= 0],
+      ["vatRate", "vat_rate", "שיעור המע״מ צריך להיות בין 0 ל־100", (n: number) => n >= 0 && n <= 100],
+    ] as const;
+    const given = checks.filter(([k]) => body[k] !== undefined);
+    if (!given.length) return reply.status(400).send({ error: "אין מה לשמור" });
+    for (const [k, , error, ok] of given) {
+      const v = body[k];
+      if (typeof v !== "number" || !ok(v)) return reply.status(400).send({ error });
     }
-    await db.query(
-      `INSERT INTO settings (key, value, updated_by, updated_at) VALUES ('approval_threshold', $1, $2, now())
-       ON CONFLICT (key) DO UPDATE SET value = $1, updated_by = $2, updated_at = now()`,
-      [JSON.stringify(approvalThreshold), req.user!.id || null],
-    );
-    return { approvalThreshold };
+    for (const [k, key] of given) {
+      await db.query(
+        `INSERT INTO settings (key, value, updated_by, updated_at) VALUES ($1, $2, $3, now())
+         ON CONFLICT (key) DO UPDATE SET value = $2, updated_by = $3, updated_at = now()`,
+        [key, JSON.stringify(body[k]), req.user!.id || null],
+      );
+    }
+    return Object.fromEntries(given.map(([k]) => [k, body[k]]));
   });
 
   app.get("/notifications", async (req) => notifications.listNotifications(db, req.user!.id));

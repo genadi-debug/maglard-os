@@ -48,12 +48,12 @@ describe.skipIf(!url)("client, owner and supplier cards", () => {
     const id = res.json().id;
     const card = (await call("pm", "GET", `/contacts/${id}`)).json();
     expect(card).toMatchObject({ kind: "client", is_company: true, complete: false });
-    expect(card.missing).toEqual(["ת.ז / ח.פ", "מע״מ על שכירות", "ניכוי מס במקור", "מספר כרטיס"]);
+    expect(card.missing).toEqual(["ת.ז / ח.פ", "מע״מ על שכירות", "מע״מ על הוצאות", "ניכוי מס במקור", "מספר כרטיס"]);
     // The new card is queued for Planfix like any other contact.
     expect((await db.query("SELECT job_type FROM outbox WHERE entity_id = $1", [id])).rows).toEqual([{ job_type: "contact.push" }]);
 
     expect((await call("pm", "POST", `/contacts/${id}`, { idNumber: "123456789" })).json().issues[0].message).toBe("מספר ת.ז / ח.פ לא תקין");
-    const half = (await call("pm", "POST", `/contacts/${id}`, { idNumber: "123456782", vatOnRent: true, withholdingTax: true, ledgerCard: "20015" })).json();
+    const half = (await call("pm", "POST", `/contacts/${id}`, { idNumber: "123456782", vatOnRent: true, vatOnExpenses: false, withholdingTax: true, ledgerCard: "20015" })).json();
     expect(half.missing).toEqual(["שיעור ניכוי במקור"]);
     const full = (await call("pm", "POST", `/contacts/${id}`, { withholdingRate: 5, phone: "03-0000000" })).json();
     expect(full).toMatchObject({ complete: true, missing: [], phone: "03-0000000", id_number: "123456782" });

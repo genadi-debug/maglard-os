@@ -5,8 +5,12 @@ import type { CrmAdapter } from "../planfix/adapter.js";
 // computes them. The mirror is replaced on every read; nothing is written to
 // Planfix.
 export async function refreshPlanfixBilling(db: Db, crm: CrmAdapter) {
-  const { contracts, charges, bills } = await crm.readBilling();
+  const [{ contracts, charges, bills }, expenseTypes] = await Promise.all([crm.readBilling(), crm.readExpenseTypes()]);
   return withTx(db, async (tx) => {
+    await tx.query("DELETE FROM planfix_expense_types");
+    for (const e of expenseTypes) {
+      await tx.query("INSERT INTO planfix_expense_types (key, name, vatable) VALUES ($1, $2, $3)", [e.key, e.name, e.vatable]);
+    }
     await tx.query("DELETE FROM planfix_client_contracts");
     await tx.query("DELETE FROM planfix_charges");
     await tx.query("DELETE FROM planfix_bills");
