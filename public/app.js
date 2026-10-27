@@ -131,8 +131,10 @@ function nextStep(r) {
 
 function dialog(title, fields, onSubmit, submitLabel = "שמירה") {
   const d = document.createElement("dialog");
+  const titleId = `dlg-${Math.random().toString(36).slice(2, 8)}`;
+  d.setAttribute("aria-labelledby", titleId);
   d.innerHTML = `<form method="dialog" novalidate>
-    <h3>${esc(title)}</h3>
+    <h3 id="${titleId}">${esc(title)}</h3>
     <div class="grid">${fields}</div>
     <div class="err" role="alert"></div>
     <div class="actions"><button class="btn primary" value="ok">${esc(submitLabel)}</button>
@@ -384,6 +386,7 @@ async function workCenterView() {
       <button class="btn primary" id="new-task">משימה חדשה</button>
       ${allowed("requests.manage") ? `<button class="btn" id="new-req">קריאת שירות</button>` : ""}
     </div></div>
+    ${welcomeCard()}
     <div class="kpis">
       ${kpi(c.my_today, "המשימות שלי להיום", "#/tasks?filter=mine")}
       ${kpi(c.my_overdue, "באיחור", "#/tasks?filter=overdue", c.my_overdue ? "bad" : "")}
@@ -406,9 +409,11 @@ async function workCenterView() {
             .join("")}`
         : ""
     }
-    ${allowed("requests.view") ? `<h2>קריאות שמחכות לפעולה</h2>${requests.length ? requests.join("") : `<div class="empty">אין קריאות פתוחות</div>`}` : ""}
+    ${allowed("requests.view") ? `<h2>קריאות שמחכות לפעולה</h2>${requests.length ? requests.join("") : `<div class="empty">אין קריאות פתוחות. קריאה חדשה נפתחת מכרטיס הדירה או מ"קריאות שירות".</div>`}
+      ${c.open_requests > requests.length ? `<p class="sub">מוצגות ${requests.length} הדחופות מתוך ${c.open_requests} קריאות פתוחות. <a href="#/requests">לכל הקריאות</a></p>` : ""}` : ""}
     ${w.workload ? teamSection(w) : ""}
     ${w.company ? companySection(w.company) : ""}`;
+  wireWelcome();
   view.querySelector("#new-task").onclick = () => newTaskDialog();
   view.querySelector("#new-req")?.addEventListener("click", () => newRequestDialog());
 }
@@ -2050,6 +2055,106 @@ function showUser() {
   document.querySelector(".rail").append(box);
 }
 
+// ---------- short guide ----------
+
+// Each topic shows only to the roles that can do it: [id, title, permission, steps].
+const GUIDE = [
+  ["start", "מרכז עבודה", null, [
+    "המסך הראשון אחרי הכניסה. למעלה: מה מחכה לך היום, המשימות שלך והקריאות הדחופות.",
+    "כל כרטיס אומר מה הצעד הבא, והכפתור שלו מוביל ישר לפעולה.",
+    "חיפוש מהיר: Ctrl+K או שורת החיפוש. אפשר לחפש לקוח, בעל דירה, ספק, כתובת, קוד דירה, קריאה או חשבונית.",
+  ]],
+  ["requests", "קריאת שירות מתחילתה ועד סופה", "requests.manage", [
+    "פותחים מכרטיס הדירה, או מ\"קריאות שירות\" ובוחרים דירה בחיפוש לפי קוד, כתובת או לקוח.",
+    "משייכים ספק, עלות משוערת כולל מע״מ ועל חשבון מי: הלקוח, בעל הדירה או מגלרד.",
+    "על חשבון הלקוח: רושמים את אישור הלקוח (איך אישר ועד איזה סכום). העבודה לא מתחילה בלי אישור שמכסה את ההערכה, ואם ההערכה עולה צריך אישור חדש.",
+    "עלות מעל סף האישור מחכה גם לאישור מנהל. אישור מנהל לא מחליף את אישור הלקוח.",
+    "בסוף העבודה קולטים את חשבונית הספק מתוך הקריאה וסוגרים אותה.",
+  ]],
+  ["approvals", "אישור עלויות", "approvals.decide", [
+    "ב\"אישורים\" מופיעות קריאות שהעלות שלהן מעל הסף.",
+    "מאשרים או דוחים. בדחייה כותבים מה צריך לעשות, והפותח מקבל התראה.",
+  ]],
+  ["invoices", "קליטת חשבונית ספק", "invoices.create", [
+    "\"קליטת חשבונית\" ב\"חשבוניות ספק\", או מתוך קריאת השירות.",
+    "מספר החשבונית כמו שמופיע עליה. חשבונית שכבר נקלטה, כאן או ב־Planfix, תיחסם.",
+    "המע״מ נרשם כסכום בשקלים, לא כאחוז. הסה״כ מחושב לבד ומוצג לבדיקה.",
+    "אופן הטיפול קובע מי משלם: לחיוב הלקוח, על חשבון בעל הדירה או הוצאה של מגלרד.",
+  ]],
+  ["billing", "חיובים וחשבונות ללקוח", "billing.view", [
+    "בכרטיס הלקוח, בחלק \"חיובים וחשבונות\": החוזים, החיובים שעוד לא נכנסו לחשבון והחשבונות שהופקו.",
+    "חיוב חדש, חיוב שכר דירה לחודש והפקת חשבון נשמרים ב־Planfix, שמחשב את הסכומים.",
+    "המע״מ נקבע לפי כרטיס הלקוח: מע״מ על שכירות ומע״מ על הוצאות. אם הם לא מולאו, החיוב נעצר עד שימלאו.",
+    "חיוב שעוד לא נכלל בחשבון אפשר לתקן. על חיוב ששולם פותחים זיכוי (סכום במינוס).",
+  ]],
+  ["contacts", "כרטיסי לקוח, בעל דירה וספק", "contacts.manage", [
+    "שדה שמסומן (חובה) נדרש כדי לפתוח את הכרטיס.",
+    "שדה שמסומן * נדרש כדי שהכרטיס יהיה מלא. אפשר לשמור בלעדיו, והכרטיס יסומן \"לא מלא\" עד שישלימו.",
+  ]],
+  ["tasks", "משימות", "tasks.use", [
+    "\"משימה חדשה\" במרכז העבודה או בכרטיס הדירה: מה לעשות, למי ועד מתי.",
+    "משימה באיחור או דחופה מסומנת באדום ומופיעה ראשונה.",
+  ]],
+  ["sync", "סנכרון Planfix", "sync.view", [
+    "כל שמירה כאן נשלחת ל־Planfix ברקע. \"ממתין לסנכרון\" הוא מצב רגיל לכמה שניות.",
+    "פעולה שנכשלה מופיעה במרכז העבודה וב\"סנכרון Planfix\" עם הסיבה, ואפשר לנסות שוב.",
+  ]],
+  ["users", "משתמשים והרשאות", "users.manage", [
+    "ב\"משתמשים\": הוספת עובד, תפקיד (שקובע מה הוא רואה ועושה), השבתה וקביעת סיסמה חדשה.",
+    "עובד ששכח סיסמה פונה אליך, ואתה קובע לו סיסמה חדשה.",
+  ]],
+];
+
+const guideFor = () => GUIDE.filter(([, , perm]) => !perm || allowed(perm));
+
+function helpView(params) {
+  view.innerHTML = `
+    <div class="head"><div><h1>מדריך קצר</h1><p class="sub">מה אפשר לעשות במערכת לפי התפקיד שלך (${esc(me.roleLabel)}).</p></div></div>
+    <nav class="toc" aria-label="נושאים">${guideFor()
+      .map(([id, title]) => `<a href="#/help?t=${id}">${esc(title)}</a>`)
+      .join("")}</nav>
+    ${guideFor()
+      .map(
+        ([id, title, , steps]) => `<section class="card guide" id="guide-${id}" aria-labelledby="h-${id}"><div class="grow">
+          <h2 id="h-${id}">${esc(title)}</h2><ol>${steps.map((x) => `<li>${esc(x)}</li>`).join("")}</ol></div></section>`,
+      )
+      .join("")}
+    <p class="sub">שכחת סיסמה? פנה למנהל המערכת.</p>`;
+  const target = params.get("t") && view.querySelector(`#guide-${CSS.escape(params.get("t"))}`);
+  if (target) {
+    target.scrollIntoView();
+    target.querySelector("h2").setAttribute("tabindex", "-1");
+    target.querySelector("h2").focus();
+    return true;
+  }
+}
+
+// A first visit gets a short welcome on the work center until it is dismissed.
+const welcomeKey = () => `mos-welcome-${me.id}`;
+function welcomeCard() {
+  try {
+    if (localStorage.getItem(welcomeKey())) return "";
+  } catch {
+    // no storage: show the card
+  }
+  const topics = guideFor().slice(0, 4);
+  return `<section class="card welcome" aria-labelledby="welcome-h"><div class="grow">
+    <h2 id="welcome-h" style="margin:0 0 6px">ברוך הבא ל־MAGLARD OS</h2>
+    <p style="margin:0 0 8px">כאן מנהלים את הדירות, הקריאות, החשבוניות והחיובים. Planfix ממשיך לעבוד ברקע ומתעדכן לבד.</p>
+    <p style="margin:0">להתחלה: ${topics.map(([id, title]) => `<a href="#/help?t=${id}">${esc(title)}</a>`).join(" · ")}</p></div>
+    <button class="btn" id="welcome-ok">הבנתי</button></section>`;
+}
+function wireWelcome() {
+  view.querySelector("#welcome-ok")?.addEventListener("click", (e) => {
+    try {
+      localStorage.setItem(welcomeKey(), "1");
+    } catch {
+      // the card comes back next time
+    }
+    e.target.closest(".welcome").remove();
+  });
+}
+
 // ---------- routing ----------
 
 async function refreshCounts() {
@@ -2085,6 +2190,7 @@ async function route() {
     view.setAttribute("aria-busy", "true");
     document.body.classList.add("loading");
   }, 150);
+  let placed = false;
   try {
     if (!section) await workCenterView();
     else if (section === "apartments") await apartmentsView(params);
@@ -2106,6 +2212,7 @@ async function route() {
     else if (section === "sync") await syncView();
     else if (section === "users") await usersView();
     else if (section === "audit") await auditView();
+    else if (section === "help") placed = helpView(params);
     else view.innerHTML = `<div class="empty">הדף לא נמצא</div>`;
   } catch (err) {
     view.innerHTML = `<div class="empty">לא הצלחתי לטעון: ${esc(err.message)}</div>`;
@@ -2114,8 +2221,19 @@ async function route() {
     view.removeAttribute("aria-busy");
     document.body.classList.remove("loading");
   }
+  // Name the screen in the tab and move focus to it, so a screen reader
+  // announces the new page; the first load keeps focus where the browser put it.
+  const h1 = view.querySelector("h1");
+  document.title = h1 ? `${h1.textContent} · MAGLARD OS` : "MAGLARD OS";
+  if (routed && !placed && h1) {
+    h1.setAttribute("tabindex", "-1");
+    h1.focus({ preventScroll: true });
+    window.scrollTo(0, 0);
+  }
+  routed = true;
   refreshCounts();
 }
+let routed = false;
 
 // On a phone the menu folds into one button that names the current screen.
 const menuBtn = document.getElementById("menu-btn");
@@ -2124,6 +2242,17 @@ function closeMenu() {
   document.querySelector(".rail")?.classList.remove("open");
   menuBtn?.setAttribute("aria-expanded", "false");
 }
+// The skip link moves focus without touching the hash, which drives routing.
+document.getElementById("skip")?.addEventListener("click", (e) => {
+  e.preventDefault();
+  view.focus();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && document.querySelector(".rail.open")) {
+    closeMenu();
+    menuBtn.focus();
+  }
+});
 menuBtn?.addEventListener("click", () => {
   const open = document.querySelector(".rail").classList.toggle("open");
   menuBtn.setAttribute("aria-expanded", String(open));

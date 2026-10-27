@@ -1,9 +1,9 @@
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import { z, ZodError } from "zod";
 import * as auth from "../auth.js";
+import { compressJson, serveAssets } from "./delivery.js";
 import * as archive from "../domain/archive.js";
 import * as files from "../domain/attachments.js";
 import * as billing from "../domain/billing.js";
@@ -30,7 +30,6 @@ const assets: Record<string, string> = {
   "/": "index.html",
   "/app.js": "app.js",
 };
-const types: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8" };
 
 // Reachable without a session: the app shell (it shows the login form), health and login.
 const PUBLIC = new Set(["GET /", "GET /app.js", "GET /health", "POST /auth/login"]);
@@ -214,11 +213,8 @@ export function buildServer(
 
   app.get("/health", async () => ({ ok: true }));
 
-  for (const [route, file] of Object.entries(assets)) {
-    app.get(route, async (_req, reply) =>
-      reply.type(types[path.extname(file)]).send(await readFile(path.join(publicDir, file), "utf8")),
-    );
-  }
+  app.register(async (shell) => serveAssets(shell, publicDir, assets));
+  compressJson(app);
 
   // Read models for the screens.
   app.get<{ Querystring: { kind?: string } }>("/contacts", async (req) => q.listContacts(db, req.query.kind));
