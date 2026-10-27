@@ -483,6 +483,54 @@ describe.skipIf(!url)("the client's billing, read from Planfix", () => {
     expect(offset.json().error).toContain("קוזז");
   });
 
+  it("builds the bill cumulatively, by section, less payments on earlier bills", async () => {
+    const client = { planfixId: ids.clientPf, name: "לקוח MOS-TEST" };
+    const engagement = { planfixTaskId: ids.engagementPf, name: "99970 — רחוב החיוב 70" };
+    const contract = crm.billing.contracts[0];
+    const row = (planfixTaskId: number, chargeType: string, amountTotal: number, received: number | null, extra = {}) => ({
+      planfixTaskId, name: `${chargeType} ${planfixTaskId}`, status: "New", client, engagement, contractTaskId: 7001, vatType: null,
+      chargeType, periodFrom: "2026-11-01", periodTo: "2026-11-30", amountNet: null, amountVat: null,
+      amountTotal, received, balance: amountTotal - (received ?? 0), billTaskIds: [] as number[], ...extra,
+    });
+    const billRow = (planfixTaskId: number, periodFrom: string, periodTo: string, chargeTaskIds: number[]) => ({
+      planfixTaskId, name: `חשבון ${planfixTaskId}`, status: "New", client, periodFrom, periodTo, submittedOn: null, amount: null,
+      computedTotal: null, balance: null, missingCharges: 0, approved: false, submissionVerified: false, chargeTaskIds,
+    });
+    crm.billing = {
+      contracts: [contract, { ...contract, planfixTaskId: 7002, name: "חוזה דירה חדשה", moveInOn: "2026-11-05" }],
+      charges: [
+        // On October's bill, paid in part.
+        row(7301, "דמי ניהול", 708, 500, { periodFrom: "2026-10-01", periodTo: "2026-10-31" }),
+        // On November's bill.
+        row(7311, "שכר דירה", 5000, null),
+        row(7312, "שכר דירה", 4000, null, { contractTaskId: 7002, periodFrom: "2026-11-05" }),
+        row(7313, "דמי תיווך והקמה", 1770, null),
+        row(7314, "דמי ניהול", 708, null),
+        row(7315, "דמי ניהול", -118, null),
+        row(7316, "חשמל", 236, null),
+        row(7317, "תפעול ואחזקה", 590, 90),
+      ],
+      bills: [billRow(7401, "2026-10-01", "2026-10-31", [7301]), billRow(7402, "2026-11-01", "2026-11-30", [7311, 7312, 7313, 7314, 7315, 7316, 7317])],
+    };
+    await call("POST", "/billing/refresh");
+    const nov = (await call("GET", `/clients/${ids.client}/bills/7402`)).json();
+    expect(nov.sections.map((x: any) => [x.title, x.rows.map((c: any) => c.planfix_task_id), x.total])).toEqual([
+      ["שכירות", [7311, 7312], 9000],
+      ["דמי הקמה", [7313], 1770],
+      ["דמי ניהול", [7314, 7315], 590],
+      ["הוצאות שוטפות", [7316], 236],
+      ["הוצאות תפעול", [7317], 590],
+    ]);
+    expect(nov.sections[0].rows.map((c: any) => c.new_apartment)).toEqual([false, true]);
+    expect(nov.earlier).toEqual([
+      { planfix_task_id: 7401, name: "חשבון 7401", period_from: "2026-10-01", period_to: "2026-10-31", charged: 708, paid: 500, open: 208 },
+    ]);
+    expect(nov.summary).toEqual({ previousCharged: 708, previousPaid: 500, previousOpen: 208, current: 12186, currentPaid: 90, due: 12304 });
+    // The first bill has nothing before it.
+    const oct = (await call("GET", `/clients/${ids.client}/bills/7401`)).json();
+    expect(oct.summary).toMatchObject({ previousOpen: 0, current: 708, currentPaid: 500, due: 208 });
+  });
+
   it("replaces the mirror on every read", async () => {
     crm.billing = { contracts: [], charges: [], bills: [] };
     await call("POST", "/billing/refresh");

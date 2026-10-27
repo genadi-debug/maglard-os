@@ -1837,30 +1837,60 @@ function rentDialog(clientId) {
 }
 
 // One bill as the client receives it, ready to print.
+// The client's bill as they receive it: a summary page, then one part per
+// section. The bill is cumulative: what is still open from earlier bills is
+// carried into the amount due.
 async function billView(clientId, billId) {
-  const { client, bill, charges, totals } = await api("GET", `/clients/${clientId}/bills/${billId}`);
-  const byApartment = new Map();
-  for (const c of charges) byApartment.set(c.apartment_code || "—", [...(byApartment.get(c.apartment_code || "—") || []), c]);
+  const { client, bill, sections, earlier, summary } = await api("GET", `/clients/${clientId}/bills/${billId}`);
+  const used = sections.filter((x) => x.rows.length);
+  const line = (label, amount, strong = false) =>
+    `<tr${strong ? ' class="total"' : ""}><td>${label}</td><td>${strong ? `<b>${money(amount)}</b>` : money(amount)}</td></tr>`;
   view.innerHTML = `
     <p class="no-print"><a href="#/clients/${clientId}">→ ${esc(client.name)}</a></p>
-    <div class="head"><div><h1>${esc(bill.name)}</h1>
-      <p class="sub">${esc(client.name)}${client.id_number ? ` · ח.פ ${esc(client.id_number)}` : ""}${client.address ? ` · ${esc(client.address)}` : ""}</p>
-      <p class="sub">תקופה: ${span(bill.period_from, bill.period_to)} · ${esc(bill.status || "")}${bill.submitted_on ? ` · הוגש ${date(bill.submitted_on)}` : ""}</p></div>
-      <button class="btn no-print" id="print">הדפסה</button></div>
-    ${bill.missing_charges ? `<div class="missing">ב־Planfix חסרים פרטים ב־${bill.missing_charges} חיובים בחשבון הזה</div>` : ""}
+    <section class="bill-page">
+      <div class="head"><div><h1>${esc(bill.name)}</h1>
+        <p class="sub">${esc(client.name)}${client.id_number ? ` · ח.פ ${esc(client.id_number)}` : ""}${client.address ? ` · ${esc(client.address)}` : ""}${client.ledger_card ? ` · כרטיס ${esc(client.ledger_card)}` : ""}</p>
+        <p class="sub">תקופה: ${span(bill.period_from, bill.period_to)}${bill.submitted_on ? ` · הוגש ${date(bill.submitted_on)}` : ""} · ${esc(bill.status || "")}</p></div>
+        <button class="btn no-print" id="print">הדפסה</button></div>
+      ${bill.missing_charges ? `<div class="missing no-print">ב־Planfix חסרים פרטים ב־${bill.missing_charges} חיובים בחשבון הזה</div>` : ""}
+      <h2>דף ריכוז</h2>
+      <div class="wrap"><table class="table summary"><tbody>
+        ${earlier.length ? line(`יתרה פתוחה מחשבונות קודמים (חויב ${money(summary.previousCharged)}, שולם ${money(summary.previousPaid)})`, summary.previousOpen) : ""}
+        ${sections.map((x) => line(esc(x.title), x.total)).join("")}
+        ${summary.currentPaid ? line("שולם על חיובי החשבון הזה", -summary.currentPaid) : ""}
+        ${line("סה״כ לתשלום", summary.due, true)}
+      </tbody></table></div>
+      <p class="sub">החשבון מצטבר: כל החיובים עד מועד הוצאת החשבון, פחות התשלומים שהתקבלו. הסכומים כוללים מע״מ.</p>
+      ${
+        earlier.length
+          ? `<h3>חשבונות קודמים</h3><div class="wrap"><table class="table stack"><thead><tr><th>חשבון</th><th>תקופה</th><th>חויב</th><th>שולם</th><th>יתרה פתוחה</th></tr></thead><tbody>${earlier
+              .map(
+                (x) => `<tr><td data-label="חשבון">${esc(x.name)}</td><td data-label="תקופה">${span(x.period_from, x.period_to)}</td>
+                <td data-label="חויב">${money(x.charged)}</td><td data-label="שולם">${money(x.paid)}</td><td data-label="יתרה פתוחה"><b>${money(x.open)}</b></td></tr>`,
+              )
+              .join("")}</tbody></table></div>`
+          : ""
+      }
+    </section>
     ${
-      charges.length
-        ? [...byApartment]
-            .map(([code, rows]) => `<h3>דירה ${esc(code)}</h3>${chargesTable(rows, false)}`)
+      used.length
+        ? used
+            .map(
+              (x) => `<section class="bill-page"><h2>${esc(x.title)}</h2>
+              <div class="wrap"><table class="table stack"><thead><tr><th>דירה</th><th>פירוט</th><th>תקופה</th><th>לפני מע״מ</th><th>מע״מ</th><th>סה״כ</th></tr></thead><tbody>${x.rows
+                .map(
+                  (c) => `<tr><td data-label="דירה">${esc(c.apartment_code || "—")}${c.new_apartment ? ` ${pill(["דירה חדשה", "good"])}` : ""}</td>
+                  <td data-label="פירוט">${esc(c.charge_type || c.name)}${Number(c.amount_total) < 0 ? ` ${pill(["זיכוי", ""])}` : ""}</td>
+                  <td data-label="תקופה">${span(c.period_from, c.period_to)}</td><td data-label="לפני מע״מ">${money(c.amount_net)}</td>
+                  <td data-label="מע״מ">${money(c.amount_vat)}</td><td data-label="סה״כ">${money(c.amount_total)}</td></tr>`,
+                )
+                .join("")}
+                <tr class="total"><td colspan="3">סה״כ ${esc(x.title)}</td><td data-label="לפני מע״מ">${money(x.net)}</td><td data-label="מע״מ">${money(x.vat)}</td><td data-label="סה״כ ${esc(x.title)}"><b>${money(x.total)}</b></td></tr>
+              </tbody></table></div></section>`,
+            )
             .join("")
         : `<div class="empty">אין חיובים בחשבון</div>`
-    }
-    <div class="facts">
-      <div><span>לפני מע״מ</span><b>${money(totals.net)}</b></div>
-      <div><span>מע״מ</span><b>${money(totals.vat)}</b></div>
-      <div><span>סה״כ לפי Planfix</span><b>${money(bill.computed_total ?? totals.total)}</b></div>
-      <div><span>יתרה לגבייה</span><b>${money(bill.balance ?? totals.balance)}</b></div>
-    </div>`;
+    }`;
   view.querySelector("#print").addEventListener("click", () => window.print());
 }
 
