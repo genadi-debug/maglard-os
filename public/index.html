@@ -6,14 +6,14 @@
 <title>MAGLARD OS</title>
 <style>
 :root{
-  --bg:#F3F5F2; --surface:#FFFFFF; --sunk:#E9EDE8; --line:#D5DBD3;
+  --bg:#F3F5F2; --surface:#FFFFFF; --sunk:#E9EDE8; --line:#D5DBD3; --field:#7F8D85;
   --ink:#16251F; --muted:#5B6A62; --accent:#1E6B57; --accent-ink:#FFFFFF; --accent-soft:#DCEDE6;
-  --warn:#9A6200; --warn-soft:#FBEFD6; --bad:#B3261E; --bad-soft:#FBE3E0; --good:#22743F; --good-soft:#DFF1E4;
+  --warn:#8A5700; --warn-soft:#FBEFD6; --bad:#B3261E; --bad-soft:#FBE3E0; --good:#22743F; --good-soft:#DFF1E4;
   --rail:#16302A; --rail-ink:#D7E4DE; --rail-active:#244A40;
   --f-body:"IBM Plex Sans Hebrew","Segoe UI",Arial,sans-serif;
 }
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
-  --bg:#0F1714; --surface:#16211D; --sunk:#1C2924; --line:#2A3A34;
+  --bg:#0F1714; --surface:#16211D; --sunk:#1C2924; --line:#2A3A34; --field:#5E7068;
   --ink:#E4ECE8; --muted:#9AAEA5; --accent:#4FB394; --accent-ink:#0B1411; --accent-soft:#1D3A31;
   --warn:#E6B04F; --warn-soft:#3A2E14; --bad:#F2877F; --bad-soft:#3D1D1A; --good:#6CCB8C; --good-soft:#18331F;
   --rail:#0B1310; --rail-ink:#B9CBC3; --rail-active:#1D3A31; color-scheme:dark}}
@@ -25,7 +25,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 .app{display:grid;grid-template-columns:220px 1fr;min-height:100%}
 .rail{background:var(--rail);color:var(--rail-ink);padding:20px 12px;display:flex;flex-direction:column;gap:4px;position:sticky;top:0;height:100vh}
 .brand{font-size:21px;font-weight:700;color:#fff;padding:4px 10px 18px}
-.brand small{display:block;font-size:12px;font-weight:400;opacity:.8}
+.brand small{display:block;font-size:12px;font-weight:400;color:var(--rail-ink)}
 .nav{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;color:var(--rail-ink);text-decoration:none}
 .nav:hover{background:var(--rail-active)}
 .nav[aria-current="page"]{background:var(--rail-active);color:#fff;font-weight:600}
@@ -87,7 +87,7 @@ dialog h3{margin:0 0 14px;font-size:18px}
 .grid>*{min-width:0}
 select,input{max-width:100%}
 label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted)}
-input,select,textarea{border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--bg);color:var(--ink);font-size:15px}
+input,select,textarea{border:1px solid var(--field);border-radius:8px;padding:8px 10px;background:var(--bg);color:var(--ink);font-size:15px}
 .actions{display:flex;gap:8px;justify-content:flex-start;margin-top:18px}
 .err{color:var(--bad);font-size:13px;min-height:1.2em;margin-top:8px}
 .timeline{list-style:none;padding:0;margin:0}
@@ -103,13 +103,21 @@ input,select,textarea{border:1px solid var(--line);border-radius:8px;padding:8px
 .thumb.doc b{height:92px;display:grid;place-items:center;background:var(--sunk);border-radius:6px;color:var(--accent)}
 .thumb.add{justify-content:center;align-items:center;min-height:120px;border-style:dashed;cursor:pointer;color:var(--accent);font-size:14px}
 .card.unread{border-color:var(--accent)}
-.rail .me small{display:block;opacity:.75}
+.rail .me small{display:block}
 .rail .me button{background:none;border:0;color:var(--rail-ink);text-decoration:underline;cursor:pointer;padding:0;font-size:12px}
 .login{min-height:100vh;display:grid;place-items:center;max-width:none;padding:16px}
 .login form{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:28px;width:min(380px,100%);display:flex;flex-direction:column;gap:12px}
 .toast{position:fixed;bottom:20px;inset-inline-start:20px;background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
 .toast.show{opacity:1}
 .rail .links{display:flex;flex-direction:column;gap:4px}
+.skip{position:absolute;inset-inline-start:8px;top:-60px;background:var(--accent);color:var(--accent-ink);padding:8px 14px;border-radius:8px;z-index:20}
+.skip:focus{top:8px}
+h1:focus,h2:focus{outline:none}
+.toc{display:flex;flex-wrap:wrap;gap:8px 16px;margin:0 0 14px}
+.guide h2{margin:0 0 6px;font-size:17px}
+.guide ol{margin:0;padding-inline-start:20px}
+.guide li{margin:3px 0}
+.welcome{border-color:var(--accent);background:var(--accent-soft)}
 .menu-btn{display:none}
 .ferr{color:var(--bad);font-size:12.5px;min-height:0}
 input[aria-invalid="true"]{border-color:var(--bad)}
@@ -144,6 +152,7 @@ body.loading::before{content:"";position:fixed;top:0;inset-inline:0;height:3px;b
 </style>
 </head>
 <body>
+<a class="skip" href="#view" id="skip">דלג לתוכן</a>
 <div class="app">
   <nav class="rail" aria-label="ניווט ראשי">
     <div class="brand">MAGLARD OS<small>ניהול דירות ותפעול</small></div>
@@ -162,6 +171,7 @@ body.loading::before{content:"";position:fixed;top:0;inset-inline:0;height:3px;b
     <a class="nav" href="#/sync" data-perm="sync.view">סנכרון Planfix <span class="cnt" id="cnt-sync"></span></a>
     <a class="nav" href="#/users" data-perm="users.manage">משתמשים</a>
     <a class="nav" href="#/audit" data-perm="audit.view">יומן פעולות</a>
+    <a class="nav" href="#/help">מדריך קצר</a>
     </div>
   </nav>
   <div class="main">

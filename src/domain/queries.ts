@@ -12,6 +12,8 @@ const syncState = (table: string, idCol = "id") => `
   END`;
 
 // Emergencies first, then high, normal and low.
+// The work center shows the most urgent open requests; the rest are in the requests list.
+export const WORK_CENTER_REQUESTS = 50;
 const URGENCY_ORDER = "array_position(ARRAY['emergency','high','normal','low'], r.urgency)";
 
 export async function listContacts(db: Db, kind?: string) {
@@ -64,7 +66,8 @@ export async function workCenter(db: Db, actor: { id: string; role: Role }) {
        JOIN engagements e ON e.id = r.engagement_id
        JOIN properties p ON p.id = e.property_id
       WHERE r.status <> 'closed'
-      ORDER BY ${URGENCY_ORDER}, r.created_at`,
+      ORDER BY ${URGENCY_ORDER}, r.created_at
+      LIMIT ${WORK_CENTER_REQUESTS}`,
   );
   const myTasks = await db.query(
     `SELECT t.id, t.title, t.status, t.urgent, t.due_on, e.apartment_code,
