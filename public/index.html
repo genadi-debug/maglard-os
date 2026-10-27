@@ -85,10 +85,11 @@ dialog h3{margin:0 0 14px;font-size:18px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .grid .full{grid-column:1/-1}
 .grid>*{min-width:0}
+[hidden]{display:none!important}
 select,input{max-width:100%}
 label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted)}
 input,select,textarea{border:1px solid var(--field);border-radius:8px;padding:8px 10px;background:var(--bg);color:var(--ink);font-size:15px}
-.actions{display:flex;gap:8px;justify-content:flex-start;margin-top:18px}
+.actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-start;margin-top:18px}
 .err{color:var(--bad);font-size:13px;min-height:1.2em;margin-top:8px}
 .timeline{list-style:none;padding:0;margin:0}
 .timeline li{padding:6px 0;border-bottom:1px solid var(--line);font-size:14px}

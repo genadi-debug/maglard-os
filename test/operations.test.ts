@@ -116,9 +116,20 @@ describe.skipIf(!url)("operations: urgency, cost approval, files, notifications,
   it("needs both the client's approval and the manager's when the client pays above the threshold", async () => {
     const id = await open("dana");
     await call("dana", "POST", `/service-requests/${id}/assign`, { supplier: { name: "אינסטלטור MOS-TEST" }, chargeTo: "client", estimatedCost: 3000, reason: "החלפת דוד" });
-    expect((await call("dana", "POST", `/service-requests/${id}/client-approval`, { reference: "מייל 1.11" })).json()).toEqual({ status: "triage" });
+    expect((await call("dana", "POST", `/service-requests/${id}/client-approval`, { reference: "מייל 1.11", method: "email", approverName: "רונית", amount: 3000 })).json()).toEqual({ status: "triage" });
     const [pending] = (await call("boss", "GET", "/approvals")).json();
     expect((await call("boss", "POST", `/approvals/${pending.id}`, { decision: "approved", note: "סביר" })).json()).toEqual({ status: "with_supplier" });
+  });
+
+  it("does not let the manager's approval stand in for the client's", async () => {
+    const id = await open("dana");
+    await call("dana", "POST", `/service-requests/${id}/assign`, { supplier: { name: "אינסטלטור MOS-TEST" }, chargeTo: "client", estimatedCost: 3000, reason: "החלפת דוד" });
+    const [pending] = (await call("boss", "GET", "/approvals")).json();
+    expect((await call("boss", "POST", `/approvals/${pending.id}`, { decision: "approved" })).json()).toEqual({ status: "triage" });
+    // An approval below the estimate is not enough either.
+    const below = { reference: "מייל", method: "email", approverName: "רונית", amount: 2500 };
+    expect((await call("dana", "POST", `/service-requests/${id}/client-approval`, below)).json()).toEqual({ status: "triage" });
+    expect((await call("dana", "POST", `/service-requests/${id}/client-approval`, { ...below, amount: 3000 })).json()).toEqual({ status: "with_supplier" });
   });
 
   it("lets only the admin change the threshold", async () => {

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Db } from "../db/pool.js";
+import { withTx, type Db } from "../db/pool.js";
 import type { CrmAdapter } from "../planfix/adapter.js";
 import { refreshPlanfixBilling } from "../sync/planfixBilling.js";
 import { isoDate, NotFoundError, RuleError } from "./common.js";
@@ -56,7 +56,10 @@ export async function clientBilling(db: Db, clientId: string) {
   ]);
   const sum = (rows: Record<string, unknown>[], k: string) =>
     Math.round(rows.reduce((t, r) => t + Number(r[k] ?? 0), 0) * 100) / 100;
-  const unbilled = charges.rows.filter((c) => !c.on_bill);
+  const credits = await creditsOf(db, clientId, charges.rows);
+  const refunded = new Set(credits.filter((c) => c.refunded > 0).map((c) => c.planfix_task_id));
+  // A credit paid back to the client is settled; it is not offset on a bill as well.
+  const unbilled = charges.rows.filter((c) => !c.on_bill).map((c) => ({ ...c, refunded: refunded.has(c.planfix_task_id) }));
   // What a new charge can be opened on: the client's apartments that are in Planfix.
   const [apartments, rules] = await Promise.all([
     db.query(
@@ -77,12 +80,60 @@ export async function clientBilling(db: Db, clientId: string) {
     unbilled,
     billed: charges.rows.filter((c) => c.on_bill),
     bills: bills.rows,
+    credits,
     totals: {
       unbilled: sum(unbilled, "amount_total"),
       balance: sum(charges.rows, "balance"),
+      // Where the client stands: what they owe, and credits not yet offset or paid back.
+      owedByClient: sum(charges.rows.filter((c) => Number(c.amount_total) > 0), "balance"),
+      owedToClient: Math.round(credits.filter((c) => c.state === "open" || c.state === "partly_refunded").reduce((t, c) => t + c.remaining, 0) * 100) / 100,
+      refunded: Math.round(credits.reduce((t, c) => t + c.refunded, 0) * 100) / 100,
     },
   };
 }
+
+type CreditState = "open" | "offset" | "partly_refunded" | "refunded";
+
+// The client's credits (charges with a negative amount) and what became of
+// each: still owed to the client, offset on a bill, or paid back.
+async function creditsOf(db: Db, clientId: string, charges: Record<string, any>[]) {
+  const negative = charges.filter((c) => Number(c.amount_total) < 0);
+  if (!negative.length) return [];
+  const ids = negative.map((c) => c.planfix_task_id);
+  const [details, refunds] = await Promise.all([
+    db.query("SELECT credit_task_id, original_task_id, reason FROM charge_credits WHERE credit_task_id = ANY ($1)", [ids]),
+    db.query(
+      `SELECT r.credit_task_id, r.amount, to_char(r.paid_on, 'YYYY-MM-DD') AS paid_on, r.method, r.reference, r.created_at,
+              u.name AS recorded_by_name
+         FROM client_refunds r LEFT JOIN users u ON u.id = r.recorded_by
+        WHERE r.client_id = $1 AND r.credit_task_id = ANY ($2) ORDER BY r.paid_on, r.created_at`,
+      [clientId, ids],
+    ),
+  ]);
+  const byId = new Map(charges.map((c) => [c.planfix_task_id, c]));
+  return negative.map((c) => {
+    const d = details.rows.find((x) => x.credit_task_id === c.planfix_task_id);
+    const paid = refunds.rows.filter((r) => r.credit_task_id === c.planfix_task_id);
+    const amount = -Number(c.amount_total);
+    const refunded = Math.round(paid.reduce((t, r) => t + Number(r.amount), 0) * 100) / 100;
+    const state: CreditState = c.on_bill ? "offset" : refunded >= amount ? "refunded" : refunded > 0 ? "partly_refunded" : "open";
+    const original = d?.original_task_id ? byId.get(d.original_task_id) : null;
+    return {
+      planfix_task_id: c.planfix_task_id as number,
+      name: c.name,
+      apartment_code: c.apartment_code,
+      charge_type: c.charge_type,
+      amount,
+      reason: d?.reason ?? null,
+      original: original ? { planfix_task_id: original.planfix_task_id, name: original.name, amount_total: original.amount_total } : null,
+      state,
+      refunded,
+      remaining: state === "offset" ? 0 : Math.round((amount - refunded) * 100) / 100,
+      refunds: paid,
+    };
+  });
+}
+
 
 // What the client is charged for. "סוג חיוב או זיכוי" (9890) is free text in
 // Planfix; these are the kinds the client's bill is made of. Whether a charge
@@ -101,16 +152,20 @@ const CHARGE_GROUP = {
   "התחשבנות עם בעל הדירה": "expense",
   "אחר": "expense",
 } as const;
+// Why a credit is given, as Planfix lists the reasons for a credit (10200).
+export const CREDIT_REASONS = ["טעות בחיוב", "יציאה מוקדמת", "זיכוי ספק שעובר ללקוח", "מחיקת הוצאה שלא תיגבה", "אחר"] as const;
+export const REFUND_METHODS = ["העברה בנקאית", "צ׳ק", "מזומן", "כרטיס אשראי"] as const;
+
 export const CHARGE_TYPES = Object.keys(CHARGE_GROUP) as [keyof typeof CHARGE_GROUP, ...(keyof typeof CHARGE_GROUP)[]];
 
-type VatRule = { vat: boolean | null; source: "client_rent" | "client_expenses" | "planfix" };
+type VatRule = { vat: boolean | null; source: "client_rent" | "client_expenses" | "planfix" | "planfix_unverified" };
 
 // null: not set yet (an empty card field, or a type Planfix does not list). A
 // charge is not opened then: its VAT would be unknown.
 async function vatRules(db: Db, clientId: string): Promise<Map<string, VatRule & { key: number | null }>> {
   const [client, types] = await Promise.all([
     db.query("SELECT vat_on_rent, vat_on_expenses FROM contacts WHERE id = $1", [clientId]),
-    db.query("SELECT key, name, vatable FROM planfix_expense_types"),
+    db.query("SELECT key, name, vatable, verified FROM planfix_expense_types"),
   ]);
   const card = client.rows[0] ?? {};
   const listed = new Map(types.rows.map((t) => [t.name, t]));
@@ -123,7 +178,11 @@ async function vatRules(db: Db, clientId: string): Promise<Map<string, VatRule &
           ? { vat: card.vat_on_rent ?? null, source: "client_rent" }
           : group === "expense"
             ? { vat: card.vat_on_expenses ?? null, source: "client_expenses" }
-            : { vat: listed.get(name)?.vatable ?? null, source: "planfix" };
+            : !listed.has(name)
+              ? { vat: null, source: "planfix" }
+              : listed.get(name).verified
+                ? { vat: listed.get(name).vatable, source: "planfix" }
+                : { vat: null, source: "planfix_unverified" };
       return [name, { ...rule, key }];
     }),
   );
@@ -133,7 +192,10 @@ export const missingVat = (source: VatRule["source"]) =>
   ({
     client_rent: "בכרטיס הלקוח לא הוגדר אם הוא משלם מע״מ על שכירות. יש להשלים את השדה בכרטיס הלקוח ואז לפתוח את החיוב.",
     client_expenses: "בכרטיס הלקוח לא הוגדר אם הוא משלם מע״מ על הוצאות. יש להשלים את השדה בכרטיס הלקוח ואז לפתוח את החיוב.",
-    planfix: "סוג החיוב לא מוגדר בטבלת סוגי ההוצאה ומע״מ ב־Planfix. מנהל המערכת צריך להוסיף אותו שם פעם אחת.",
+    planfix:
+      "סוג החיוב עוד לא נוסף לטבלה \"מגלארד — סוגי הוצאה ומע״מ\" ב־Planfix, ולכן החיוב לא זמין. אחרי שיוסיפו אותו שם (שם, חייבת במע״מ, הגדרת מע״מ אומתה) הוא ייפתח כאן מעצמו.",
+    planfix_unverified:
+      "הגדרת המע״מ של סוג החיוב בטבלה \"מגלארד — סוגי הוצאה ומע״מ\" ב־Planfix עוד לא סומנה כמאומתת, ולכן החיוב לא זמין עד שיסמנו \"הגדרת מע״מ אומתה\".",
   })[source];
 
 // A write to Planfix sent once per form: a second send with the same key (a
@@ -179,9 +241,17 @@ export const chargeInput = z
     periodTo: isoDate,
     // VAT included; a credit is negative.
     amountTotal: z.number().multipleOf(0.01).refine((n) => n !== 0, "הסכום לא יכול להיות 0"),
+    // A credit: why, and the charge it corrects when there is one.
+    creditReason: z.enum(CREDIT_REASONS).optional(),
+    creditFor: z.number().int().positive().optional(),
     requestKey,
   })
-  .refine((v) => v.periodTo >= v.periodFrom, { message: "התקופה מסתיימת לפני שהיא מתחילה", path: ["periodTo"] });
+  .refine((v) => v.periodTo >= v.periodFrom, { message: "התקופה מסתיימת לפני שהיא מתחילה", path: ["periodTo"] })
+  .refine((v) => v.amountTotal > 0 || v.creditReason, { message: "בזיכוי צריך לבחור סיבה", path: ["creditReason"] })
+  .refine((v) => v.amountTotal < 0 || (!v.creditReason && !v.creditFor), {
+    message: "סיבה וחיוב מקורי נרשמים רק בזיכוי (סכום במינוס)",
+    path: ["creditReason"],
+  });
 
 // Opens a charge in Planfix (template 21), where it is billed and collected.
 // Planfix computes the balance. The VAT split follows vatRules, and is left to
@@ -216,8 +286,22 @@ export async function createCharge(
   const rule = type.get(input.chargeType)!;
   if (rule.vat === null) throw new RuleError(missingVat(rule.source));
   const split = rule.vat === null ? null : rule.vat ? splitVat(input.amountTotal, rate) : { net: input.amountTotal, vat: 0 };
+  if (input.creditFor) {
+    const original = await db.query(
+      `SELECT c.amount_total FROM planfix_charges c LEFT JOIN planfix_client_contracts k ON k.planfix_task_id = c.contract_task_id
+        WHERE c.planfix_task_id = $1 AND coalesce(c.client_planfix_id, k.client_planfix_id) = $2`,
+      [input.creditFor, clientPf],
+    );
+    if (!original.rows[0] || Number(original.rows[0].amount_total) <= 0) {
+      throw new RuleError("החיוב המקורי לא נמצא אצל הלקוח הזה. כדאי לרענן מ־Planfix ולבחור שוב.");
+    }
+    if (-input.amountTotal > Number(original.rows[0].amount_total)) {
+      throw new RuleError("הזיכוי גדול מהחיוב המקורי.");
+    }
+  }
   const [y, m] = input.periodFrom.split("-");
-  const what = input.note ? `${input.chargeType} (${input.note})` : input.chargeType;
+  const kind = input.amountTotal < 0 ? `זיכוי ${input.chargeType}` : input.chargeType;
+  const what = input.note ? `${kind} (${input.note})` : kind;
   const name = `${code} — ${what} — ${m}/${y} — ${clientName}`;
   const planfixTaskId = await crm.createCharge({
     name,
@@ -235,8 +319,14 @@ export async function createCharge(
   await db.query("INSERT INTO audit_log (user_id, action, entity_id, ok, detail) VALUES ($1, 'charge.created', $2, true, $3)", [
     userId,
     clientId,
-    { planfixTaskId, name, amountTotal: input.amountTotal, split },
+    { planfixTaskId, name, amountTotal: input.amountTotal, split, creditReason: input.creditReason, creditFor: input.creditFor },
   ]);
+  if (input.creditReason) {
+    await db.query(
+      "INSERT INTO charge_credits (credit_task_id, client_id, original_task_id, reason, created_by) VALUES ($1, $2, $3, $4, $5)",
+      [planfixTaskId, clientId, input.creditFor ?? null, input.creditReason, userId || null],
+    );
+  }
   // Show it right away, as Planfix now has it.
   await refreshPlanfixBilling(db, crm).catch(() => undefined);
   return { planfixTaskId, name, split };
@@ -268,6 +358,10 @@ export async function issueBill(
   const open = new Set(b.unbilled.map((c) => c.planfix_task_id as number));
   const wrong = input.charges.filter((id) => !open.has(id));
   if (wrong.length) throw new RuleError(`חיובים שכבר בחשבון או שאינם של הלקוח: ${wrong.join(", ")}. כדאי לרענן מ־Planfix.`);
+  const paidBack = b.unbilled.filter((c) => c.refunded && input.charges.includes(c.planfix_task_id));
+  if (paidBack.length) {
+    throw new RuleError(`זיכוי שכבר הוחזר ללקוח לא נכלל בחשבון, כדי שלא ייספר פעמיים: ${paidBack.map((c) => c.planfix_task_id).join(", ")}.`);
+  }
   const [y, m] = input.periodTo.split("-");
   const name = `חשבון מצטבר — ${b.client.name} — ${m}/${y}`;
   const planfixTaskId = await crm.createBill({
@@ -411,6 +505,7 @@ export async function correctChargeAmount(
   const b = await clientBilling(db, clientId);
   const charge = b.unbilled.find((c) => c.planfix_task_id === chargeTaskId);
   if (!charge) throw new RuleError("אפשר לתקן רק חיוב של הלקוח שעוד לא נכלל בחשבון");
+  if (charge.refunded) throw new RuleError("על הזיכוי כבר נרשם החזר ללקוח, ולכן אי אפשר לשנות את סכומו.");
   if (Number(charge.received ?? 0) !== 0) throw new RuleError("על החיוב כבר התקבל תשלום. תיקון נעשה בזיכוי.");
   const [rules, rate] = await Promise.all([vatRules(db, clientId), vatRate(db)]);
   const rule = rules.get(charge.charge_type);
@@ -425,4 +520,54 @@ export async function correctChargeAmount(
   ]);
   await refreshPlanfixBilling(db, crm).catch(() => undefined);
   return { planfixTaskId: chargeTaskId, amountTotal: input.amountTotal, split };
+}
+
+export const refundInput = z.object({
+  amount: z.number().positive("הסכום צריך להיות גדול מ־0").multipleOf(0.01),
+  paidOn: isoDate,
+  method: z.enum(REFUND_METHODS),
+  reference: z.string().trim().min(2, "צריך אסמכתה: מספר העברה, מספר צ׳ק או קבלה"),
+  requestKey,
+});
+
+// Records money paid back to the client against a credit, and writes the total
+// paid back to the credit's "סכום שהתקבל" in Planfix (as a negative amount),
+// where the balance follows. The total is recomputed from the records each
+// time, so a retry writes the same value and nothing is counted twice.
+export async function recordRefund(
+  db: Db,
+  crm: CrmAdapter,
+  userId: string | null,
+  clientId: string,
+  creditTaskId: number,
+  input: z.infer<typeof refundInput>,
+) {
+  if (input.paidOn > new Date().toISOString().slice(0, 10)) throw new RuleError("תאריך ההחזר עוד לא הגיע. רושמים החזר אחרי שבוצע.");
+  const result = await withTx(db, async (tx) => {
+    await tx.query("SELECT pg_advisory_xact_lock(hashtext('refund'), $1)", [creditTaskId]);
+    const b = await clientBilling(db, clientId);
+    const credit = b.credits.find((c) => c.planfix_task_id === creditTaskId);
+    if (!credit) throw new NotFoundError(`credit ${creditTaskId} not found for this client`);
+    const done = await tx.query("SELECT coalesce(sum(amount), 0) AS total FROM client_refunds WHERE credit_task_id = $1", [creditTaskId]);
+    const before = Number(done.rows[0].total);
+    if (credit.state === "offset") throw new RuleError("הזיכוי כבר קוזז בחשבון ללקוח, ולכן אין מה להחזיר עליו.");
+    const left = Math.round((credit.amount - before) * 100) / 100;
+    if (input.amount > left) throw new RuleError(`נשאר להחזיר על הזיכוי הזה ${left.toFixed(2)} ₪ בלבד.`);
+    await tx.query(
+      `INSERT INTO client_refunds (client_id, credit_task_id, amount, paid_on, method, reference, recorded_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [clientId, creditTaskId, input.amount, input.paidOn, input.method, input.reference, userId || null],
+    );
+    const total = Math.round((before + input.amount) * 100) / 100;
+    await tx.query("INSERT INTO audit_log (user_id, action, entity_id, ok, detail) VALUES ($1, 'refund.recorded', $2, true, $3)", [
+      userId || null,
+      clientId,
+      { creditTaskId, ...input, requestKey: undefined, totalRefunded: total },
+    ]);
+    // Last, so a refusal from Planfix leaves no local record either.
+    await crm.setChargeReceived(creditTaskId, -total);
+    return { creditTaskId, refunded: total, remaining: Math.round((credit.amount - total) * 100) / 100 };
+  });
+  await refreshPlanfixBilling(db, crm).catch(() => undefined);
+  return result;
 }

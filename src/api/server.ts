@@ -71,6 +71,7 @@ const ROUTES: Record<string, Permission | null> = {
   "GET /clients/:id/rent-charges": "billing.manage",
   "POST /clients/:id/rent-charges": "billing.manage",
   "POST /clients/:id/charges/:chargeId/amount": "billing.manage",
+  "POST /clients/:id/credits/:creditId/refunds": "billing.manage",
   "GET /clients/:id/bills/:billId": "billing.view",
   "GET /sync/status": "sync.view",
   "POST /sync/:id/retry": "sync.retry",
@@ -355,6 +356,15 @@ export function buildServer(
     if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
     const input = billing.amountInput.parse(req.body);
     return billing.correctChargeAmount(db, opts.crm, req.user?.id || null, req.params.id, Number(req.params.chargeId), input);
+  });
+  app.post<{ Params: { id: string; creditId: string } }>("/clients/:id/credits/:creditId/refunds", async (req, reply) => {
+    if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
+    const input = billing.refundInput.parse(req.body);
+    const crm = opts.crm;
+    const done = await billing.once(db, input.requestKey, () =>
+      billing.recordRefund(db, crm, req.user?.id || null, req.params.id, Number(req.params.creditId), input),
+    );
+    return reply.status(201).send(done);
   });
   app.get("/work-center", async (req) => q.workCenter(db, req.user!));
 

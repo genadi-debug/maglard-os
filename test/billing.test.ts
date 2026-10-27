@@ -65,7 +65,7 @@ describe.skipIf(!url)("the client's billing, read from Planfix", () => {
       vatType: null,
       received: null,
     };
-    crm.expenseTypes = [{ key: 1, name: "דמי ניהול", vatable: true }];
+    crm.expenseTypes = [{ key: 1, name: "דמי ניהול", vatable: true, verified: true }];
     crm.billing = {
       contracts: [
         {
@@ -176,7 +176,7 @@ describe.skipIf(!url)("the client's billing, read from Planfix", () => {
     ]);
     expect(b.billed.map((c: any) => c.planfix_task_id)).toEqual([7101]);
     expect(b.bills).toMatchObject([{ planfix_task_id: 7201, computed_total: "708.00", missing_charges: 0 }]);
-    expect(b.totals).toEqual({ unbilled: 4838.71, balance: 4546.71 });
+    expect(b.totals).toEqual({ unbilled: 4838.71, balance: 4546.71, owedByClient: 4546.71, owedToClient: 0, refunded: 0 });
   });
 
   it("opens a charge in Planfix, split by Planfix's expense types", async () => {
@@ -219,7 +219,7 @@ describe.skipIf(!url)("the client's billing, read from Planfix", () => {
     expect(stopped.statusCode).toBe(409);
     expect(stopped.json().error).toContain("מע״מ על הוצאות");
     // Not in Planfix's expense-type table.
-    expect((await charge("דמי תיווך והקמה", 1500)).json().error).toContain("טבלת סוגי ההוצאה");
+    expect((await charge("דמי תיווך והקמה", 1500)).json().error).toContain("סוגי הוצאה ומע״מ");
     expect(crm.calls.length).toBe(before);
     await call("POST", `/contacts/${ids.client}`, { vatOnExpenses: true });
     expect((await charge("אחר", 236, "בלון גז")).statusCode).toBe(201);
@@ -383,6 +383,104 @@ describe.skipIf(!url)("the client's billing, read from Planfix", () => {
     expect(res.created[0].problem).toContain("להשלים");
     expect(crm.calls.at(-1)!.method).toBe("createCharge");
     expect((await call("GET", `/clients/${ids.client}/rent-charges?month=dec`)).statusCode).toBe(400);
+  });
+
+  it("charges a service type only once its VAT is checked in Planfix", async () => {
+    const setup = { engagementId: ids.engagement, chargeType: "דמי תיווך והקמה", periodFrom: "2026-10-01", periodTo: "2026-10-31", amountTotal: 1180 };
+    // Not in Planfix's expense-type table at all.
+    let res = await call("POST", `/clients/${ids.client}/charges`, setup);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toContain("עוד לא נוסף");
+    // Listed, but its VAT not marked as checked.
+    crm.expenseTypes = [...crm.expenseTypes, { key: 2, name: "דמי תיווך והקמה", vatable: true, verified: false }];
+    await call("POST", "/billing/refresh");
+    const types = (await call("GET", `/clients/${ids.client}/billing`)).json().chargeTypes;
+    expect(types.find((t: any) => t.name === "דמי תיווך והקמה")).toMatchObject({ vat: null, source: "planfix_unverified" });
+    res = await call("POST", `/clients/${ids.client}/charges`, setup);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toContain("אומתה");
+    // Checked: charged under its own type, with VAT.
+    crm.expenseTypes = crm.expenseTypes.map((t) => (t.key === 2 ? { ...t, verified: true } : t));
+    await call("POST", "/billing/refresh");
+    res = await call("POST", `/clients/${ids.client}/charges`, setup);
+    expect(res.statusCode).toBe(201);
+    expect(crm.calls.at(-1)!.input).toMatchObject({ chargeType: "דמי תיווך והקמה", expenseTypeKey: 2, split: { net: 1000, vat: 180 } });
+  });
+
+  it("keeps a credit apart from the refund paid to the client, counted once", async () => {
+    const base = { engagementId: ids.engagement, chargeType: "דמי ניהול", periodFrom: "2026-10-01", periodTo: "2026-10-31" };
+    // A credit needs a reason, and its original charge must be the client's.
+    expect((await call("POST", `/clients/${ids.client}/charges`, { ...base, amountTotal: -118 })).statusCode).toBe(400);
+    expect(
+      (await call("POST", `/clients/${ids.client}/charges`, { ...base, amountTotal: -118, creditReason: "טעות בחיוב", creditFor: 7103 })).statusCode,
+    ).toBe(409);
+    const res = await call("POST", `/clients/${ids.client}/charges`, { ...base, amountTotal: -118, creditReason: "טעות בחיוב", creditFor: 7101 });
+    expect(res.statusCode).toBe(201);
+    const creditId = res.json().planfixTaskId;
+    expect(res.json().name).toContain("זיכוי דמי ניהול");
+
+    // Planfix now has the credit; nothing paid back yet.
+    const client = { planfixId: ids.clientPf, name: "לקוח MOS-TEST" };
+    const engagement = { planfixTaskId: ids.engagementPf, name: "99970 — רחוב החיוב 70" };
+    const credit = {
+      planfixTaskId: creditId, name: res.json().name, status: "New", client, engagement, contractTaskId: 7001, vatType: null,
+      chargeType: "דמי ניהול", periodFrom: "2026-10-01", periodTo: "2026-10-31",
+      amountNet: -100, amountVat: -18, amountTotal: -118, received: null as number | null, balance: -118, billTaskIds: [] as number[],
+    };
+    const mirror = async (c: typeof credit) => {
+      crm.billing = { ...crm.billing, charges: [...crm.billing.charges.filter((x) => x.planfixTaskId !== c.planfixTaskId), c] };
+      await call("POST", "/billing/refresh");
+      return (await call("GET", `/clients/${ids.client}/billing`)).json();
+    };
+    let b = await mirror(credit);
+    expect(b.credits).toMatchObject([{ planfix_task_id: creditId, amount: 118, state: "open", remaining: 118, reason: "טעות בחיוב", original: { planfix_task_id: 7101 } }]);
+    expect(b.totals.owedToClient).toBe(118);
+
+    const refund = { paidOn: "2026-10-20", method: "העברה בנקאית", reference: "העברה 5521" };
+    const url = `/clients/${ids.client}/credits/${creditId}/refunds`;
+    expect((await call("POST", url, { ...refund, amount: 200 })).statusCode).toBe(409);
+    expect((await call("POST", url, { ...refund, amount: 50, paidOn: "2099-01-01" })).statusCode).toBe(409);
+    expect((await call("POST", url, { amount: 50, paidOn: "2026-10-20", method: "העברה בנקאית" })).statusCode).toBe(400);
+
+    // Paid back in part, once however often the form is sent.
+    const key = "8a3e0d5c-4b1f-4c55-9a51-2b6c3d7e9f10";
+    const first = await call("POST", url, { ...refund, amount: 50, requestKey: key });
+    expect(first.statusCode).toBe(201);
+    expect(first.json()).toEqual({ creditTaskId: creditId, refunded: 50, remaining: 68 });
+    expect((await call("POST", url, { ...refund, amount: 50, requestKey: key })).json()).toEqual(first.json());
+    expect(crm.calls.filter((c) => c.method === "setChargeReceived")).toEqual([{ method: "setChargeReceived", input: { taskId: creditId, received: -50 } }]);
+    b = await mirror({ ...credit, received: -50, balance: -68 });
+    expect(b.credits[0]).toMatchObject({ state: "partly_refunded", refunded: 50, remaining: 68 });
+    expect(b.credits[0].refunds).toMatchObject([{ amount: "50.00", paid_on: "2026-10-20", method: "העברה בנקאית", reference: "העברה 5521" }]);
+    expect(b.totals.owedToClient).toBe(68);
+
+    // A credit paid back is not offset on a bill as well, and its amount stays.
+    const bill = await call("POST", `/clients/${ids.client}/bills`, { periodFrom: "2026-10-01", periodTo: "2026-10-31", charges: [creditId] });
+    expect(bill.statusCode).toBe(409);
+    expect(bill.json().error).toContain("הוחזר");
+    expect((await call("POST", `/clients/${ids.client}/charges/${creditId}/amount`, { amountTotal: -50, reason: "תיקון" })).statusCode).toBe(409);
+
+    // The rest; Planfix gets the running total, so its balance is 0.
+    expect((await call("POST", url, { ...refund, amount: 68, reference: "צ׳ק 1002", method: "צ׳ק" })).json()).toMatchObject({ refunded: 118, remaining: 0 });
+    expect(crm.calls.at(-1)).toEqual({ method: "setChargeReceived", input: { taskId: creditId, received: -118 } });
+    b = await mirror({ ...credit, received: -118, balance: 0 });
+    expect(b.credits[0]).toMatchObject({ state: "refunded", remaining: 0 });
+    expect(b.totals.owedToClient).toBe(0);
+    expect((await call("POST", url, { ...refund, amount: 1 })).statusCode).toBe(409);
+
+    // Planfix refusing the write leaves no refund behind.
+    const other = await call("POST", `/clients/${ids.client}/charges`, { ...base, amountTotal: -59, creditReason: "אחר" });
+    const otherId = other.json().planfixTaskId;
+    await mirror({ ...credit, planfixTaskId: otherId, amountTotal: -59, balance: -59, received: null });
+    crm.failNext.setChargeReceived = new Error("Planfix down");
+    expect((await call("POST", `/clients/${ids.client}/credits/${otherId}/refunds`, { ...refund, amount: 59 })).statusCode).toBe(500);
+    expect((await db.query("SELECT count(*)::int AS n FROM client_refunds WHERE credit_task_id = $1", [otherId])).rows[0].n).toBe(0);
+
+    // A credit offset on a bill is not paid back.
+    await mirror({ ...credit, planfixTaskId: otherId, amountTotal: -59, balance: -59, received: null, billTaskIds: [7201] });
+    const offset = await call("POST", `/clients/${ids.client}/credits/${otherId}/refunds`, { ...refund, amount: 59 });
+    expect(offset.statusCode).toBe(409);
+    expect(offset.json().error).toContain("קוזז");
   });
 
   it("replaces the mirror on every read", async () => {
