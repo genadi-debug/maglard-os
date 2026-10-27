@@ -1,5 +1,6 @@
 import { withTx, type Db, type Tx } from "../db/pool.js";
 import { NotFoundError, resolveContact } from "./common.js";
+import { assertNotDuplicate } from "./invoices.js";
 import type { IntakeInput, SupplierInvoiceInput } from "./schemas.js";
 
 export { NotFoundError };
@@ -53,6 +54,7 @@ export async function createSupplierInvoice(db: Db, input: SupplierInvoiceInput)
     const eng = await tx.query("SELECT id FROM engagements WHERE id = $1", [input.engagementId]);
     if (!eng.rows[0]) throw new NotFoundError(`engagement ${input.engagementId} not found`);
     const supplierId = await resolveContact(tx, "supplier", input.supplier);
+    await assertNotDuplicate(tx, supplierId, input.invoiceNumber);
     const { rows } = await tx.query(
       `INSERT INTO supplier_invoices
          (engagement_id, supplier_id, invoice_number, invoice_date, amount_net, amount_vat, amount_total, handling)

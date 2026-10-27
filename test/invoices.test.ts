@@ -120,4 +120,18 @@ describe.skipIf(!url)("supplier invoices from MAGLARD OS and from Planfix", () =
     expect((await call("GET", `/suppliers/${ids.supplier}/statement?month=2026-08`)).json().invoices).toEqual([]);
     expect((await call("GET", `/suppliers/${ids.supplier}/statement?month=sept`)).statusCode).toBe(400);
   });
+  it("refuses the same supplier invoice twice, even written differently", async () => {
+    const again = await call("POST", "/supplier-invoices", {
+      engagementId: ids.engagement,
+      supplier: { id: ids.supplier },
+      invoiceNumber: "mos 1",
+      invoiceDate: "2026-09-11",
+      amountNet: 100,
+      amountVat: 18,
+      amountTotal: 118,
+      handling: "לחיוב",
+    });
+    expect(again.statusCode).toBe(409);
+    expect(again.json().error).toContain("כבר נקלטה");
+  });
 });

@@ -202,8 +202,8 @@ describe.skipIf(!url)("the client's billing, read from Planfix", () => {
     expect(log.rows[0].detail).toMatchObject({ planfixTaskId: res.json().planfixTaskId, amountTotal: 708 });
   });
 
-  it("leaves the split to Planfix for a type it does not list, and follows the VAT rate", async () => {
-    const charge = (chargeType: string, amountTotal: number, note?: string) =>
+  it("stops a charge whose VAT is not set, and follows the VAT rate", async () => {
+    const charge = (chargeType: string, amountTotal: number, note?: string, requestKey?: string) =>
       call("POST", `/clients/${ids.client}/charges`, {
         engagementId: ids.engagement,
         chargeType,
@@ -211,19 +211,73 @@ describe.skipIf(!url)("the client's billing, read from Planfix", () => {
         periodFrom: "2026-11-05",
         periodTo: "2026-11-05",
         amountTotal,
+        requestKey,
       });
-    expect((await charge("אחר", 240, "בלון גז")).statusCode).toBe(201);
-    expect(crm.calls.at(-1)!.input).toMatchObject({
-      name: "99970.00 — אחר (בלון גז) — 11/2026 — לקוח MOS-TEST",
-      expenseTypeKey: null,
-      split: null,
-    });
+    const before = crm.calls.length;
+    // VAT on expenses is not set on the client's card yet.
+    const stopped = await charge("אחר", 240, "בלון גז");
+    expect(stopped.statusCode).toBe(409);
+    expect(stopped.json().error).toContain("מע״מ על הוצאות");
+    // Not in Planfix's expense-type table.
+    expect((await charge("דמי תיווך והקמה", 1500)).json().error).toContain("טבלת סוגי ההוצאה");
+    expect(crm.calls.length).toBe(before);
+    await call("POST", `/contacts/${ids.client}`, { vatOnExpenses: true });
+    expect((await charge("אחר", 236, "בלון גז")).statusCode).toBe(201);
+    expect(crm.calls.at(-1)!.input).toMatchObject({ name: "99970.00 — אחר (בלון גז) — 11/2026 — לקוח MOS-TEST", split: { net: 200, vat: 36 } });
     await call("POST", "/settings", { vatRate: 17 });
     await charge("דמי ניהול", 117);
     expect(crm.calls.at(-1)!.input.split).toEqual({ net: 100, vat: 17 });
     expect((await charge("דמי ניהול", 0)).statusCode).toBe(400);
     expect((await charge("משהו", 10)).statusCode).toBe(400);
     expect((await call("POST", "/settings", { vatRate: 300 })).statusCode).toBe(400);
+  });
+
+  it("opens a charge once per form, however often it is sent", async () => {
+    const key = "6f1c2a52-6d0f-4a43-9a51-3c1d2e4f5a60";
+    const send = () =>
+      call("POST", `/clients/${ids.client}/charges`, {
+        engagementId: ids.engagement,
+        chargeType: "דמי ניהול",
+        periodFrom: "2026-11-01",
+        periodTo: "2026-11-30",
+        amountTotal: 117,
+        requestKey: key,
+      });
+    const before = crm.calls.filter((c) => c.method === "createCharge").length;
+    const [a, b] = [await send(), await send()];
+    expect(b.json()).toEqual(a.json());
+    expect(crm.calls.filter((c) => c.method === "createCharge").length).toBe(before + 1);
+    // A failed write can be sent again.
+    crm.failNext.createCharge = new Error("Planfix down");
+    const failed = await call("POST", `/clients/${ids.client}/charges`, {
+      engagementId: ids.engagement, chargeType: "דמי ניהול", periodFrom: "2026-11-01", periodTo: "2026-11-30", amountTotal: 5,
+      requestKey: "6f1c2a52-6d0f-4a43-9a51-3c1d2e4f5a61",
+    });
+    expect(failed.statusCode).toBe(500);
+    const again = await call("POST", `/clients/${ids.client}/charges`, {
+      engagementId: ids.engagement, chargeType: "דמי ניהול", periodFrom: "2026-11-01", periodTo: "2026-11-30", amountTotal: 5,
+      requestKey: "6f1c2a52-6d0f-4a43-9a51-3c1d2e4f5a61",
+    });
+    expect(again.statusCode).toBe(201);
+  });
+
+  it("corrects the amount of a charge not yet on a bill, with a reason", async () => {
+    await call("POST", "/settings", { vatRate: 18 });
+    // 7101 is on a bill; 7102 has 1,000 received.
+    expect((await call("POST", `/clients/${ids.client}/charges/7101/amount`, { amountTotal: 500, reason: "טעות" })).statusCode).toBe(409);
+    const received = await call("POST", `/clients/${ids.client}/charges/7102/amount`, { amountTotal: 500, reason: "טעות" });
+    expect(received.json().error).toContain("זיכוי");
+    expect((await call("POST", `/clients/${ids.client}/charges/7102/amount`, { amountTotal: 500 })).statusCode).toBe(400);
+    const fee = { ...crm.billing.charges[0], planfixTaskId: 7104, billTaskIds: [], received: null };
+    crm.billing = { ...crm.billing, charges: [...crm.billing.charges, fee] };
+    await call("POST", "/billing/refresh");
+    const ok = await call("POST", `/clients/${ids.client}/charges/7104/amount`, { amountTotal: 590, reason: "דמי ניהול מעודכנים" });
+    expect(ok.json()).toEqual({ planfixTaskId: 7104, amountTotal: 590, split: { net: 500, vat: 90 } });
+    expect(crm.calls.at(-1)).toEqual({ method: "setChargeAmount", input: { taskId: 7104, amountTotal: 590, split: { net: 500, vat: 90 } } });
+    const log = await db.query("SELECT detail FROM audit_log WHERE action = 'charge.amount_corrected'");
+    expect(log.rows[0].detail).toMatchObject({ from: 708, to: 590, reason: "דמי ניהול מעודכנים" });
+    crm.billing = { ...crm.billing, charges: crm.billing.charges.filter((c) => c.planfixTaskId !== 7104) };
+    await call("POST", "/billing/refresh");
   });
 
   it("takes VAT on rent and on expenses from the client's card", async () => {

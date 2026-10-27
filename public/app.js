@@ -89,6 +89,13 @@ function toast(text) {
   setTimeout(() => t.classList.remove("show"), 2600);
 }
 
+// The client's approval covers the estimate when given for at least that amount.
+const clientCovers = (r) => {
+  const estimate = r.estimated_cost ?? r.approval_estimate;
+  return Boolean(r.client_approved_at) && r.client_approved_amount != null && estimate != null && Number(r.client_approved_amount) >= Number(estimate);
+};
+const APPROVAL_METHOD = { email: "מייל", whatsapp: "וואטסאפ", phone: "טלפון", signed: "מסמך חתום", other: "אחר" };
+
 // What the person should do next on a service request, and the button for it.
 function nextStep(r) {
   switch (r.status) {
@@ -96,8 +103,14 @@ function nextStep(r) {
       return { text: "לבחור ספק ולקבוע על חשבון מי העבודה", action: "assign", label: "שיוך ספק" };
     case "triage": {
       const cost = r.approval?.status ?? (r.awaiting_approval ? "pending" : "none");
-      if (r.charge_to === "client" && !r.client_approved_at) {
-        return { text: "העבודה על חשבון הלקוח: צריך את אישור הלקוח לפני שהספק מתחיל", action: "approve", label: "רישום אישור לקוח" };
+      if (r.charge_to === "client" && !clientCovers(r)) {
+        return {
+          text: r.client_approved_at
+            ? "העלות מעל מה שהלקוח אישר: צריך אישור לקוח מחדש לפני שהספק מתחיל"
+            : "העבודה על חשבון הלקוח: צריך את אישור הלקוח לפני שהספק מתחיל",
+          action: "approve",
+          label: "רישום אישור לקוח",
+        };
       }
       if (cost === "pending") {
         return { text: "העלות מעל סף האישור: ממתין לאישור מנהל", action: "decide", label: "לתיבת האישורים" };
@@ -148,6 +161,38 @@ function dialog(title, fields, onSubmit, submitLabel = "שמירה") {
 const field = (name, label, attrs = "", full = false) =>
   `<label class="${full ? "full" : ""}">${esc(label)}<input name="${name}" ${attrs}></label>`;
 
+// Picking the apartment a form acts on. Nothing is chosen until the user picks
+// one (by code, address or client), unless the form was opened from that
+// apartment. After a pick the full code, address and client are shown.
+function apartmentPicker(list, preset) {
+  const label = (e) => `${e.apartment_code} — ${e.address}${e.client_name ? ` — ${e.client_name}` : ""}`;
+  const fixed = list.find((e) => e.id === preset);
+  const html = fixed
+    ? `<div class="full"><span class="sub">דירה</span><br><b>${esc(label(fixed))}</b><input type="hidden" name="engagementId" value="${fixed.id}"></div>`
+    : `<label class="full">דירה<input name="apartment" list="dl-apartment" required autocomplete="off" placeholder="בחר דירה: הקלד קוד, כתובת או לקוח">
+        <datalist id="dl-apartment">${list.map((e) => `<option value="${esc(label(e))}">`).join("")}</datalist></label>
+       <input type="hidden" name="engagementId" value=""><p class="full sub" id="apartment-picked"></p>`;
+  return {
+    html,
+    wire(d) {
+      const input = d.querySelector("input[name=apartment]");
+      if (!input) return;
+      input.addEventListener("input", () => {
+        const match = list.find((e) => label(e) === input.value.trim());
+        d.querySelector("input[name=engagementId]").value = match?.id ?? "";
+        d.querySelector("#apartment-picked").textContent = match
+          ? `נבחרה דירה ${match.apartment_code} · ${match.address} · לקוח: ${match.client_name ?? "—"}`
+          : input.value ? "יש לבחור דירה מהרשימה" : "";
+      });
+    },
+    // The chosen engagement id, or an error the form shows.
+    value(v) {
+      if (!v.engagementId) throw new Error("צריך לבחור דירה מהרשימה");
+      return v.engagementId;
+    },
+  };
+}
+
 // A contact field: pick an existing name from the list, or type a new one.
 async function contactField(name, label, kind) {
   const list = await api("GET", `/contacts?kind=${kind}`);
@@ -193,26 +238,30 @@ async function intakeDialog() {
   );
 }
 
-async function newRequestDialog(engagementId) {
-  const engagements = await api("GET", "/engagements");
+// Opened from an apartment, the request is on it; from a client card, the
+// list holds that client's apartments only.
+async function newRequestDialog(engagementId, clientId) {
+  const all = await api("GET", "/engagements");
+  const engagements = clientId ? all.filter((e) => e.client_id === clientId) : all;
   if (!engagements.length) return toast("קודם צריך לקלוט דירה");
-  dialog(
+  const apartment = apartmentPicker(engagements, engagementId);
+  const d = dialog(
     "פתיחת קריאת שירות",
-    `<label class="full">דירה<select name="engagementId" required>${engagements
-      .map((e) => `<option value="${e.id}" ${e.id === engagementId ? "selected" : ""}>${esc(e.apartment_code)} — ${esc(e.address)}</option>`)
-      .join("")}</select></label>` +
+    apartment.html +
       field("subject", "נושא התקלה", "required", true) +
       `<label>סוג תקלה<select name="category">${options(Object.entries(CATEGORY), "other")}</select></label>` +
       `<label>דחיפות<select name="urgency">${options(Object.entries(URGENCY).map(([k, [l]]) => [k, l]), "normal")}</select></label>` +
       field("reportedBy", "פותח הקריאה", "required") +
       `<label class="full">פירוט<textarea name="description" rows="3"></textarea></label>`,
     async (v) => {
-      const { id } = await api("POST", "/service-requests", { ...v, description: v.description || undefined });
+      const { apartment: _, ...rest } = v;
+      const { id } = await api("POST", "/service-requests", { ...rest, engagementId: apartment.value(v), description: v.description || undefined });
       toast("הקריאה נפתחה");
       location.hash = `#/requests/${id}`;
     },
     "פתיחה",
   );
+  apartment.wire(d);
 }
 
 async function stepDialog(r, action) {
@@ -261,10 +310,21 @@ async function stepDialog(r, action) {
       box.querySelector("textarea").required = over;
     });
   } else if (action === "approve") {
-    dialog("אישור לקוח לעבודה לחיוב", field("reference", "אסמכתה (מייל, הודעה, מסמך)", "required", true), async (v) => {
-      await api("POST", `${base}/client-approval`, v);
-      done("אישור הלקוח נרשם");
-    });
+    dialog(
+      "אישור לקוח לעבודה לחיוב",
+      `<label>איך הלקוח אישר<select name="method">${options(Object.entries(APPROVAL_METHOD), "email")}</select></label>` +
+        field(
+          "amount",
+          "הלקוח אישר עד סכום (₪)",
+          `type="number" min="0" step="0.01" ${r.estimated_cost == null ? "required" : `value="${r.estimated_cost}"`}`,
+        ) +
+        field("reference", "אסמכתה (מייל, הודעה, מסמך)", "required", true) +
+        `<p class="full sub">אישור מנהל לחריגה אינו מחליף את אישור הלקוח. אם העלות תעלה מעל הסכום שאושר, יידרש אישור לקוח מחדש.</p>`,
+      async (v) => {
+        await api("POST", `${base}/client-approval`, { reference: v.reference, method: v.method, amount: v.amount ? Number(v.amount) : undefined });
+        done("אישור הלקוח נרשם");
+      },
+    );
   } else if (action === "invoice") {
     dialog(
       "קליטת חשבונית ספק",
@@ -516,26 +576,71 @@ async function taskView(id) {
   };
 }
 
+// The engagement's contract against today: in force, ended or not started.
+const contractState = (e) => {
+  const now = today();
+  const from = String(e.starts_on).slice(0, 10);
+  const to = String(e.ends_on).slice(0, 10);
+  return to < now ? "ended" : from > now ? "future" : "active";
+};
+const CONTRACT = { active: ["חוזה בתוקף", "good"], ended: ["חוזה הסתיים", ""], future: ["חוזה עתידי", "warn"] };
+const cityOf = (address) => (address || "").split(",").at(-1).trim();
+
 async function apartmentsView(params) {
   const archived = params.get("archived") === "1";
   const rows = await api("GET", `/engagements${archived ? "?archived=1" : ""}`);
+  const clients = [...new Map(rows.map((e) => [e.client_id, e.client_name])).entries()].sort((a, b) => a[1].localeCompare(b[1], "he"));
+  const cities = [...new Set(rows.map((e) => cityOf(e.address)).filter(Boolean))].sort((a, b) => a.localeCompare(b, "he"));
   view.innerHTML = `
-    <div class="head"><div><h1>דירות</h1><p class="sub">דירות בהתקשרות וסטטוס הסנכרון שלהן ל-Planfix.</p></div>
+    <div class="head"><div><h1>דירות</h1><p class="sub">דירות בהתקשרות, מצב החוזה וסטטוס הסנכרון ל-Planfix.</p></div>
     ${allowed("apartments.create") ? `<button class="btn primary" id="add">קליטת דירה</button>` : ""}</div>
     ${archiveTabs("apartments", archived)}
     ${
       rows.length
-        ? `<div class="wrap"><table class="table"><thead><tr><th>קוד</th><th>כתובת</th><th>בעל דירה</th><th>לקוח</th>
-          <th>תקופה</th>${allowed("amounts.view") ? "<th>שכ״ד</th>" : ""}<th>Planfix</th></tr></thead><tbody>${rows
-            .map(
-              (e) => `<tr><td>${esc(e.apartment_code)}</td><td><a href="#/properties/${e.property_id}">${esc(e.address)}</a></td><td>${esc(e.owner_name)}</td>
-              <td><a href="#/clients/${e.client_id}">${esc(e.client_name)}</a></td><td>${date(e.starts_on)}–${date(e.ends_on)}</td>${allowed("amounts.view") ? `<td>${money(e.monthly_rent)}</td>` : ""}
-              <td>${pill(SYNC[e.sync])}${e.planfix_task_id ? ` <small>#${e.planfix_task_id}</small>` : ""}</td></tr>`,
-            )
-            .join("")}</tbody></table></div>`
-        : `<div class="empty">${archived ? "אין דירות בארכיון" : "עדיין אין דירות."}</div>`
+        ? `<form class="filters" id="filters">
+            <input name="q" type="search" placeholder="קוד, כתובת או בעל דירה" aria-label="חיפוש בדירות">
+            <select name="client" aria-label="לקוח"><option value="">כל הלקוחות</option>${clients.map(([id, name]) => `<option value="${id}">${esc(name)}</option>`).join("")}</select>
+            <select name="city" aria-label="עיר"><option value="">כל הערים</option>${cities.map((c) => `<option>${esc(c)}</option>`).join("")}</select>
+            <select name="state" aria-label="מצב חוזה"><option value="">כל מצבי החוזה</option>${Object.entries(CONTRACT).map(([k, [l]]) => `<option value="${k}">${l}</option>`).join("")}</select>
+            <select name="ends" aria-label="סיום חוזה"><option value="">כל מועדי הסיום</option><option value="30">מסתיים תוך 30 יום</option><option value="60">תוך 60 יום</option><option value="90">תוך 90 יום</option><option value="180">תוך חצי שנה</option></select>
+            <button class="btn" type="reset">איפוס</button>
+            <span class="sub" id="count"></span>
+          </form><div id="apartment-rows"></div>`
+        : `<div class="empty">${archived ? "אין דירות בארכיון" : "עדיין אין דירות. לוחצים \"קליטת דירה\" כדי לקלוט את הראשונה."}</div>`
     }`;
   view.querySelector("#add")?.addEventListener("click", intakeDialog);
+  const form = view.querySelector("#filters");
+  if (!form) return;
+  const render = () => {
+    const f = Object.fromEntries(new FormData(form));
+    const q = f.q.trim().toLowerCase();
+    const limit = f.ends ? new Date(Date.now() + Number(f.ends) * 86400000).toISOString().slice(0, 10) : null;
+    const shown = rows.filter(
+      (e) =>
+        (!q || `${e.apartment_code} ${e.address} ${e.owner_name}`.toLowerCase().includes(q)) &&
+        (!f.client || e.client_id === f.client) &&
+        (!f.city || cityOf(e.address) === f.city) &&
+        (!f.state || contractState(e) === f.state) &&
+        (!limit || (contractState(e) !== "ended" && String(e.ends_on).slice(0, 10) <= limit)),
+    );
+    view.querySelector("#count").textContent = `${shown.length} מתוך ${rows.length}`;
+    view.querySelector("#apartment-rows").innerHTML = shown.length
+      ? `<div class="wrap"><table class="table stack"><thead><tr><th>קוד</th><th>כתובת</th><th>בעל דירה</th><th>לקוח</th>
+          <th>תקופה</th><th>חוזה</th>${allowed("amounts.view") ? "<th>שכ״ד</th>" : ""}<th>Planfix</th></tr></thead><tbody>${shown
+            .map(
+              (e) => `<tr><td data-label="קוד">${esc(e.apartment_code)}</td><td data-label="כתובת"><a href="#/properties/${e.property_id}">${esc(e.address)}</a></td>
+              <td data-label="בעל דירה">${esc(e.owner_name)}</td><td data-label="לקוח"><a href="#/clients/${e.client_id}">${esc(e.client_name)}</a></td>
+              <td data-label="תקופה">${date(e.starts_on)}–${date(e.ends_on)}</td><td data-label="חוזה">${pill(CONTRACT[contractState(e)])}</td>
+              ${allowed("amounts.view") ? `<td data-label="שכ״ד">${money(e.monthly_rent)}</td>` : ""}
+              <td data-label="Planfix">${pill(SYNC[e.sync])}${e.planfix_task_id ? ` <small>#${e.planfix_task_id}</small>` : ""}</td></tr>`,
+            )
+            .join("")}</tbody></table></div>`
+      : `<div class="empty">אין דירות שמתאימות לסינון. אפשר ללחוץ "איפוס".</div>`;
+  };
+  form.addEventListener("input", render);
+  form.addEventListener("reset", () => setTimeout(render));
+  form.addEventListener("submit", (e) => e.preventDefault());
+  render();
 }
 
 async function requestsView() {
@@ -584,8 +689,19 @@ async function requestView(id) {
       <div><span>ספק</span><b>${r.supplier_id ? `<a href="#/suppliers/${r.supplier_id}">${esc(r.supplier_name)}</a>` : "טרם נבחר"}</b></div>
       <div><span>על חשבון</span><b>${esc(CHARGE[r.charge_to] || "טרם נקבע")}</b></div>
       <div><span>עלות משוערת</span><b>${r.estimated_cost == null ? "—" : money(r.estimated_cost)}</b></div>
-      <div><span>אישור לקוח</span><b>${r.client_approved_at ? esc(r.client_approval_ref) : "—"}</b></div>
+      <div><span>אישור מנהל לעלות</span><b>${a ? pill(APPROVAL[a.status]) : r.estimated_cost == null ? "—" : "לא נדרש (מתחת לסף)"}</b></div>
     </div>
+    ${
+      r.charge_to === "client"
+        ? `<div class="card"><div class="grow"><b>אישור לקוח</b> ${
+            clientCovers(r) ? pill(["אושר", "good"]) : r.client_approved_at ? pill(["נדרש אישור מחדש", "warn"]) : pill(["ממתין לאישור הלקוח", "warn"])
+          }<br><small>${
+            r.client_approved_at
+              ? `עד ${money(r.client_approved_amount)} · ${esc(APPROVAL_METHOD[r.client_approval_method] || "")}: ${esc(r.client_approval_ref)} · נרשם על ידי ${esc(r.client_approved_by_name || "—")} · ${new Date(r.client_approved_at).toLocaleString("he-IL")}`
+              : "העבודה על חשבון הלקוח. הספק לא מתחיל לפני אישור הלקוח."
+          }</small></div></div>`
+        : ""
+    }
     ${
       a
         ? `<div class="card"><div class="grow"><b>חריגה מסף האישור</b> ${pill(APPROVAL[a.status])}<br>
@@ -760,7 +876,8 @@ function contactFields(kind) {
 function contactDialog(kind, c, onSaved) {
   const input = ([key, col, label, type, required]) => {
     const v = c?.[col];
-    const mark = required ? " *" : "";
+    // Only the name is needed to open the card; the starred fields complete it.
+    const mark = key === "name" ? " (חובה)" : required ? " *" : "";
     if (type === "bool") {
       return `<label>${esc(label + mark)}<select name="${key}"><option value="">—</option>
         <option value="true" ${v === true ? "selected" : ""}>כן</option><option value="false" ${v === false ? "selected" : ""}>לא</option></select></label>`;
@@ -784,7 +901,7 @@ function contactDialog(kind, c, onSaved) {
   const fields = contactFields(kind);
   dialog(
     c ? `עריכת פרטי ${KIND_LABEL[kind]}` : `${KIND_LABEL[kind]} חדש`,
-    fields.map(input).join("") + `<p class="full"><small>* נדרש כדי שהכרטיס יהיה מלא. אפשר לשמור גם בלי, והכרטיס יסומן "לא מלא".</small></p>`,
+    fields.map(input).join("") + `<p class="full"><small>(חובה) נדרש כדי לפתוח את הכרטיס. * נדרש כדי שהכרטיס יהיה מלא: אפשר לשמור גם בלי, והכרטיס יסומן "לא מלא" עד שישלימו.</small></p>`,
     async (v) => {
       const body = {};
       for (const [key, , , type] of fields) {
@@ -815,7 +932,7 @@ function contactDialog(kind, c, onSaved) {
 // Active cards or the archive, on top of each list.
 const archiveTabs = (base, archived) => `
   <div class="tabs">
-    <a class="btn ${archived ? "" : "primary"}" href="#/${base}">פעילים</a>
+    <a class="btn ${archived ? "" : "primary"}" href="#/${base}" title="רשומות שלא הועברו לארכיון, בלי קשר למצב החוזה">לא בארכיון</a>
     <a class="btn ${archived ? "primary" : ""}" href="#/${base}?archived=1">ארכיון</a>
   </div>`;
 
@@ -1031,26 +1148,31 @@ async function notificationsView() {
 
 // Values of Planfix field 9978 "אופן טיפול בהוצאה" seen on maglardsand invoices.
 const HANDLING = ["לחיוב", "כללי"];
+// What happens to the expense after it is taken in.
+const HANDLING_LABEL = {
+  "לחיוב": "לחיוב הלקוח: ההוצאה תיכנס לחשבון הבא של הלקוח",
+  "כללי": "הוצאה כללית של מגלארד: לא מחויבת ללקוח",
+};
 
 async function invoiceDialog() {
   const [engagements, supplier] = await Promise.all([api("GET", "/engagements"), contactField("supplier", "ספק", "supplier")]);
   if (!engagements.length) return toast("קודם צריך לקלוט דירה");
-  dialog(
+  const apartment = apartmentPicker(engagements);
+  const d = dialog(
     "קליטת חשבונית ספק",
-    `<label class="full">דירה<select name="engagementId" required>${engagements
-      .map((e) => `<option value="${e.id}">${esc(e.apartment_code)} — ${esc(e.address)}</option>`)
-      .join("")}</select></label>` +
+    apartment.html +
       supplier.html +
       field("invoiceNumber", "מספר חשבונית", "required") +
       field("invoiceDate", "תאריך חשבונית", `type="date" required value="${today()}"`) +
-      field("amountNet", "סכום לפני מע״מ", 'type="number" required min="0" step="0.01"') +
-      field("amountVat", "מע״מ", 'type="number" required min="0" step="0.01"') +
-      `<label>אופן טיפול בהוצאה<select name="handling">${options(HANDLING.map((h) => [h, h]), HANDLING[0])}</select></label>`,
+      field("amountNet", "סכום לפני מע״מ (₪)", 'type="number" required min="0" step="0.01"') +
+      field("amountVat", "סכום המע״מ בחשבונית (₪, לא אחוז)", 'type="number" required min="0" step="0.01"') +
+      `<label>אופן טיפול בהוצאה<select name="handling">${options(HANDLING.map((h) => [h, HANDLING_LABEL[h]]), HANDLING[0])}</select></label>
+      <p class="full sub" id="invoice-total"></p>`,
     async (v) => {
       const net = Number(v.amountNet);
       const vat = Number(v.amountVat);
       await api("POST", "/supplier-invoices", {
-        engagementId: v.engagementId,
+        engagementId: apartment.value(v),
         supplier: supplier.resolve(v.supplier),
         invoiceNumber: v.invoiceNumber,
         invoiceDate: v.invoiceDate,
@@ -1064,6 +1186,17 @@ async function invoiceDialog() {
     },
     "קליטה",
   );
+  apartment.wire(d);
+  // The total the invoice will carry, before it is taken in.
+  const form = d.querySelector("form");
+  const total = () => {
+    const net = Number(form.amountNet.value || 0);
+    const vat = Number(form.amountVat.value || 0);
+    const rate = net ? Math.round((vat / net) * 1000) / 10 : 0;
+    d.querySelector("#invoice-total").textContent = `סה״כ חשבונית: ${money(Math.round((net + vat) * 100) / 100)}${net ? ` (מע״מ ${rate}%)` : ""}`;
+  };
+  form.addEventListener("input", total);
+  total();
 }
 
 // Where an invoice came from: made here (with its sync state), or entered in Planfix and shown read only.
@@ -1083,15 +1216,15 @@ async function invoicesView() {
     </div></div>
     ${
       rows.length
-        ? `<div class="wrap"><table class="table"><thead><tr><th>מספר</th><th>ספק</th><th>דירה</th><th>תאריך</th>
+        ? `<div class="wrap"><table class="table stack"><thead><tr><th>מספר</th><th>ספק</th><th>דירה</th><th>תאריך</th>
           <th>לפני מע״מ</th><th>סה״כ</th><th>אופן טיפול</th><th>Planfix</th></tr></thead><tbody>${rows
             .map(
-              (i) => `<tr><td>${esc(i.invoice_number || "—")}</td><td>${supplierLink(i)}</td><td>${esc(i.apartment_code || "—")}</td>
-              <td>${date(i.invoice_date)}</td><td>${money(i.amount_net)}</td><td>${money(i.amount_total)}</td>
-              <td>${esc(i.handling || "")}</td><td>${invoiceSource(i)}</td></tr>`,
+              (i) => `<tr><td data-label="מספר">${esc(i.invoice_number || "—")}${i.suspected_duplicate ? ` ${pill(["חשד לכפילות", "warn"])}` : ""}</td><td data-label="ספק">${supplierLink(i)}</td><td data-label="דירה">${esc(i.apartment_code || "—")}</td>
+              <td data-label="תאריך">${date(i.invoice_date)}</td><td data-label="לפני מע״מ">${money(i.amount_net)}</td><td data-label="סה״כ">${money(i.amount_total)}</td>
+              <td data-label="אופן טיפול">${esc(i.handling || "")}</td><td data-label="Planfix">${invoiceSource(i)}</td></tr>`,
             )
             .join("")}</tbody></table></div>`
-        : `<div class="empty">אין חשבוניות</div>`
+        : `<div class="empty">אין עדיין חשבוניות ספק. חשבונית נקלטת מכאן ("קליטת חשבונית") או מתוך קריאת שירות, וחשבוניות שנקלטו ב-Planfix יופיעו אחרי "רענון מ-Planfix".</div>`
     }`;
   view.querySelector("#add")?.addEventListener("click", invoiceDialog);
   view.querySelector("#refresh").addEventListener("click", async (e) => {
@@ -1279,15 +1412,28 @@ function showLogin() {
   document.body.innerHTML = `<main class="login">
     <form id="login" novalidate>
       <h1>MAGLARD OS</h1><p class="sub">כניסה למערכת</p>
-      <label>אימייל<input name="email" type="email" autocomplete="username" required></label>
-      <label>סיסמה<input name="password" type="password" autocomplete="current-password" required></label>
+      <label>אימייל<input name="email" type="email" autocomplete="username" required aria-describedby="email-err"><span class="ferr" id="email-err"></span></label>
+      <label>סיסמה<input name="password" type="password" autocomplete="current-password" required aria-describedby="password-err"><span class="ferr" id="password-err"></span></label>
       <div class="err" role="alert"></div>
       <button class="btn primary">כניסה</button>
+      <p class="sub" style="margin:0">שכחת סיסמה? פנה למנהל המערכת, והוא יקבע לך סיסמה חדשה.</p>
     </form></main>`;
   const form = document.getElementById("login");
   form.querySelector("input").focus();
+  const check = (input) => {
+    const msg = !input.value.trim()
+      ? input.name === "email" ? "צריך למלא אימייל" : "צריך למלא סיסמה"
+      : input.validity.typeMismatch ? "האימייל לא תקין, למשל name@example.com" : "";
+    form.querySelector(`#${input.name}-err`).textContent = msg;
+    input.setAttribute("aria-invalid", msg ? "true" : "false");
+    return !msg;
+  };
+  form.querySelectorAll("input").forEach((i) => i.addEventListener("input", () => i.getAttribute("aria-invalid") === "true" && check(i)));
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
+    form.querySelector(".err").textContent = "";
+    const bad = [...form.querySelectorAll("input")].filter((i) => !check(i));
+    if (bad.length) return bad[0].focus();
     try {
       await api("POST", "/auth/login", Object.fromEntries(new FormData(form)));
       location.reload();
@@ -1349,7 +1495,7 @@ async function clientsView(params) {
         ? `<div class="wrap"><table class="table"><thead><tr><th>לקוח</th><th>דירות בתוקף</th><th>כל הדירות</th><th>קריאות פתוחות</th><th>כרטיס</th></tr></thead><tbody>${rows
             .map(
               (c) => `<tr class="click" data-href="#/clients/${c.id}" tabindex="0"><td>${esc(c.name)}</td><td>${c.active_apartments}</td>
-              <td>${c.apartments}</td><td>${c.open_requests || ""}</td><td>${cardPill(c.missing)}</td></tr>`,
+              <td>${c.apartments}</td><td>${c.open_requests ?? 0}</td><td>${cardPill(c.missing)}</td></tr>`,
             )
             .join("")}</tbody></table></div>`
         : `<div class="empty">${archived ? "אין לקוחות בארכיון" : "אין לקוחות עדיין"}</div>`
@@ -1392,7 +1538,7 @@ async function clientView(id) {
     ${invoicesTable(c.invoices)}
     ${allowed("billing.view") ? `<div id="billing">${await billingSection(id)}</div>` : ""}`;
   view.querySelector("#new-req")?.addEventListener("click", () =>
-    newRequestDialog(active.length === 1 ? active[0].id : undefined),
+    newRequestDialog(active.length === 1 ? active[0].id : undefined, id),
   );
   wireBilling(id);
   wireContact(details);
@@ -1401,13 +1547,15 @@ async function clientView(id) {
 // The client's contracts, charges and accumulated bills as Planfix computes
 // them. Read only: amounts are changed in Planfix.
 const span = (from, to) => (from || to ? `${date(from)} עד ${date(to)}` : "—");
-const chargesTable = (rows, status = true) =>
+const chargesTable = (rows, status = true, edit = false) =>
   `<div class="wrap"><table class="table"><thead><tr><th>דירה</th><th>סוג</th><th>תקופה</th><th>לפני מע״מ</th><th>מע״מ</th>
-    <th>סה״כ</th><th>התקבל</th><th>יתרה</th>${status ? "<th>סטטוס</th>" : ""}</tr></thead><tbody>${rows
+    <th>סה״כ</th><th>התקבל</th><th>יתרה</th>${status ? "<th>סטטוס</th>" : ""}${edit ? "<th></th>" : ""}</tr></thead><tbody>${rows
       .map(
         (c) => `<tr><td>${esc(c.apartment_code || "—")}</td><td>${esc(c.charge_type || c.name)}</td><td>${span(c.period_from, c.period_to)}</td>
         <td>${money(c.amount_net)}</td><td>${money(c.amount_vat)}</td><td>${money(c.amount_total)}</td><td>${money(c.received)}</td>
-        <td><b>${money(c.balance)}</b></td>${status ? `<td>${esc(c.status || "")}</td>` : ""}</tr>`,
+        <td><b>${money(c.balance)}</b></td>${status ? `<td>${esc(c.status || "")}</td>` : ""}${
+          edit ? `<td>${Number(c.received || 0) ? "" : `<button class="btn" data-amount="${c.planfix_task_id}">תיקון סכום</button>`}</td>` : ""
+        }</tr>`,
       )
       .join("")}</tbody></table></div>`;
 
@@ -1420,7 +1568,7 @@ async function billingSection(clientId) {
     ${allowed("billing.manage") && b.linked && b.contracts.length ? `<button class="btn" id="rent-charges">חיובי שכירות</button>` : ""}
     ${allowed("billing.manage") && b.unbilled.length ? `<button class="btn primary" id="issue-bill">הפקת חשבון</button>` : ""}
     <button class="btn" id="billing-refresh">רענון מ־Planfix</button></div></div>
-    <p class="sub">מוצג כפי ש־Planfix מחשב אותו, לקריאה בלבד. שינוי סכום נעשה ב־Planfix.${
+    <p class="sub">הסכומים מחושבים ונשמרים ב־Planfix. חיוב שעוד לא נכלל בחשבון אפשר לתקן כאן, ועל חיוב ששולם פותחים זיכוי.${
       b.readAt ? ` נקרא לאחרונה: ${new Date(b.readAt).toLocaleString("he-IL")}` : ""
     }</p>`;
   if (!b.linked) return `${head}<div class="empty">הלקוח עוד לא נשלח ל־Planfix, ולכן אין לו חיובים שם</div>`;
@@ -1444,7 +1592,7 @@ async function billingSection(clientId) {
         : `<div class="empty">אין חוזים ב־Planfix</div>`
     }
     <h3>חיובים שעוד לא נכללו בחשבון</h3>
-    ${b.unbilled.length ? chargesTable(b.unbilled) : `<div class="empty">כל החיובים כבר בחשבון</div>`}
+    ${b.unbilled.length ? chargesTable(b.unbilled, true, allowed("billing.manage")) : `<div class="empty">כל החיובים כבר בחשבון</div>`}
     <h3>חשבונות מצטברים</h3>
     ${
       b.bills.length
@@ -1467,12 +1615,15 @@ function chargeDialog(clientId) {
   const b = billing;
   const now = today();
   const end = new Date(Date.UTC(Number(now.slice(0, 4)), Number(now.slice(5, 7)), 0)).toISOString().slice(0, 10);
+  const key = crypto.randomUUID();
+  const apartment = apartmentPicker(
+    b.apartments.map((a) => ({ ...a, client_name: b.client.name })),
+    b.apartments.length === 1 ? b.apartments[0].id : undefined,
+  );
   const d = dialog(
     "חיוב חדש ב־Planfix",
-    `<label class="full">דירה<select name="engagementId" required>${b.apartments
-      .map((a) => `<option value="${a.id}">${esc(a.apartment_code)} — ${esc(a.address)}</option>`)
-      .join("")}</select></label>
-    <label>סוג חיוב<select name="chargeType">${options(b.chargeTypes.map((t) => [t.name, t.name]), b.chargeTypes[0].name)}</select></label>` +
+    apartment.html +
+      `<label>סוג חיוב<select name="chargeType">${options(b.chargeTypes.map((t) => [t.name, t.name]), b.chargeTypes[0].name)}</select></label>` +
       field("note", "פירוט (לא חובה)", 'maxlength="80" placeholder="למשל: בלון גז"') +
       field("periodFrom", "תקופה מתאריך", `type="date" required value="${now.slice(0, 8)}01"`) +
       field("periodTo", "עד תאריך", `type="date" required value="${end}"`) +
@@ -1480,12 +1631,13 @@ function chargeDialog(clientId) {
       `<p class="full sub" id="split"></p>`,
     async (v) => {
       const r = await api("POST", `/clients/${clientId}/charges`, {
-        engagementId: v.engagementId,
+        engagementId: apartment.value(v),
         chargeType: v.chargeType,
         note: v.note || undefined,
         periodFrom: v.periodFrom,
         periodTo: v.periodTo,
         amountTotal: Number(v.amountTotal),
+        requestKey: key,
       });
       toast(`החיוב נפתח ב־Planfix (#${r.planfixTaskId})`);
       view.querySelector("#billing").innerHTML = await billingSection(clientId);
@@ -1499,7 +1651,12 @@ function chargeDialog(clientId) {
     const total = Number(form.amountTotal.value);
     const box = d.querySelector("#split");
     const from = { client_rent: "כרטיס הלקוח (מע״מ על שכירות)", client_expenses: "כרטיס הלקוח (מע״מ על הוצאות)", planfix: "טבלת סוגי ההוצאה ב־Planfix" }[type.source];
-    if (type.vat === null) box.textContent = `ב${from} לא הוגדר אם יש מע״מ. יישלח הסכום הכולל, ואת הפיצול משלימים ב־Planfix.`;
+    form.querySelector(".primary").disabled = type.vat === null;
+    if (type.vat === null)
+      box.textContent =
+        type.source === "planfix"
+          ? "סוג החיוב לא מוגדר בטבלת סוגי ההוצאה ומע״מ ב־Planfix, ולכן אי אפשר לדעת אם יש עליו מע״מ. מנהל המערכת צריך להוסיף אותו שם פעם אחת."
+          : `ב${from} לא הוגדר אם יש מע״מ. יש להשלים את השדה בכרטיס הלקוח, ואז לפתוח את החיוב.`;
     else if (!total) box.textContent = `${type.vat ? `חייב במע״מ (${b.vatRate}%)` : "לא חייב במע״מ"} לפי ${from}`;
     else {
       const net = type.vat ? Math.round((total / (1 + b.vatRate / 100)) * 100) / 100 : total;
@@ -1508,12 +1665,14 @@ function chargeDialog(clientId) {
   };
   form.addEventListener("input", showSplit);
   showSplit();
+  apartment.wire(d);
 }
 
 // An accumulated bill issued in Planfix over the charges picked here. Planfix
 // sums them; submitting the bill to the client stays a step in Planfix.
 function billDialog(clientId) {
   const b = billing;
+  const key = crypto.randomUUID();
   const now = today();
   const end = new Date(Date.UTC(Number(now.slice(0, 4)), Number(now.slice(5, 7)), 0)).toISOString().slice(0, 10);
   const d = dialog(
@@ -1530,7 +1689,7 @@ function billDialog(clientId) {
       <p class="full sub" id="bill-total"></p>`,
     async (v) => {
       const charges = [...d.querySelectorAll("[data-charge]:checked")].map((x) => Number(x.dataset.charge));
-      const r = await api("POST", `/clients/${clientId}/bills`, { periodFrom: v.periodFrom, periodTo: v.periodTo, charges });
+      const r = await api("POST", `/clients/${clientId}/bills`, { periodFrom: v.periodFrom, periodTo: v.periodTo, charges, requestKey: key });
       toast("החשבון הופק ב־Planfix");
       location.hash = `#/clients/${clientId}/bills/${r.planfixTaskId}`;
     },
@@ -1553,11 +1712,12 @@ function billDialog(clientId) {
 // The month's rent, one charge per contract not yet charged. Planfix computes
 // the rent by days from the contract.
 function rentDialog(clientId) {
+  const key = crypto.randomUUID();
   const d = dialog(
     "חיובי שכירות לחודש",
     field("month", "חודש", `type="month" required value="${today().slice(0, 7)}"`) + `<div class="full" id="rent-plan"></div>`,
     async (v) => {
-      const r = await api("POST", `/clients/${clientId}/rent-charges`, { month: v.month });
+      const r = await api("POST", `/clients/${clientId}/rent-charges`, { month: v.month, requestKey: key });
       const problems = r.created.filter((c) => c.problem);
       toast(`נפתחו ${r.created.length} חיובי שכ״ד ב־Planfix${problems.length ? `, ${problems.length} צריכים השלמה ב־Planfix` : ""}`);
       view.querySelector("#billing").innerHTML = await billingSection(clientId);
@@ -1619,6 +1779,24 @@ function wireBilling(clientId) {
   view.querySelector("#new-charge")?.addEventListener("click", () => chargeDialog(clientId));
   view.querySelector("#issue-bill")?.addEventListener("click", () => billDialog(clientId));
   view.querySelector("#rent-charges")?.addEventListener("click", () => rentDialog(clientId));
+  view.querySelectorAll("#billing [data-amount]").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      const c = billing.unbilled.find((x) => String(x.planfix_task_id) === btn.dataset.amount);
+      dialog(
+        `תיקון סכום: ${c.apartment_code || ""} ${c.charge_type || c.name}`,
+        `<p class="full sub">סכום נוכחי: ${money(c.amount_total)} · ${span(c.period_from, c.period_to)}</p>` +
+          field("amountTotal", "סכום חדש כולל מע״מ", `type="number" required step="0.01" value="${c.amount_total ?? ""}"`) +
+          field("reason", "סיבת התיקון", "required", true),
+        async (v) => {
+          await api("POST", `/clients/${clientId}/charges/${c.planfix_task_id}/amount`, { amountTotal: Number(v.amountTotal), reason: v.reason });
+          toast("הסכום תוקן ב־Planfix");
+          view.querySelector("#billing").innerHTML = await billingSection(clientId);
+          wireBilling(clientId);
+        },
+        "תיקון",
+      );
+    }),
+  );
   view.querySelectorAll("#billing tr[data-href]").forEach((tr) => {
     const go = () => (location.hash = tr.dataset.href);
     tr.addEventListener("click", go);
@@ -1896,8 +2074,17 @@ async function route() {
     const target = a.getAttribute("href").replace(/^#/, "").split("?")[0].split("/")[1];
     const current = section === "properties" ? "apartments" : section || "";
     a.toggleAttribute("aria-current", target === current);
-    if (target === current) a.setAttribute("aria-current", "page");
+    if (target === current) {
+      a.setAttribute("aria-current", "page");
+      if (menuLabel) menuLabel.textContent = a.firstChild.textContent.trim();
+    }
   });
+  closeMenu();
+  // Show that the page is loading only when it takes long enough to notice.
+  const slow = setTimeout(() => {
+    view.setAttribute("aria-busy", "true");
+    document.body.classList.add("loading");
+  }, 150);
   try {
     if (!section) await workCenterView();
     else if (section === "apartments") await apartmentsView(params);
@@ -1922,9 +2109,25 @@ async function route() {
     else view.innerHTML = `<div class="empty">הדף לא נמצא</div>`;
   } catch (err) {
     view.innerHTML = `<div class="empty">לא הצלחתי לטעון: ${esc(err.message)}</div>`;
+  } finally {
+    clearTimeout(slow);
+    view.removeAttribute("aria-busy");
+    document.body.classList.remove("loading");
   }
   refreshCounts();
 }
+
+// On a phone the menu folds into one button that names the current screen.
+const menuBtn = document.getElementById("menu-btn");
+const menuLabel = document.getElementById("menu-label");
+function closeMenu() {
+  document.querySelector(".rail")?.classList.remove("open");
+  menuBtn?.setAttribute("aria-expanded", "false");
+}
+menuBtn?.addEventListener("click", () => {
+  const open = document.querySelector(".rail").classList.toggle("open");
+  menuBtn.setAttribute("aria-expanded", String(open));
+});
 
 async function start() {
   try {

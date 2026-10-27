@@ -2,6 +2,7 @@ import { z } from "zod";
 import { withTx, type Db, type Tx } from "../db/pool.js";
 import type { Role } from "../permissions.js";
 import { contactRef, ForbiddenError, isoDate, money, NotFoundError, resolveContact, RuleError } from "./common.js";
+import { assertNotDuplicate } from "./invoices.js";
 import { notify, notifyPermission } from "./notifications.js";
 import { enqueue } from "./services.js";
 
@@ -64,7 +65,13 @@ export async function approvalThreshold(db: Db | Tx): Promise<number> {
   return Number(rows[0]?.value ?? 1500);
 }
 
-export const approvalInput = z.object({ reference: z.string().min(1) });
+export const APPROVAL_METHOD = { email: "מייל", whatsapp: "וואטסאפ", phone: "טלפון", signed: "מסמך חתום", other: "אחר" } as const;
+// The amount defaults to the current estimate; before there is one it must be given.
+export const approvalInput = z.object({
+  reference: z.string().trim().min(1),
+  method: z.enum(keys(APPROVAL_METHOD)).default("other"),
+  amount: money.optional(),
+});
 
 export const invoiceInput = z
   .object({
@@ -155,10 +162,25 @@ async function costApproval(tx: Tx, id: string): Promise<"none" | "pending" | "a
   return rows[0]?.status ?? "none";
 }
 
-// The supplier starts only once the client approved work charged to them and
-// a manager approved a cost above the threshold.
-const ready = (sr: { charge_to: string | null; client_approved_at: unknown }, cost: string) =>
-  (sr.charge_to !== "client" || Boolean(sr.client_approved_at)) && (cost === "none" || cost === "approved");
+// The client's approval covers the estimate when it was given for at least
+// that amount.
+type ApprovalState = {
+  charge_to: string | null;
+  client_approved_at: unknown;
+  client_approved_amount: string | number | null;
+  estimated_cost: string | number | null;
+};
+const clientCovers = (sr: ApprovalState) =>
+  Boolean(sr.client_approved_at) &&
+  sr.client_approved_amount != null &&
+  sr.estimated_cost != null &&
+  Number(sr.client_approved_amount) >= Number(sr.estimated_cost);
+
+// The supplier starts only once the client approved work charged to them, for
+// the current estimate, and a manager approved a cost above the threshold. A
+// manager's approval never stands in for the client's.
+const ready = (sr: ApprovalState, cost: string) =>
+  (sr.charge_to !== "client" || clientCovers(sr)) && (cost === "none" || cost === "approved");
 
 // Decide who pays, which supplier handles it and what it should cost.
 export async function assignSupplier(db: Db, actor: Actor, id: string, input: z.infer<typeof assignInput>) {
@@ -193,7 +215,14 @@ export async function assignSupplier(db: Db, actor: Actor, id: string, input: z.
       );
       await notifyPermission(tx, "approvals.decide", actor.id, `אישור חריגה: ${sr.subject} · ₪${input.estimatedCost}`, "#/approvals");
     }
-    const go = ready({ charge_to: input.chargeTo, client_approved_at: sr.client_approved_at }, over ? "pending" : "none");
+    const next = { ...sr, charge_to: input.chargeTo, estimated_cost: input.estimatedCost };
+    if (input.chargeTo === "client" && sr.client_approved_at && !clientCovers(next)) {
+      await tx.query(
+        "INSERT INTO service_request_events (service_request_id, from_status, to_status, note) VALUES ($1, 'triage', 'triage', $2)",
+        [id, `העלות ₪${input.estimatedCost} מעל מה שהלקוח אישר (₪${sr.client_approved_amount ?? 0}): צריך אישור לקוח מחדש`],
+      );
+    }
+    const go = ready(next, over ? "pending" : "none");
     if (go) await move(tx, { id, status: "triage" }, "with_supplier");
     return { status: go ? "with_supplier" : "triage", approval: over ? "pending" : "none" };
   });
@@ -250,19 +279,27 @@ export async function listApprovals(db: Db, which: "pending" | "decided") {
   return rows;
 }
 
-export async function recordClientApproval(db: Db, id: string, input: z.infer<typeof approvalInput>) {
+export async function recordClientApproval(db: Db, actor: Actor, id: string, input: z.infer<typeof approvalInput>) {
   return withTx(db, async (tx) => {
     const sr = await load(tx, id);
     expect(sr, "new", "triage");
+    const amount = input.amount ?? (sr.estimated_cost == null ? null : Number(sr.estimated_cost));
+    if (amount == null) throw new RuleError("עוד אין עלות משוערת: צריך לרשום עד איזה סכום הלקוח אישר");
     await tx.query(
-      "UPDATE service_requests SET client_approval_ref = $2, client_approved_at = now() WHERE id = $1",
-      [id, input.reference],
+      `UPDATE service_requests SET client_approval_ref = $2, client_approved_at = now(), client_approval_method = $3,
+              client_approved_by = $4, client_approved_amount = $5 WHERE id = $1`,
+      [id, input.reference, input.method, actor.id || null, amount],
     );
-    const approved = { ...sr, client_approved_at: new Date() };
+    const note = `אישור לקוח עד ₪${amount} (${APPROVAL_METHOD[input.method]}: ${input.reference}) נרשם על ידי ${actor.name}`;
+    const approved = { ...sr, client_approved_at: new Date(), client_approved_amount: amount };
     if (sr.status === "triage" && sr.supplier_id && sr.charge_to === "client" && ready(approved, await costApproval(tx, id))) {
-      await move(tx, sr, "with_supplier", "אישור הלקוח נרשם");
+      await move(tx, sr, "with_supplier", note);
       return { status: "with_supplier" };
     }
+    await tx.query(
+      "INSERT INTO service_request_events (service_request_id, from_status, to_status, note) VALUES ($1, $2, $2, $3)",
+      [id, sr.status, sr.estimated_cost != null && amount < Number(sr.estimated_cost) ? `${note}. נמוך מהעלות המשוערת ₪${sr.estimated_cost}` : note],
+    );
     return { status: sr.status };
   });
 }
@@ -273,6 +310,7 @@ export async function addSupplierInvoice(db: Db, id: string, input: z.infer<type
   return withTx(db, async (tx) => {
     const sr = await load(tx, id);
     expect(sr, "with_supplier");
+    await assertNotDuplicate(tx, sr.supplier_id, input.invoiceNumber);
     const { rows } = await tx.query(
       `INSERT INTO supplier_invoices
          (engagement_id, supplier_id, invoice_number, invoice_date, amount_net, amount_vat, amount_total, handling)
@@ -306,8 +344,9 @@ export async function closeRequest(db: Db, id: string) {
 
 export async function getRequest(db: Db, id: string) {
   const { rows } = await db.query(
-    `SELECT r.*, e.apartment_code, e.property_id, p.address, s.name AS supplier_name
+    `SELECT r.*, e.apartment_code, e.property_id, p.address, s.name AS supplier_name, ua.name AS client_approved_by_name
        FROM service_requests r
+       LEFT JOIN users ua ON ua.id = r.client_approved_by
        JOIN engagements e ON e.id = r.engagement_id
        JOIN properties p ON p.id = e.property_id
        LEFT JOIN contacts s ON s.id = r.supplier_id
