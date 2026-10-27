@@ -30,6 +30,8 @@ export interface CrmAdapter {
   // Planfix's rent by days for a rent charge, and setting a charge's amount.
   readRentByDays(chargeTaskId: number): Promise<number | null>;
   setChargeAmount(chargeTaskId: number, amountTotal: number, split: { net: number; vat: number } | null): Promise<void>;
+  // "סכום שהתקבל" (9898); on a credit, minus what was paid back to the client.
+  setChargeReceived(chargeTaskId: number, received: number): Promise<void>;
 }
 
 export interface BillPush {
@@ -46,6 +48,7 @@ export interface ExpenseType {
   key: number;
   name: string;
   vatable: boolean;
+  verified: boolean;
 }
 
 export interface ChargePush {
@@ -516,12 +519,12 @@ export class PlanfixAdapter implements CrmAdapter {
     }>("POST", `directory/${e.directory}/entry/list`, {
       offset: 0,
       pageSize: 100,
-      fields: ["key", e.name, e.vatable].join(","),
+      fields: ["key", e.name, e.vatable, e.verified].join(","),
     });
     return res.directoryEntries.flatMap((d) => {
       const value = (id: number) => d.customFieldData?.find((c) => c.field.id === id)?.value;
       const name = readText(value(e.name));
-      return name ? [{ key: d.key, name, vatable: value(e.vatable) === true }] : [];
+      return name ? [{ key: d.key, name, vatable: value(e.vatable) === true, verified: value(e.verified) === true }] : [];
     });
   }
 
@@ -559,6 +562,14 @@ export class PlanfixAdapter implements CrmAdapter {
     const data: FieldValue[] = [{ field: { id: f.amountTotal }, value: amountTotal }];
     if (split) data.push({ field: { id: f.amountNet }, value: split.net }, { field: { id: f.amountVat }, value: split.vat });
     await this.client.request("POST", `task/${chargeTaskId}`, { customFieldData: data });
+  }
+
+  // Verified on maglardsand task 352 (a MOS-TEST credit of -118): Planfix's
+  // balance (9938) is the amount less this field, -68 after -50 and 0 after -118.
+  async setChargeReceived(chargeTaskId: number, received: number) {
+    await this.client.request("POST", `task/${chargeTaskId}`, {
+      customFieldData: [{ field: { id: FIELD.charge.received }, value: received }],
+    });
   }
 
   // Verified on maglardsand task 349: Planfix sums the linked charges, counts

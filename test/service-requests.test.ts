@@ -59,7 +59,7 @@ describe.skipIf(!url)("paid service request", () => {
     // No invoice before the client approved the work.
     expect((await call("POST", `/service-requests/${id}/invoice`, invoice)).statusCode).toBe(409);
 
-    const approved = await call("POST", `/service-requests/${id}/client-approval`, { reference: "מייל מ-26/10" });
+    const approved = await call("POST", `/service-requests/${id}/client-approval`, { reference: "מייל מ-26/10", method: "email", approverName: "רונית מהלקוח", amount: 800 });
     expect(approved.json().status).toBe("with_supplier");
 
     const inv = await call("POST", `/service-requests/${id}/invoice`, invoice);
@@ -97,18 +97,30 @@ describe.skipIf(!url)("paid service request", () => {
 
   it("accepts the client's approval before a supplier is chosen, up to the amount given", async () => {
     const id = await open();
-    // Before an estimate the client's approval must say how much.
-    expect((await call("POST", `/service-requests/${id}/client-approval`, { reference: "אישור טלפוני" })).statusCode).toBe(409);
-    await call("POST", `/service-requests/${id}/client-approval`, { reference: "אישור טלפוני", method: "phone", amount: 600 });
+    // The approval always says how much, how and who, even sent straight to the server.
+    const approval = { reference: "אישור טלפוני", method: "phone", approverName: "רונית מהלקוח", amount: 600 };
+    for (const missing of ["amount", "method", "approverName", "reference"]) {
+      const { [missing]: _, ...rest } = approval as Record<string, unknown>;
+      expect((await call("POST", `/service-requests/${id}/client-approval`, rest)).statusCode).toBe(400);
+    }
+    expect((await call("POST", `/service-requests/${id}/client-approval`, { ...approval, amount: 0 })).statusCode).toBe(400);
+    await call("POST", `/service-requests/${id}/client-approval`, approval);
     const res = await call("POST", `/service-requests/${id}/assign`, { supplier: { name: "ספק" }, chargeTo: "client", estimatedCost: 500 });
     expect(res.json().status).toBe("with_supplier");
     const r = (await call("GET", `/service-requests/${id}`)).json();
-    expect(r).toMatchObject({ client_approval_method: "phone", client_approved_amount: "600.00", client_approval_ref: "אישור טלפוני" });
+    expect(r).toMatchObject({
+      client_approval_method: "phone",
+      client_approved_amount: "600.00",
+      client_approval_ref: "אישור טלפוני",
+      client_approver_name: "רונית מהלקוח",
+    });
+    expect(r.client_approved_at).toBeTruthy();
+    expect(r.events.some((e: any) => e.note?.includes("רונית מהלקוח אישר/ה בשם הלקוח עד ₪600 כולל מע״מ"))).toBe(true);
   });
 
   it("asks the client again when the estimate rises above what they approved", async () => {
     const id = await open();
-    await call("POST", `/service-requests/${id}/client-approval`, { reference: "מייל", method: "email", amount: 600 });
+    await call("POST", `/service-requests/${id}/client-approval`, { reference: "מייל", method: "email", approverName: "רונית", amount: 600 });
     const res = await call("POST", `/service-requests/${id}/assign`, { supplier: { name: "ספק" }, chargeTo: "client", estimatedCost: 900 });
     expect(res.json().status).toBe("triage");
     const events = (await call("GET", `/service-requests/${id}`)).json().events.map((e: any) => e.note);
@@ -116,8 +128,8 @@ describe.skipIf(!url)("paid service request", () => {
     // No invoice, so no work, before the new approval.
     expect((await call("POST", `/service-requests/${id}/invoice`, { invoiceNumber: "1", invoiceDate: "2026-11-02", amountNet: 1, amountVat: 0, amountTotal: 1 })).statusCode).toBe(409);
     // An approval for less than the estimate does not start the work either.
-    expect((await call("POST", `/service-requests/${id}/client-approval`, { reference: "מייל 2", amount: 800 })).json().status).toBe("triage");
-    expect((await call("POST", `/service-requests/${id}/client-approval`, { reference: "מייל 3" })).json().status).toBe("with_supplier");
+    expect((await call("POST", `/service-requests/${id}/client-approval`, { reference: "מייל 2", method: "email", approverName: "רונית", amount: 800 })).json().status).toBe("triage");
+    expect((await call("POST", `/service-requests/${id}/client-approval`, { reference: "מייל 3", method: "email", approverName: "רונית", amount: 900 })).json().status).toBe("with_supplier");
   });
 
   it("refuses out-of-order steps and bad input", async () => {

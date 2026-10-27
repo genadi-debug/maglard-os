@@ -9,7 +9,12 @@ export async function refreshPlanfixBilling(db: Db, crm: CrmAdapter) {
   return withTx(db, async (tx) => {
     await tx.query("DELETE FROM planfix_expense_types");
     for (const e of expenseTypes) {
-      await tx.query("INSERT INTO planfix_expense_types (key, name, vatable) VALUES ($1, $2, $3)", [e.key, e.name, e.vatable]);
+      await tx.query("INSERT INTO planfix_expense_types (key, name, vatable, verified) VALUES ($1, $2, $3, $4)", [
+        e.key,
+        e.name,
+        e.vatable,
+        e.verified,
+      ]);
     }
     await tx.query("DELETE FROM planfix_client_contracts");
     await tx.query("DELETE FROM planfix_charges");

@@ -95,6 +95,9 @@ const clientCovers = (r) => {
   return Boolean(r.client_approved_at) && r.client_approved_amount != null && estimate != null && Number(r.client_approved_amount) >= Number(estimate);
 };
 const APPROVAL_METHOD = { email: "מייל", whatsapp: "וואטסאפ", phone: "טלפון", signed: "מסמך חתום", other: "אחר" };
+// As the server lists them (src/domain/billing.ts).
+const CREDIT_REASONS = ["טעות בחיוב", "יציאה מוקדמת", "זיכוי ספק שעובר ללקוח", "מחיקת הוצאה שלא תיגבה", "אחר"];
+const REFUND_METHODS = ["העברה בנקאית", "צ׳ק", "מזומן", "כרטיס אשראי"];
 
 // What the person should do next on a service request, and the button for it.
 function nextStep(r) {
@@ -315,15 +318,19 @@ async function stepDialog(r, action) {
     dialog(
       "אישור לקוח לעבודה לחיוב",
       `<label>איך הלקוח אישר<select name="method">${options(Object.entries(APPROVAL_METHOD), "email")}</select></label>` +
+        field("approverName", "מי אישר אצל הלקוח", 'required placeholder="שם ותפקיד"') +
         field(
           "amount",
-          "הלקוח אישר עד סכום (₪)",
-          `type="number" min="0" step="0.01" ${r.estimated_cost == null ? "required" : `value="${r.estimated_cost}"`}`,
+          "הלקוח אישר עד סכום (₪, כולל מע״מ)",
+          `type="number" min="0.01" step="0.01" required ${r.estimated_cost == null ? "" : `value="${r.estimated_cost}"`}`,
         ) +
         field("reference", "אסמכתה (מייל, הודעה, מסמך)", "required", true) +
         `<p class="full sub">אישור מנהל לחריגה אינו מחליף את אישור הלקוח. אם העלות תעלה מעל הסכום שאושר, יידרש אישור לקוח מחדש.</p>`,
       async (v) => {
-        await api("POST", `${base}/client-approval`, { reference: v.reference, method: v.method, amount: v.amount ? Number(v.amount) : undefined });
+        if (!v.approverName.trim()) throw new Error("צריך לרשום מי אישר אצל הלקוח");
+        if (!(Number(v.amount) > 0)) throw new Error("צריך לרשום את הסכום שהלקוח אישר, כולל מע״מ");
+        if (!v.reference.trim()) throw new Error("צריך אסמכתה: מייל, הודעה או מסמך");
+        await api("POST", `${base}/client-approval`, { reference: v.reference, method: v.method, approverName: v.approverName, amount: Number(v.amount) });
         done("אישור הלקוח נרשם");
       },
     );
@@ -702,7 +709,7 @@ async function requestView(id) {
             clientCovers(r) ? pill(["אושר", "good"]) : r.client_approved_at ? pill(["נדרש אישור מחדש", "warn"]) : pill(["ממתין לאישור הלקוח", "warn"])
           }<br><small>${
             r.client_approved_at
-              ? `עד ${money(r.client_approved_amount)} · ${esc(APPROVAL_METHOD[r.client_approval_method] || "")}: ${esc(r.client_approval_ref)} · נרשם על ידי ${esc(r.client_approved_by_name || "—")} · ${new Date(r.client_approved_at).toLocaleString("he-IL")}`
+              ? `${r.client_approver_name ? `${esc(r.client_approver_name)} אישר/ה ` : ""}עד ${money(r.client_approved_amount)} כולל מע״מ · ${esc(APPROVAL_METHOD[r.client_approval_method] || "")}: ${esc(r.client_approval_ref)} · נרשם על ידי ${esc(r.client_approved_by_name || "—")} · ${new Date(r.client_approved_at).toLocaleString("he-IL")}`
               : "העבודה על חשבון הלקוח. הספק לא מתחיל לפני אישור הלקוח."
           }</small></div></div>`
         : ""
@@ -1556,13 +1563,73 @@ const chargesTable = (rows, status = true, edit = false) =>
   `<div class="wrap"><table class="table"><thead><tr><th>דירה</th><th>סוג</th><th>תקופה</th><th>לפני מע״מ</th><th>מע״מ</th>
     <th>סה״כ</th><th>התקבל</th><th>יתרה</th>${status ? "<th>סטטוס</th>" : ""}${edit ? "<th></th>" : ""}</tr></thead><tbody>${rows
       .map(
-        (c) => `<tr><td>${esc(c.apartment_code || "—")}</td><td>${esc(c.charge_type || c.name)}</td><td>${span(c.period_from, c.period_to)}</td>
+        (c) => `<tr><td>${esc(c.apartment_code || "—")}</td><td>${esc(c.charge_type || c.name)}${Number(c.amount_total) < 0 ? ` ${pill(["זיכוי", ""])}` : ""}</td><td>${span(c.period_from, c.period_to)}</td>
         <td>${money(c.amount_net)}</td><td>${money(c.amount_vat)}</td><td>${money(c.amount_total)}</td><td>${money(c.received)}</td>
         <td><b>${money(c.balance)}</b></td>${status ? `<td>${esc(c.status || "")}</td>` : ""}${
-          edit ? `<td>${Number(c.received || 0) ? "" : `<button class="btn" data-amount="${c.planfix_task_id}">תיקון סכום</button>`}</td>` : ""
+          edit ? `<td>${Number(c.received || 0) || c.refunded ? "" : `<button class="btn" data-amount="${c.planfix_task_id}">תיקון סכום</button>`}</td>` : ""
         }</tr>`,
       )
       .join("")}</tbody></table></div>`;
+
+const CREDIT_STATE = {
+  open: ["פתוח: חייבים ללקוח", "warn"],
+  partly_refunded: ["הוחזר חלקית", "warn"],
+  refunded: ["הוחזר ללקוח", "good"],
+  offset: ["קוזז בחשבון", "good"],
+};
+
+// Credits apart from charges: the charge each corrects, and whether the money
+// was offset on a bill or paid back, with the refund's details.
+function creditsTable(credits) {
+  if (!credits.length) return "";
+  const manage = allowed("billing.manage");
+  return `<h3>זיכויים והחזרים ללקוח</h3>
+    <div class="wrap"><table class="table stack"><thead><tr><th>זיכוי</th><th>חיוב מקורי</th><th>סיבה</th><th>סכום</th>
+      <th>מצב</th><th>החזרים שבוצעו</th><th>נשאר להחזיר</th>${manage ? "<th></th>" : ""}</tr></thead><tbody>${credits
+      .map(
+        (c) => `<tr><td data-label="זיכוי">${esc(c.apartment_code || "—")} · ${esc(c.charge_type || c.name)}</td>
+        <td data-label="חיוב מקורי">${c.original ? `${esc(c.original.name)} (${money(c.original.amount_total)})` : "—"}</td>
+        <td data-label="סיבה">${esc(c.reason || "לא נרשמה")}</td><td data-label="סכום">${money(c.amount)}</td>
+        <td data-label="מצב">${pill(CREDIT_STATE[c.state])}</td>
+        <td data-label="החזרים שבוצעו">${
+          c.refunds.length
+            ? c.refunds
+                .map((r) => `${money(r.amount)} · ${date(r.paid_on)} · ${esc(r.method)} · ${esc(r.reference)}${r.recorded_by_name ? ` · נרשם על ידי ${esc(r.recorded_by_name)}` : ""}`)
+                .join("<br>")
+            : "—"
+        }</td>
+        <td data-label="נשאר להחזיר"><b>${money(c.remaining)}</b></td>${
+          manage ? `<td>${c.remaining > 0 ? `<button class="btn" data-refund="${c.planfix_task_id}">רישום החזר</button>` : ""}</td>` : ""
+        }</tr>`,
+      )
+      .join("")}</tbody></table></div>
+    <p class="sub">זיכוי פתוח מקוזז בחשבון הבא, או מוחזר ללקוח ונרשם כאן. אחת משתיים, כדי שלא ייספר פעמיים.</p>`;
+}
+
+function refundDialog(clientId, c) {
+  const key = crypto.randomUUID();
+  dialog(
+    `רישום החזר ללקוח: ${c.apartment_code || ""} ${c.charge_type || ""}`,
+    `<p class="full sub">זיכוי ${money(c.amount)}${c.refunded ? `, כבר הוחזרו ${money(c.refunded)}` : ""}. רושמים אחרי שהכסף יצא בפועל.</p>` +
+      field("amount", "סכום שהוחזר (₪)", `type="number" required min="0.01" step="0.01" max="${c.remaining}" value="${c.remaining}"`) +
+      field("paidOn", "תאריך ההחזר", `type="date" required value="${today()}" max="${today()}"`) +
+      `<label>אמצעי ההחזר<select name="method">${options(REFUND_METHODS.map((m) => [m, m]), "העברה בנקאית")}</select></label>` +
+      field("reference", "אסמכתה (מספר העברה, צ׳ק או קבלה)", "required"),
+    async (v) => {
+      await api("POST", `/clients/${clientId}/credits/${c.planfix_task_id}/refunds`, {
+        amount: Number(v.amount),
+        paidOn: v.paidOn,
+        method: v.method,
+        reference: v.reference,
+        requestKey: key,
+      });
+      toast("ההחזר נרשם, והיתרה עודכנה ב־Planfix");
+      view.querySelector("#billing").innerHTML = await billingSection(clientId);
+      wireBilling(clientId);
+    },
+    "רישום החזר",
+  );
+}
 
 let billing = null;
 async function billingSection(clientId) {
@@ -1579,7 +1646,10 @@ async function billingSection(clientId) {
   if (!b.linked) return `${head}<div class="empty">הלקוח עוד לא נשלח ל־Planfix, ולכן אין לו חיובים שם</div>`;
   return `${head}
     <div class="facts">
-      <div><span>יתרה לגבייה</span><b>${money(b.totals.balance)}</b></div>
+      <div><span>הלקוח חייב (יתרת חיובים)</span><b>${money(b.totals.owedByClient)}</b></div>
+      <div><span>זיכויים שעוד לא קוזזו או הוחזרו</span><b>${money(b.totals.owedToClient)}</b></div>
+      <div><span>הוחזר ללקוח</span><b>${money(b.totals.refunded)}</b></div>
+      <div><span>יתרה לגבייה ב־Planfix</span><b>${money(b.totals.balance)}</b></div>
       <div><span>חיובים שעוד לא נכללו בחשבון</span><b>${b.unbilled.length} · ${money(b.totals.unbilled)}</b></div>
       <div><span>חשבונות מצטברים</span><b>${b.bills.length}</b></div>
     </div>
@@ -1598,6 +1668,7 @@ async function billingSection(clientId) {
     }
     <h3>חיובים שעוד לא נכללו בחשבון</h3>
     ${b.unbilled.length ? chargesTable(b.unbilled, true, allowed("billing.manage")) : `<div class="empty">כל החיובים כבר בחשבון</div>`}
+    ${creditsTable(b.credits)}
     <h3>חשבונות מצטברים</h3>
     ${
       b.bills.length
@@ -1633,6 +1704,13 @@ function chargeDialog(clientId) {
       field("periodFrom", "תקופה מתאריך", `type="date" required value="${now.slice(0, 8)}01"`) +
       field("periodTo", "עד תאריך", `type="date" required value="${end}"`) +
       field("amountTotal", "סכום כולל מע״מ (זיכוי במינוס)", 'type="number" required step="0.01"') +
+      `<div class="full grid" id="credit-box" hidden>
+        <label>סיבת הזיכוי<select name="creditReason"><option value="">בחר סיבה</option>${options(CREDIT_REASONS.map((r) => [r, r]))}</select></label>
+        <label>החיוב שהזיכוי מתקן<select name="creditFor"><option value="">לא קשור לחיוב מסוים</option>${options(
+          [...b.unbilled, ...b.billed]
+            .filter((c) => Number(c.amount_total) > 0)
+            .map((c) => [String(c.planfix_task_id), `${c.apartment_code || ""} · ${c.charge_type || c.name} · ${span(c.period_from, c.period_to)} · ${money(c.amount_total)}`]),
+        )}</select></label></div>` +
       `<p class="full sub" id="split"></p>`,
     async (v) => {
       const r = await api("POST", `/clients/${clientId}/charges`, {
@@ -1642,9 +1720,10 @@ function chargeDialog(clientId) {
         periodFrom: v.periodFrom,
         periodTo: v.periodTo,
         amountTotal: Number(v.amountTotal),
+        ...(Number(v.amountTotal) < 0 ? { creditReason: v.creditReason || undefined, creditFor: v.creditFor ? Number(v.creditFor) : undefined } : {}),
         requestKey: key,
       });
-      toast(`החיוב נפתח ב־Planfix (#${r.planfixTaskId})`);
+      toast(`${Number(v.amountTotal) < 0 ? "הזיכוי" : "החיוב"} נפתח ב־Planfix (#${r.planfixTaskId})`);
       view.querySelector("#billing").innerHTML = await billingSection(clientId);
       wireBilling(clientId);
     },
@@ -1655,13 +1734,17 @@ function chargeDialog(clientId) {
     const type = b.chargeTypes.find((t) => t.name === form.chargeType.value);
     const total = Number(form.amountTotal.value);
     const box = d.querySelector("#split");
-    const from = { client_rent: "כרטיס הלקוח (מע״מ על שכירות)", client_expenses: "כרטיס הלקוח (מע״מ על הוצאות)", planfix: "טבלת סוגי ההוצאה ב־Planfix" }[type.source];
+    const from = { client_rent: "כרטיס הלקוח (מע״מ על שכירות)", client_expenses: "כרטיס הלקוח (מע״מ על הוצאות)", planfix: "טבלת סוגי ההוצאה ב־Planfix", planfix_unverified: "טבלת סוגי ההוצאה ב־Planfix" }[type.source];
+    d.querySelector("#credit-box").hidden = !(total < 0);
+    form.creditReason.required = total < 0;
     form.querySelector(".primary").disabled = type.vat === null;
     if (type.vat === null)
       box.textContent =
         type.source === "planfix"
-          ? "סוג החיוב לא מוגדר בטבלת סוגי ההוצאה ומע״מ ב־Planfix, ולכן אי אפשר לדעת אם יש עליו מע״מ. מנהל המערכת צריך להוסיף אותו שם פעם אחת."
-          : `ב${from} לא הוגדר אם יש מע״מ. יש להשלים את השדה בכרטיס הלקוח, ואז לפתוח את החיוב.`;
+          ? `החיוב "${type.name}" לא זמין: סוג החיוב עוד לא נוסף לטבלה "מגלארד — סוגי הוצאה ומע״מ" ב־Planfix. אחרי שיוסיפו אותו שם (כולל "חייבת במע״מ" ו"הגדרת מע״מ אומתה") הוא ייפתח כאן מעצמו.`
+          : type.source === "planfix_unverified"
+            ? `החיוב "${type.name}" לא זמין: הגדרת המע״מ שלו ב־Planfix עוד לא סומנה "הגדרת מע״מ אומתה".`
+            : `ב${from} לא הוגדר אם יש מע״מ. יש להשלים את השדה בכרטיס הלקוח, ואז לפתוח את החיוב.`;
     else if (!total) box.textContent = `${type.vat ? `חייב במע״מ (${b.vatRate}%)` : "לא חייב במע״מ"} לפי ${from}`;
     else {
       const net = type.vat ? Math.round((total / (1 + b.vatRate / 100)) * 100) / 100 : total;
@@ -1685,6 +1768,7 @@ function billDialog(clientId) {
     field("periodFrom", "תקופה מתאריך", `type="date" required value="${now.slice(0, 8)}01"`) +
       field("periodTo", "עד תאריך", `type="date" required value="${end}"`) +
       `<div class="full"><b>חיובים שייכללו בחשבון</b>${b.unbilled
+        .filter((c) => !c.refunded)
         .map(
           (c) => `<label style="display:flex;flex-direction:row;gap:8px;align-items:center;font-weight:400;margin-top:6px"><input type="checkbox" style="width:auto" data-charge="${c.planfix_task_id}"
             data-from="${c.period_from || ""}" data-total="${c.amount_total ?? 0}">
@@ -1801,6 +1885,9 @@ function wireBilling(clientId) {
         "תיקון",
       );
     }),
+  );
+  view.querySelectorAll("#billing [data-refund]").forEach((btn) =>
+    btn.addEventListener("click", () => refundDialog(clientId, billing.credits.find((x) => String(x.planfix_task_id) === btn.dataset.refund))),
   );
   view.querySelectorAll("#billing tr[data-href]").forEach((tr) => {
     const go = () => (location.hash = tr.dataset.href);

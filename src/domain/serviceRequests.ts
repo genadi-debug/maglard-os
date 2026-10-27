@@ -67,10 +67,13 @@ export async function approvalThreshold(db: Db | Tx): Promise<number> {
 
 export const APPROVAL_METHOD = { email: "מייל", whatsapp: "וואטסאפ", phone: "טלפון", signed: "מסמך חתום", other: "אחר" } as const;
 // The amount defaults to the current estimate; before there is one it must be given.
+// The client's approval always states the amount approved, VAT included like
+// the estimate it is compared with, and who at the client gave it.
 export const approvalInput = z.object({
-  reference: z.string().trim().min(1),
-  method: z.enum(keys(APPROVAL_METHOD)).default("other"),
-  amount: money.optional(),
+  reference: z.string().trim().min(2, "צריך אסמכתה: מייל, הודעה או מסמך"),
+  method: z.enum(keys(APPROVAL_METHOD)),
+  approverName: z.string().trim().min(2, "צריך לרשום מי אישר אצל הלקוח"),
+  amount: money.refine((n) => n > 0, "צריך לרשום את הסכום שהלקוח אישר, כולל מע״מ"),
 });
 
 export const invoiceInput = z
@@ -283,14 +286,13 @@ export async function recordClientApproval(db: Db, actor: Actor, id: string, inp
   return withTx(db, async (tx) => {
     const sr = await load(tx, id);
     expect(sr, "new", "triage");
-    const amount = input.amount ?? (sr.estimated_cost == null ? null : Number(sr.estimated_cost));
-    if (amount == null) throw new RuleError("עוד אין עלות משוערת: צריך לרשום עד איזה סכום הלקוח אישר");
+    const amount = input.amount;
     await tx.query(
       `UPDATE service_requests SET client_approval_ref = $2, client_approved_at = now(), client_approval_method = $3,
-              client_approved_by = $4, client_approved_amount = $5 WHERE id = $1`,
-      [id, input.reference, input.method, actor.id || null, amount],
+              client_approved_by = $4, client_approved_amount = $5, client_approver_name = $6 WHERE id = $1`,
+      [id, input.reference, input.method, actor.id || null, amount, input.approverName],
     );
-    const note = `אישור לקוח עד ₪${amount} (${APPROVAL_METHOD[input.method]}: ${input.reference}) נרשם על ידי ${actor.name}`;
+    const note = `${input.approverName} אישר/ה בשם הלקוח עד ₪${amount} כולל מע״מ (${APPROVAL_METHOD[input.method]}: ${input.reference}). נרשם על ידי ${actor.name}`;
     const approved = { ...sr, client_approved_at: new Date(), client_approved_amount: amount };
     if (sr.status === "triage" && sr.supplier_id && sr.charge_to === "client" && ready(approved, await costApproval(tx, id))) {
       await move(tx, sr, "with_supplier", note);
