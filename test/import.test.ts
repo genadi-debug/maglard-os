@@ -105,6 +105,45 @@ describe.skipIf(!url)("import from Planfix", () => {
     });
   });
 
+  it("says what a skipped engagement lacks, and completes it in Planfix", async () => {
+    const report = await importFromCrm(db, crm, { dryRun: true });
+    expect(report.skipped.find((s) => s.planfixTaskId === 119)).toMatchObject({
+      reason: "חסרים: קוד דירה",
+      fix: { apartmentCode: null, propertyTaskId: 113, startsOn: "2026-10-01", missing: ["קוד דירה"] },
+    });
+    expect(report.skipped.find((s) => s.planfixTaskId === 300)!.reason).toBe("חסרים: דירה פיזית (הדירה הפיזית 999 לא יובאה)");
+    expect(report.choices).toEqual({
+      properties: [
+        { planfixTaskId: 113, baseNumber: 10015, address: "רחוב הבדיקה 113" },
+        { planfixTaskId: 124, baseNumber: 13141, address: "רחוב הבדיקה 124" },
+      ],
+      owners: [owner],
+      clients: [client],
+    });
+
+    const app = buildServer(db, { requireAuth: false, crm });
+    const fix = (id: number, payload: object) => app.inject({ method: "POST", url: `/import/engagements/${id}`, payload });
+    expect((await fix(119, {})).statusCode).toBe(400);
+    expect((await fix(119, { startsOn: "2026-10-01", endsOn: "2026-10-01" })).statusCode).toBe(400);
+    // The end date against the start date Planfix already has.
+    expect((await fix(119, { endsOn: "2026-09-01" })).statusCode).toBe(409);
+    expect((await fix(555, { apartmentCode: "1" })).statusCode).toBe(409);
+    const ok = await fix(300, { propertyTaskId: 124, apartmentCode: "13142", address: "רחוב הבדיקה 124" });
+    expect(ok.statusCode).toBe(200);
+    expect(crm.calls.at(-1)).toEqual({
+      method: "patchEngagement",
+      input: { taskId: 300, propertyTaskId: 124, apartmentCode: "13142", address: "רחוב הבדיקה 124" },
+    });
+    expect((await db.query("SELECT detail FROM audit_log WHERE action = 'import.engagement_fixed'")).rows[0].detail).toMatchObject({
+      planfixTaskId: 300,
+      changes: { apartmentCode: "13142" },
+    });
+    // Once imported, an engagement is changed from its apartment card instead.
+    await importFromCrm(db, crm, { dryRun: false });
+    expect((await fix(114, { apartmentCode: "10016" })).statusCode).toBe(409);
+    await app.close();
+  });
+
   it("is open to admins only, and dry-runs unless told otherwise", async () => {
     const app = buildServer(db, { requireAuth: false, crm });
     const res = await app.inject({ method: "POST", url: "/import/planfix", payload: {} });

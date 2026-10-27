@@ -1289,12 +1289,68 @@ function importReport(r) {
   const line = (label, t) => `<li>${label}: ${t.created} חדשים, ${t.updated} עודכנו</li>`;
   const skipped = r.skipped.length
     ? `<p><b>${r.skipped.length} לא ${r.dryRun ? "ייובאו" : "יובאו"}:</b></p><ul>${r.skipped
-        .map((s) => `<li>משימה ${s.planfixTaskId} (${s.what === "property" ? "דירה" : "התקשרות"}): ${esc(s.reason)}</li>`)
+        .map(
+          (s) => `<li>משימה <a href="${PLANFIX_TASK}${s.planfixTaskId}" target="_blank" rel="noopener">${s.planfixTaskId}</a> (${
+            s.what === "property" ? "דירה" : "התקשרות"
+          }): ${esc(s.reason)}${s.fix ? ` <button class="btn" data-fix="${s.planfixTaskId}">תיקון</button>` : ""}</li>`,
+        )
         .join("")}</ul>`
     : "";
   return `<p><b>${r.dryRun ? "בדיקה, שום דבר לא נשמר:" : "הייבוא הסתיים:"}</b></p><ul>
     ${line("אנשי קשר", r.contacts)}${line("דירות", r.properties)}${line("התקשרויות", r.engagements)}</ul>${skipped}
     ${r.dryRun ? `<button class="btn primary" id="import-run">ייבוא בפועל</button>` : ""}`;
+}
+
+const PLANFIX_TASK = "https://maglardsand.planfix.com/task/";
+
+// Completes in Planfix an engagement the import skipped: only the fields that
+// changed are sent, then the check runs again.
+function fixEngagementDialog(skip, choices, onSaved) {
+  const f = skip.fix;
+  const people = (list, current) => {
+    const all = current && !list.some((c) => c.planfixId === current.planfixId) ? [current, ...list] : list;
+    return `<option value="">— לא נבחר —</option>${options(all.map((c) => [String(c.planfixId), c.name]), current ? String(current.planfixId) : "")}`;
+  };
+  const props = choices.properties;
+  const d = dialog(
+    `השלמת התקשרות: משימה ${skip.planfixTaskId} ב־Planfix`,
+    `<p class="full sub">חסר: ${esc(f.missing.join(", "))}. השדות יעודכנו במשימה ב־Planfix, ואחר כך הבדיקה תרוץ שוב.</p>` +
+      `<label class="full">דירה פיזית<select name="propertyTaskId"><option value="">— לא נבחרה —</option>${options(
+        props.map((p) => [String(p.planfixTaskId), `${p.baseNumber} — ${p.address}`]),
+        f.propertyTaskId ? String(f.propertyTaskId) : "",
+      )}</select></label>` +
+      field("apartmentCode", "קוד דירה מלא", `value="${esc(f.apartmentCode ?? "")}" maxlength="20"`) +
+      field("address", "כתובת מלאה של הנכס", `value="${esc(f.address ?? "")}"`) +
+      `<label>בעל דירה<select name="ownerPlanfixId">${people(choices.owners, f.owner)}</select></label>` +
+      `<label>לקוח<select name="clientPlanfixId">${people(choices.clients, f.client)}</select></label>` +
+      field("startsOn", "תחילת תוקף התקשרות", `type="date" value="${f.startsOn ?? ""}"`) +
+      field("endsOn", "סיום תוקף התקשרות", `type="date" value="${f.endsOn ?? ""}"`),
+    async (v) => {
+      const body = {};
+      const text = (k, was) => v[k].trim() && v[k].trim() !== (was ?? "") && (body[k] = v[k].trim());
+      const id = (k, was) => v[k] && Number(v[k]) !== (was ?? null) && (body[k] = Number(v[k]));
+      id("propertyTaskId", f.propertyTaskId);
+      text("apartmentCode", f.apartmentCode);
+      text("address", f.address);
+      id("ownerPlanfixId", f.owner?.planfixId);
+      id("clientPlanfixId", f.client?.planfixId);
+      text("startsOn", f.startsOn);
+      text("endsOn", f.endsOn);
+      if (!Object.keys(body).length) throw new Error("לא שונה אף שדה");
+      await api("POST", `/import/engagements/${skip.planfixTaskId}`, body);
+      toast(`משימה ${skip.planfixTaskId} עודכנה ב־Planfix`);
+      onSaved();
+    },
+    "עדכון ב־Planfix",
+  );
+  // Picking the apartment fills its code and address when they are empty.
+  const form = d.querySelector("form");
+  form.propertyTaskId.addEventListener("change", () => {
+    const p = props.find((x) => String(x.planfixTaskId) === form.propertyTaskId.value);
+    if (!p) return;
+    if (!form.apartmentCode.value) form.apartmentCode.value = String(p.baseNumber);
+    if (!form.address.value) form.address.value = p.address;
+  });
 }
 
 function wireImport() {
@@ -1304,7 +1360,17 @@ function wireImport() {
     btn.disabled = true;
     box.innerHTML = "<p>קורא מ-Planfix…</p>";
     try {
-      box.innerHTML = importReport(await api("POST", "/import/planfix", { dryRun }));
+      const report = await api("POST", "/import/planfix", { dryRun });
+      box.innerHTML = importReport(report);
+      box.querySelectorAll("[data-fix]").forEach((b) =>
+        b.addEventListener("click", () =>
+          fixEngagementDialog(
+            report.skipped.find((x) => String(x.planfixTaskId) === b.dataset.fix),
+            report.choices,
+            () => run(true, view.querySelector("#import-dry")),
+          ),
+        ),
+      );
       box.querySelector("#import-run")?.addEventListener("click", (e) => run(false, e.target));
       if (!dryRun) toast("הייבוא הסתיים");
     } catch (err) {

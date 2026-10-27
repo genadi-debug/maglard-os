@@ -20,7 +20,7 @@ import * as sr from "../domain/serviceRequests.js";
 import * as tasks from "../domain/tasks.js";
 import { createIntake, createSupplierInvoice, NotFoundError } from "../domain/services.js";
 import type { CrmAdapter } from "../planfix/adapter.js";
-import { importFromCrm } from "../sync/importer.js";
+import { engagementFixInput, fixSkippedEngagement, importFromCrm } from "../sync/importer.js";
 import { refreshPlanfixBilling } from "../sync/planfixBilling.js";
 import { refreshPlanfixInvoices } from "../sync/planfixInvoices.js";
 import * as readback from "../sync/readback.js";
@@ -80,6 +80,7 @@ const ROUTES: Record<string, Permission | null> = {
   "POST /users/:id": "users.manage",
   "GET /audit": "audit.view",
   "POST /import/planfix": "import.run",
+  "POST /import/engagements/:taskId": "import.run",
   "GET /readback": "sync.view",
   "POST /readback/run": "sync.retry",
   "POST /readback/changes/:id": "sync.resolve",
@@ -550,6 +551,12 @@ export function buildServer(
     if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
     const { dryRun } = (req.body ?? {}) as { dryRun?: boolean };
     return importFromCrm(db, opts.crm, { dryRun: dryRun !== false });
+  });
+
+  app.post<{ Params: { taskId: string } }>("/import/engagements/:taskId", async (req, reply) => {
+    if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
+    const input = engagementFixInput.parse(req.body);
+    return fixSkippedEngagement(db, opts.crm, req.user?.id || null, Number(req.params.taskId), input);
   });
 
   // Changes made directly in Planfix: what was applied, and what waits for a person.

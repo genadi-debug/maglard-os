@@ -132,6 +132,18 @@ describe("PlanfixAdapter", () => {
     expect(fields(updated)).toEqual({ 9882: { id: "contact:13" }, 9886: "על חשבון: הלקוח" });
   });
 
+  it("patches only the engagement fields it was given", async () => {
+    const f = fakeFetch({ body: { result: "success" } });
+    const adapter = new PlanfixAdapter(new PlanfixClient("https://x/rest", "tok", f.impl));
+    await adapter.patchEngagement(119, { apartmentCode: "10016", propertyTaskId: 113, endsOn: "2028-06-30" });
+    expect(f.calls[0].url).toBe("https://x/rest/task/119");
+    expect(fields(JSON.parse(String(f.calls[0].init.body)))).toEqual({
+      9832: "10016",
+      9834: { id: 113 },
+      9840: { date: "30-06-2028" },
+    });
+  });
+
   it("finds intake tasks under a property by the parent-task filter", async () => {
     const f = fakeFetch({
       body: { result: "success", tasks: [{ id: 338, template: { id: 12 } }, { id: 400, template: { id: 22 } }] },
@@ -150,6 +162,7 @@ describe("PlanfixAdapter reads", () => {
       parent: { id: 113 },
       customFieldData: [
         { field: { id: 9832 }, value: "10015" },
+        { field: { id: 9830 }, value: "הרצל 5, תל אביב" },
         { field: { id: 9834 }, value: { id: 113, name: "10015 — ..." } },
         { field: { id: 9842 }, value: { id: "contact:16", name: "תומר רובין" } },
         { field: { id: 9844 }, value: { id: "contact:15", name: "תאגיד" } },
@@ -173,6 +186,7 @@ describe("PlanfixAdapter reads", () => {
       planfixTaskId: 114,
       propertyTaskId: 113,
       apartmentCode: "10015",
+      address: "הרצל 5, תל אביב",
       owner: { planfixId: 16, name: "תומר רובין" },
       client: { planfixId: 15, name: "תאגיד" },
       startsOn: "2026-10-01",
