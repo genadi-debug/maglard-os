@@ -84,6 +84,8 @@ dialog form{padding:20px}
 dialog h3{margin:0 0 14px;font-size:18px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .grid .full{grid-column:1/-1}
+.grid>*{min-width:0}
+select,input{max-width:100%}
 label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted)}
 input,select,textarea{border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--bg);color:var(--ink);font-size:15px}
 .actions{display:flex;gap:8px;justify-content:flex-start;margin-top:18px}
@@ -107,13 +109,32 @@ input,select,textarea{border:1px solid var(--line);border-radius:8px;padding:8px
 .login form{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:28px;width:min(380px,100%);display:flex;flex-direction:column;gap:12px}
 .toast{position:fixed;bottom:20px;inset-inline-start:20px;background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
 .toast.show{opacity:1}
+.rail .links{display:flex;flex-direction:column;gap:4px}
+.menu-btn{display:none}
+.ferr{color:var(--bad);font-size:12.5px;min-height:0}
+input[aria-invalid="true"]{border-color:var(--bad)}
+.filters{display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin:0 0 12px}
+.filters label{min-width:140px}
+.filters .count{color:var(--muted);font-size:13px;margin-inline-start:auto}
+body.loading main#view{opacity:.55;transition:opacity .15s}
+body.loading::before{content:"";position:fixed;top:0;inset-inline:0;height:3px;background:linear-gradient(90deg,transparent,var(--accent),transparent);background-size:50% 100%;background-repeat:no-repeat;animation:load 1s linear infinite;z-index:10}
+@keyframes load{from{background-position:-50% 0}to{background-position:150% 0}}
+@media (prefers-reduced-motion:reduce){body.loading::before{animation:none;background:var(--accent)}}
 @media (max-width:760px){
   .app{grid-template-columns:1fr;grid-template-rows:auto 1fr}
-  .rail{position:static;height:auto;flex-direction:row;align-items:center;overflow-x:auto;padding:8px 10px}
+  .rail{position:sticky;top:0;z-index:5;height:auto;padding:8px 10px}
   .brand{display:none}
-  .nav{white-space:nowrap}
-  .rail .me{margin:0;border:0;white-space:nowrap}
+  .menu-btn{display:flex;align-items:center;gap:8px;width:100%;background:var(--rail-active);color:#fff;border:0;border-radius:8px;padding:10px 12px;font-weight:600;cursor:pointer;text-align:start}
+  .rail .links,.rail .me{display:none}
+  .rail.open .links{display:flex;max-height:70vh;overflow-y:auto;padding-top:6px}
+  .rail.open .me{display:block;margin:6px 0 0}
   .grid{grid-template-columns:1fr}
+  .filters label{min-width:0;flex:1 1 45%}
+  .table.stack thead{display:none}
+  .table.stack,.table.stack tbody,.table.stack tr,.table.stack td{display:block;width:100%}
+  .table.stack tr{border-bottom:1px solid var(--line);padding:6px 0}
+  .table.stack td{border:0;padding:4px 12px;display:flex;gap:10px;justify-content:space-between}
+  .table.stack td[data-label]::before{content:attr(data-label);color:var(--muted);font-size:13px;flex:none}
 }
 @media print{
   .rail,.top,.no-print,.toast{display:none!important}
@@ -126,6 +147,8 @@ input,select,textarea{border:1px solid var(--line);border-radius:8px;padding:8px
 <div class="app">
   <nav class="rail" aria-label="ניווט ראשי">
     <div class="brand">MAGLARD OS<small>ניהול דירות ותפעול</small></div>
+    <button class="menu-btn" id="menu-btn" type="button" aria-expanded="false" aria-controls="menu-links">☰ <span id="menu-label">תפריט</span></button>
+    <div class="links" id="menu-links">
     <a class="nav" href="#/">מרכז עבודה <span class="cnt" id="cnt-work"></span></a>
     <a class="nav" href="#/tasks" data-perm="tasks.use">משימות <span class="cnt" id="cnt-tasks"></span></a>
     <a class="nav" href="#/notifications">התראות <span class="cnt" id="cnt-notif"></span></a>
@@ -139,6 +162,7 @@ input,select,textarea{border:1px solid var(--line);border-radius:8px;padding:8px
     <a class="nav" href="#/sync" data-perm="sync.view">סנכרון Planfix <span class="cnt" id="cnt-sync"></span></a>
     <a class="nav" href="#/users" data-perm="users.manage">משתמשים</a>
     <a class="nav" href="#/audit" data-perm="audit.view">יומן פעולות</a>
+    </div>
   </nav>
   <div class="main">
     <div class="top" role="search">

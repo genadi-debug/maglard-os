@@ -1,5 +1,5 @@
-import type { Db } from "../db/pool.js";
-import { NotFoundError } from "./common.js";
+import type { Db, Tx } from "../db/pool.js";
+import { NotFoundError, RuleError } from "./common.js";
 
 // Supplier invoices from both sides: the ones made in MAGLARD OS, and the ones
 // entered directly in Planfix, read back by their details only.
@@ -15,6 +15,44 @@ export function dueDate(invoiceDate: string | null, terms: string | null): strin
   const due = new Date(Date.UTC(y, mo, 0)); // last day of the invoice month
   due.setUTCDate(due.getUTCDate() + Number(m[1] ?? 0));
   return due.toISOString().slice(0, 10);
+}
+
+// An invoice number as written by different people: "INV-0012", "inv 0012".
+const NORMALIZED = (col: string) => `regexp_replace(lower(${col}), '[^0-9a-zא-ת]', '', 'g')`;
+
+// The same supplier's invoice number may be taken in once, whether it was
+// taken in here or entered directly in Planfix.
+export async function assertNotDuplicate(tx: Tx, supplierId: string, invoiceNumber: string) {
+  const { rows } = await tx.query(
+    `SELECT 'maglard' AS source, i.invoice_number, to_char(i.invoice_date, 'DD.MM.YYYY') AS invoice_date, e.apartment_code
+       FROM supplier_invoices i JOIN engagements e ON e.id = i.engagement_id
+      WHERE i.supplier_id = $1 AND ${NORMALIZED("i.invoice_number")} = ${NORMALIZED("$2")}
+     UNION ALL
+     SELECT 'planfix', f.invoice_number, to_char(f.invoice_date, 'DD.MM.YYYY'), split_part(f.engagement_name, ' — ', 1)
+       FROM planfix_invoices f JOIN contacts s ON s.planfix_id = f.supplier_planfix_id AND s.kind = 'supplier'
+      WHERE s.id = $1 AND ${NORMALIZED("f.invoice_number")} = ${NORMALIZED("$2")}
+      LIMIT 1`,
+    [supplierId, invoiceNumber],
+  );
+  const d = rows[0];
+  if (d) {
+    throw new RuleError(
+      `חשבונית ${d.invoice_number} של הספק הזה כבר נקלטה${d.source === "planfix" ? " ב־Planfix" : ""} (${d.invoice_date ?? "בלי תאריך"}, דירה ${d.apartment_code || "—"}). אי אפשר לקלוט אותה שוב.`,
+    );
+  }
+}
+
+// Invoices that share a supplier and an invoice number, for the list to flag.
+export async function duplicateKeys(db: Db) {
+  const { rows } = await db.query(
+    `SELECT supplier_key || '|' || num AS key FROM (
+       SELECT coalesce(s.id::text, 'pf' || f.supplier_planfix_id) AS supplier_key, ${NORMALIZED("f.invoice_number")} AS num
+         FROM planfix_invoices f LEFT JOIN contacts s ON s.planfix_id = f.supplier_planfix_id AND s.kind = 'supplier'
+       UNION ALL
+       SELECT i.supplier_id::text, ${NORMALIZED("i.invoice_number")} FROM supplier_invoices i) x
+      WHERE num <> '' GROUP BY 1 HAVING count(*) > 1`,
+  );
+  return new Set(rows.map((r) => r.key as string));
 }
 
 const syncState = `
@@ -47,8 +85,15 @@ const BOTH = `
 const strip = ({ sort_at: _, ...row }: Record<string, unknown>) => row;
 
 export async function listSupplierInvoices(db: Db) {
-  const { rows } = await db.query(`SELECT * FROM (${BOTH}) x ORDER BY sort_at DESC NULLS LAST`);
-  return rows.map(strip);
+  const [{ rows }, dups] = await Promise.all([
+    db.query(
+      `SELECT x.*, coalesce(x.supplier_id::text, 'pf' || f.supplier_planfix_id) || '|' || ${NORMALIZED("x.invoice_number")} AS dup_key
+         FROM (${BOTH}) x LEFT JOIN planfix_invoices f ON x.source = 'planfix' AND f.planfix_task_id = x.planfix_task_id
+        ORDER BY sort_at DESC NULLS LAST`,
+    ),
+    duplicateKeys(db),
+  ]);
+  return rows.map(({ dup_key, ...r }) => ({ ...strip(r), suspected_duplicate: dups.has(dup_key) }));
 }
 
 // The supplier's monthly account: every invoice dated in the month, the

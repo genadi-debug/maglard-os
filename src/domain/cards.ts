@@ -43,7 +43,7 @@ const ENGAGEMENTS = `
     JOIN contacts c ON c.id = e.client_id`;
 
 const REQUESTS = `
-  SELECT r.id, r.subject, r.status, r.urgency, r.category, r.charge_to, r.client_approved_at, r.created_at,
+  SELECT r.id, r.subject, r.status, r.urgency, r.category, r.charge_to, r.client_approved_at, r.client_approved_amount, r.estimated_cost AS approval_estimate, r.created_at,
          r.closed_at, e.apartment_code, s.name AS supplier_name
     FROM service_requests r
     JOIN engagements e ON e.id = r.engagement_id

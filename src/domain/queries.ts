@@ -40,7 +40,7 @@ export async function listEngagements(db: Db, archived = false) {
 
 export async function listServiceRequests(db: Db) {
   const { rows } = await db.query(
-    `SELECT r.id, r.subject, r.status, r.urgency, r.category, r.charge_to, r.client_approved_at, r.reported_by,
+    `SELECT r.id, r.subject, r.status, r.urgency, r.category, r.charge_to, r.client_approved_at, r.client_approved_amount, r.estimated_cost AS approval_estimate, r.reported_by,
             r.estimated_cost, r.created_at, e.apartment_code, p.address, s.name AS supplier_name,
             EXISTS (SELECT 1 FROM approvals a WHERE a.service_request_id = r.id AND a.status = 'pending') AS awaiting_approval
        FROM service_requests r
@@ -57,7 +57,7 @@ export async function listServiceRequests(db: Db) {
 export async function workCenter(db: Db, actor: { id: string; role: Role }) {
   const me = actor.id || null;
   const requests = await db.query(
-    `SELECT r.id, r.subject, r.status, r.urgency, r.charge_to, r.client_approved_at, r.supplier_id, r.created_at,
+    `SELECT r.id, r.subject, r.status, r.urgency, r.charge_to, r.client_approved_at, r.client_approved_amount, r.estimated_cost AS approval_estimate, r.supplier_id, r.created_at,
             e.apartment_code, p.address,
             EXISTS (SELECT 1 FROM approvals a WHERE a.service_request_id = r.id AND a.status = 'pending') AS awaiting_approval
        FROM service_requests r
@@ -80,7 +80,8 @@ export async function workCenter(db: Db, actor: { id: string; role: Role }) {
        (SELECT count(*) FROM engagements)::int AS engagements,
        (SELECT count(*) FROM service_requests WHERE status <> 'closed')::int AS open_requests,
        (SELECT count(*) FROM service_requests
-         WHERE status = 'triage' AND charge_to = 'client' AND client_approved_at IS NULL)::int AS awaiting_client,
+         WHERE status = 'triage' AND charge_to = 'client'
+           AND (client_approved_at IS NULL OR client_approved_amount IS NULL OR client_approved_amount < estimated_cost))::int AS awaiting_client,
        (SELECT count(*) FROM outbox WHERE status IN ('pending', 'running'))::int AS sync_pending,
        (SELECT count(*) FROM outbox WHERE status = 'failed')::int AS sync_failed,
        (SELECT count(*) FROM tasks WHERE assignee_id = $1 AND status <> 'done'

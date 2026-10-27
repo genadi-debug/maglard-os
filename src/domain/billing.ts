@@ -105,8 +105,8 @@ export const CHARGE_TYPES = Object.keys(CHARGE_GROUP) as [keyof typeof CHARGE_GR
 
 type VatRule = { vat: boolean | null; source: "client_rent" | "client_expenses" | "planfix" };
 
-// null: not set yet (an empty card field, or a type Planfix does not list), so
-// the split is left to Planfix.
+// null: not set yet (an empty card field, or a type Planfix does not list). A
+// charge is not opened then: its VAT would be unknown.
 async function vatRules(db: Db, clientId: string): Promise<Map<string, VatRule & { key: number | null }>> {
   const [client, types] = await Promise.all([
     db.query("SELECT vat_on_rent, vat_on_expenses FROM contacts WHERE id = $1", [clientId]),
@@ -129,6 +129,36 @@ async function vatRules(db: Db, clientId: string): Promise<Map<string, VatRule &
   );
 }
 
+export const missingVat = (source: VatRule["source"]) =>
+  ({
+    client_rent: "בכרטיס הלקוח לא הוגדר אם הוא משלם מע״מ על שכירות. יש להשלים את השדה בכרטיס הלקוח ואז לפתוח את החיוב.",
+    client_expenses: "בכרטיס הלקוח לא הוגדר אם הוא משלם מע״מ על הוצאות. יש להשלים את השדה בכרטיס הלקוח ואז לפתוח את החיוב.",
+    planfix: "סוג החיוב לא מוגדר בטבלת סוגי ההוצאה ומע״מ ב־Planfix. מנהל המערכת צריך להוסיף אותו שם פעם אחת.",
+  })[source];
+
+// A write to Planfix sent once per form: a second send with the same key (a
+// double click, a retry after a timeout) returns the first result instead of
+// opening the same charge or bill again.
+export async function once<T>(db: Db, key: string | undefined, write: () => Promise<T>): Promise<T> {
+  if (!key) return write();
+  const claimed = await db.query("INSERT INTO planfix_writes (key) VALUES ($1) ON CONFLICT DO NOTHING RETURNING key", [key]);
+  if (!claimed.rows[0]) {
+    const { rows } = await db.query("SELECT result FROM planfix_writes WHERE key = $1", [key]);
+    if (rows[0]?.result) return rows[0].result as T;
+    throw new RuleError("הפעולה כבר נשלחה ועדיין בטיפול. כדאי לרענן בעוד רגע ולבדוק לפני ששולחים שוב.");
+  }
+  try {
+    const result = await write();
+    await db.query("UPDATE planfix_writes SET result = $2 WHERE key = $1", [key, JSON.stringify(result)]);
+    return result;
+  } catch (err) {
+    await db.query("DELETE FROM planfix_writes WHERE key = $1", [key]);
+    throw err;
+  }
+}
+
+export const requestKey = z.string().uuid().optional();
+
 export async function vatRate(db: Db): Promise<number> {
   const { rows } = await db.query("SELECT value FROM settings WHERE key = 'vat_rate'");
   return Number(rows[0]?.value ?? 18);
@@ -149,6 +179,7 @@ export const chargeInput = z
     periodTo: isoDate,
     // VAT included; a credit is negative.
     amountTotal: z.number().multipleOf(0.01).refine((n) => n !== 0, "הסכום לא יכול להיות 0"),
+    requestKey,
   })
   .refine((v) => v.periodTo >= v.periodFrom, { message: "התקופה מסתיימת לפני שהיא מתחילה", path: ["periodTo"] });
 
@@ -183,6 +214,7 @@ export async function createCharge(
     vatRate(db),
   ]);
   const rule = type.get(input.chargeType)!;
+  if (rule.vat === null) throw new RuleError(missingVat(rule.source));
   const split = rule.vat === null ? null : rule.vat ? splitVat(input.amountTotal, rate) : { net: input.amountTotal, vat: 0 };
   const [y, m] = input.periodFrom.split("-");
   const what = input.note ? `${input.chargeType} (${input.note})` : input.chargeType;
@@ -216,6 +248,7 @@ export const billInput = z
     periodTo: isoDate,
     // Planfix task ids of the charges the bill gathers.
     charges: z.array(z.number().int().positive()).min(1, "צריך לבחור לפחות חיוב אחד"),
+    requestKey,
   })
   .refine((v) => v.periodTo >= v.periodFrom, { message: "התקופה מסתיימת לפני שהיא מתחילה", path: ["periodTo"] });
 
@@ -279,7 +312,7 @@ export async function getBill(db: Db, clientId: string, billTaskId: number) {
 }
 
 const MONTH = z.string().regex(/^\d{4}-\d{2}$/, "חודש בפורמט YYYY-MM");
-export const rentInput = z.object({ month: MONTH });
+export const rentInput = z.object({ month: MONTH, requestKey });
 
 // The month's rent per client contract: each contract with a monthly price
 // that runs in the month, over the days it runs. `charged` when a rent charge
@@ -324,6 +357,7 @@ export async function createRentCharges(
   if (!todo.length) throw new RuleError("אין חוזים שעוד לא חויבו בשכ״ד לחודש הזה");
   const [rules, rate] = await Promise.all([vatRules(db, clientId), vatRate(db)]);
   const rule = rules.get("שכר דירה")!;
+  if (rule.vat === null) throw new RuleError(missingVat(rule.source));
   const [y, m] = month.split("-");
   const results = [];
   for (const k of todo) {
@@ -357,4 +391,38 @@ export async function createRentCharges(
   ]);
   await refreshPlanfixBilling(db, crm).catch(() => undefined);
   return { month, created: results };
+}
+
+export const amountInput = z.object({
+  amountTotal: z.number().multipleOf(0.01).refine((n) => n !== 0, "הסכום לא יכול להיות 0"),
+  reason: z.string().trim().min(2, "צריך לכתוב למה הסכום מתוקן"),
+});
+
+// Corrects the amount of a charge that is not on a bill and has nothing
+// received against it. The VAT split follows the same rules as a new charge.
+export async function correctChargeAmount(
+  db: Db,
+  crm: CrmAdapter,
+  userId: string | null,
+  clientId: string,
+  chargeTaskId: number,
+  input: z.infer<typeof amountInput>,
+) {
+  const b = await clientBilling(db, clientId);
+  const charge = b.unbilled.find((c) => c.planfix_task_id === chargeTaskId);
+  if (!charge) throw new RuleError("אפשר לתקן רק חיוב של הלקוח שעוד לא נכלל בחשבון");
+  if (Number(charge.received ?? 0) !== 0) throw new RuleError("על החיוב כבר התקבל תשלום. תיקון נעשה בזיכוי.");
+  const [rules, rate] = await Promise.all([vatRules(db, clientId), vatRate(db)]);
+  const rule = rules.get(charge.charge_type);
+  if (!rule) throw new RuleError(`סוג החיוב "${charge.charge_type ?? ""}" לא מוכר ב־MAGLARD OS. אפשר לפתוח זיכוי וחיוב חדש.`);
+  if (rule.vat === null) throw new RuleError(missingVat(rule.source));
+  const split = rule.vat ? splitVat(input.amountTotal, rate) : { net: input.amountTotal, vat: 0 };
+  await crm.setChargeAmount(chargeTaskId, input.amountTotal, split);
+  await db.query("INSERT INTO audit_log (user_id, action, entity_id, ok, detail) VALUES ($1, 'charge.amount_corrected', $2, true, $3)", [
+    userId,
+    clientId,
+    { planfixTaskId: chargeTaskId, from: Number(charge.amount_total), to: input.amountTotal, split, reason: input.reason },
+  ]);
+  await refreshPlanfixBilling(db, crm).catch(() => undefined);
+  return { planfixTaskId: chargeTaskId, amountTotal: input.amountTotal, split };
 }
