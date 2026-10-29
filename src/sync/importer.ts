@@ -22,7 +22,15 @@ type EngagementFix = {
   endsOn: string | null;
   missing: string[];
 };
-export type Skip = { planfixTaskId: number; what: "property" | "engagement"; reason: string; fix?: EngagementFix };
+// about names the record in words (apartment, address, client, owner), so a
+// skip is understood without opening Planfix.
+export type Skip = {
+  planfixTaskId: number;
+  what: "property" | "engagement";
+  about: string;
+  reason: string;
+  fix?: EngagementFix;
+};
 export type ImportReport = {
   dryRun: boolean;
   contacts: Tally;
@@ -64,8 +72,34 @@ export async function importFromCrm(db: Db, crm: CrmAdapter, opts: { dryRun: boo
     engagements: { created: 0, updated: 0 },
     skipped: [],
   };
-  const skip = (planfixTaskId: number, what: Skip["what"], reason: string, fix?: EngagementFix) =>
-    report.skipped.push({ planfixTaskId, what, reason, ...(fix ? { fix } : {}) });
+  const skip = (planfixTaskId: number, what: Skip["what"], about: string, reason: string, fix?: EngagementFix) =>
+    report.skipped.push({ planfixTaskId, what, about, reason, ...(fix ? { fix } : {}) });
+  const byTask = new Map(properties.map((p) => [p.planfixTaskId, p]));
+  const describe = (r: {
+    code?: string | number | null;
+    address?: string | null;
+    client?: ContactRef | null;
+    owner?: ContactRef | null;
+  }) =>
+    [
+      r.code ? `דירה ${r.code}` : null,
+      r.address,
+      r.client ? `לקוח: ${r.client.name}` : null,
+      r.owner ? `בעל דירה: ${r.owner.name}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ") || "בלי פרטים (משימה ריקה)";
+  const aboutProperty = (p: (typeof properties)[number]) =>
+    describe({ code: p.baseNumber, address: p.address, client: p.client, owner: p.owner });
+  const aboutEngagement = (e: ImportedEngagement) => {
+    const p = e.propertyTaskId === null ? undefined : byTask.get(e.propertyTaskId);
+    return describe({
+      code: e.apartmentCode ?? p?.baseNumber,
+      address: e.address ?? p?.address,
+      client: e.client ?? p?.client,
+      owner: e.owner ?? p?.owner,
+    });
+  };
   const people = (refs: (ContactRef | null)[]) =>
     [...new Map(refs.filter((r): r is ContactRef => !!r).map((r) => [r.planfixId, r])).values()].sort((a, b) =>
       a.name.localeCompare(b.name, "he"),
@@ -102,7 +136,7 @@ export async function importFromCrm(db: Db, crm: CrmAdapter, opts: { dryRun: boo
       const propertyIds = new Map<number, string>();
       for (const p of properties) {
         if (p.baseNumber === null || !p.address || !p.owner) {
-          skip(p.planfixTaskId, "property", "חסרים מספר בסיס, כתובת או בעל דירה");
+          skip(p.planfixTaskId, "property", aboutProperty(p), "חסרים מספר בסיס, כתובת או בעל דירה");
           continue;
         }
         const clash = await tx.query(
@@ -110,7 +144,7 @@ export async function importFromCrm(db: Db, crm: CrmAdapter, opts: { dryRun: boo
           [p.baseNumber, p.planfixTaskId],
         );
         if (clash.rowCount) {
-          skip(p.planfixTaskId, "property", `מספר בסיס ${p.baseNumber} כבר קיים בדירה אחרת`);
+          skip(p.planfixTaskId, "property", aboutProperty(p), `מספר בסיס ${p.baseNumber} כבר קיים בדירה אחרת`);
           continue;
         }
         const ownerId = await contact(p.owner, "owner");
@@ -140,11 +174,11 @@ export async function importFromCrm(db: Db, crm: CrmAdapter, opts: { dryRun: boo
         ];
         if (missing.length) {
           const why = !propertyId && e.propertyTaskId !== null ? ` (הדירה הפיזית ${e.propertyTaskId} לא יובאה)` : "";
-          skip(e.planfixTaskId, "engagement", `חסרים: ${missing.join(", ")}${why}`, fixOf(e, missing));
+          skip(e.planfixTaskId, "engagement", aboutEngagement(e), `חסרים: ${missing.join(", ")}${why}`, fixOf(e, missing));
           continue;
         }
         if (e.endsOn! <= e.startsOn!) {
-          skip(e.planfixTaskId, "engagement", "תאריך הסיום לא אחרי תאריך ההתחלה", fixOf(e, ["תאריך סיום"]));
+          skip(e.planfixTaskId, "engagement", aboutEngagement(e), "תאריך הסיום לא אחרי תאריך ההתחלה", fixOf(e, ["תאריך סיום"]));
           continue;
         }
         const clash = await tx.query(
@@ -152,7 +186,7 @@ export async function importFromCrm(db: Db, crm: CrmAdapter, opts: { dryRun: boo
           [e.apartmentCode, e.planfixTaskId],
         );
         if (clash.rowCount) {
-          skip(e.planfixTaskId, "engagement", `קוד דירה ${e.apartmentCode} כבר קיים בהתקשרות אחרת`);
+          skip(e.planfixTaskId, "engagement", aboutEngagement(e), `קוד דירה ${e.apartmentCode} כבר קיים בהתקשרות אחרת`);
           continue;
         }
         const values = [
