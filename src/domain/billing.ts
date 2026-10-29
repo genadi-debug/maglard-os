@@ -26,12 +26,12 @@ export async function clientBilling(db: Db, clientId: string) {
     // A charge without a client or apartment of its own takes its contract's.
     // It is on a bill when either side links them.
     db.query(
-      `SELECT x.planfix_task_id, x.name, x.status, ${APARTMENT}, x.charge_type, x.vat_type,
+      `SELECT x.planfix_task_id, x.name, x.status, ${APARTMENT}, x.charge_type, x.vat_type, x.contract_task_id,
               to_char(x.period_from, 'YYYY-MM-DD') AS period_from, to_char(x.period_to, 'YYYY-MM-DD') AS period_to,
               x.amount_net, x.amount_vat, x.amount_total, x.received, x.balance,
               (cardinality(x.bill_task_ids) > 0
                  OR EXISTS (SELECT 1 FROM planfix_bills b WHERE x.planfix_task_id = ANY (b.charge_task_ids))) AS on_bill
-         FROM (SELECT c.planfix_task_id, c.name, c.status, c.charge_type, c.vat_type, c.period_from, c.period_to,
+         FROM (SELECT c.planfix_task_id, c.name, c.status, c.charge_type, c.vat_type, c.contract_task_id, c.period_from, c.period_to,
                       c.amount_net, c.amount_vat, c.amount_total, c.received, c.balance, c.bill_task_ids,
                       coalesce(c.client_planfix_id, k.client_planfix_id) AS client_planfix_id,
                       coalesce(c.engagement_task_id, k.engagement_task_id) AS engagement_task_id,
@@ -381,27 +381,97 @@ export async function issueBill(
   return { planfixTaskId, name };
 }
 
-// One bill as the client receives it: the client's details, the charges on it
-// by apartment, and Planfix's totals.
+// The parts of the client's bill, in the order the bill lists them.
+export const BILL_SECTIONS = [
+  ["rent", "שכירות"],
+  ["setup", "דמי הקמה"],
+  ["management", "דמי ניהול"],
+  ["current", "הוצאות שוטפות"],
+  ["operations", "הוצאות תפעול"],
+] as const;
+type SectionKey = (typeof BILL_SECTIONS)[number][0];
+const SECTION_OF: Record<string, SectionKey> = {
+  "שכר דירה": "rent",
+  "דמי תיווך והקמה": "setup",
+  "דמי ניהול": "management",
+  "חשמל": "current",
+  "מים": "current",
+  "גז": "current",
+  "אינטרנט": "current",
+  "תפעול ואחזקה": "operations",
+  "התחשבנות עם בעל הדירה": "operations",
+  "אחר": "operations",
+};
+const round = (n: number) => Math.round(n * 100) / 100;
+
+// One bill as the client receives it. The bill is cumulative: the charges on
+// it by section, plus what is still open from the client's earlier bills
+// (their charges less the payments received on them). Every amount and
+// payment is Planfix's own; this only arranges and adds them.
 export async function getBill(db: Db, clientId: string, billTaskId: number) {
   const b = await clientBilling(db, clientId);
   const bill = b.bills.find((x) => x.planfix_task_id === billTaskId);
   if (!bill) throw new NotFoundError(`bill ${billTaskId} not found for this client`);
-  const linked = await db.query(
-    `SELECT x.planfix_task_id FROM planfix_charges x
-      WHERE $1 = ANY (x.bill_task_ids)
-         OR x.planfix_task_id = ANY (SELECT unnest(charge_task_ids) FROM planfix_bills WHERE planfix_task_id = $1)`,
-    [billTaskId],
+  // Each charge belongs to the first bill that took it.
+  const links = await db.query(
+    `SELECT b.planfix_task_id AS bill, x.planfix_task_id AS charge
+       FROM planfix_bills b JOIN planfix_charges x
+         ON x.planfix_task_id = ANY (b.charge_task_ids) OR b.planfix_task_id = ANY (x.bill_task_ids)
+      WHERE b.client_planfix_id = $1`,
+    [b.client.planfix_id],
   );
-  const ids = new Set(linked.rows.map((r) => r.planfix_task_id));
-  const charges = b.billed.filter((c) => ids.has(c.planfix_task_id));
+  const order = (x: { period_to: string | null; planfix_task_id: number }) => `${x.period_to ?? "9999-12-31"}|${String(x.planfix_task_id).padStart(10, "0")}`;
+  const billsInOrder = [...b.bills].sort((x, y) => order(x).localeCompare(order(y)));
+  const rank = new Map(billsInOrder.map((x, i) => [x.planfix_task_id, i]));
+  const billOf = new Map<number, number>();
+  for (const l of links.rows) {
+    const known = billOf.get(l.charge);
+    if (known === undefined || rank.get(l.bill)! < rank.get(known)!) billOf.set(l.charge, l.bill);
+  }
+  const here = rank.get(billTaskId)!;
+  const charges = b.billed.filter((c) => billOf.get(c.planfix_task_id) === billTaskId);
+  const earlier = billsInOrder.slice(0, here).map((x) => {
+    const rows = b.billed.filter((c) => billOf.get(c.planfix_task_id) === x.planfix_task_id);
+    const charged = round(rows.reduce((t, c) => t + Number(c.amount_total ?? 0), 0));
+    const paid = round(rows.reduce((t, c) => t + Number(c.received ?? 0), 0));
+    return { planfix_task_id: x.planfix_task_id, name: x.name, period_from: x.period_from, period_to: x.period_to, charged, paid, open: round(charged - paid) };
+  });
+
+  // A rent charge is for a new apartment when its contract starts in the bill's period.
+  const contracts = new Map(b.contracts.map((k) => [k.planfix_task_id, k]));
+  const isNew = (c: Record<string, any>) => {
+    const k = contracts.get(c.contract_task_id);
+    return !!k?.move_in_on && (!bill.period_from || k.move_in_on >= bill.period_from) && (!bill.period_to || k.move_in_on <= bill.period_to);
+  };
+  const sections = BILL_SECTIONS.map(([key, title]) => {
+    const rows = charges
+      .filter((c) => (SECTION_OF[c.charge_type] ?? "operations") === key)
+      .map((c) => ({ ...c, new_apartment: key === "rent" && isNew(c) }));
+    const sum = (k: string) => round(rows.reduce((t, c) => t + Number(c[k] ?? 0), 0));
+    return { key, title, rows, net: sum("amount_net"), vat: sum("amount_vat"), total: sum("amount_total"), received: sum("received") };
+  });
+  const sum = (k: string) => round(charges.reduce((t, c) => t + Number(c[k] ?? 0), 0));
+  const previous = {
+    charged: round(earlier.reduce((t, x) => t + x.charged, 0)),
+    paid: round(earlier.reduce((t, x) => t + x.paid, 0)),
+  };
   const card = await db.query("SELECT name, id_number, address, ledger_card FROM contacts WHERE id = $1", [clientId]);
-  const sum = (k: string) => Math.round(charges.reduce((t, c) => t + Number(c[k] ?? 0), 0) * 100) / 100;
   return {
     client: card.rows[0],
     bill,
     charges,
+    sections,
+    earlier,
     totals: { net: sum("amount_net"), vat: sum("amount_vat"), total: sum("amount_total"), balance: sum("balance") },
+    summary: {
+      previousCharged: previous.charged,
+      previousPaid: previous.paid,
+      previousOpen: round(previous.charged - previous.paid),
+      current: sum("amount_total"),
+      currentPaid: sum("received"),
+      // All the client's billed charges up to this bill, less every payment received on them.
+      due: round(previous.charged - previous.paid + sum("amount_total") - sum("received")),
+    },
   };
 }
 
