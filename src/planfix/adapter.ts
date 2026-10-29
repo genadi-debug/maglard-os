@@ -12,6 +12,8 @@ export interface CrmAdapter {
   // creating a second.
   findEngagementTasks(propertyTaskId: number): Promise<number[]>;
   updateEngagement(taskId: number, input: EngagementPush): Promise<void>;
+  // Only the given fields, for completing an engagement the import skipped.
+  patchEngagement(taskId: number, patch: EngagementPatch): Promise<void>;
   createSupplierInvoice(input: SupplierInvoicePush): Promise<number>;
   createServiceRequest(input: ServiceRequestPush): Promise<number>;
   updateServiceRequest(taskId: number, input: ServiceRequestUpdate): Promise<void>;
@@ -157,12 +159,23 @@ export interface ImportedEngagement {
   planfixTaskId: number;
   propertyTaskId: number | null;
   apartmentCode: string | null;
+  address?: string | null;
   owner: ContactRef | null;
   client: ContactRef | null;
   startsOn: string | null;
   endsOn: string | null;
   moveInOn: string | null;
   monthlyRent: number | null;
+}
+
+export interface EngagementPatch {
+  apartmentCode?: string;
+  address?: string;
+  propertyTaskId?: number;
+  ownerPlanfixId?: number;
+  clientPlanfixId?: number;
+  startsOn?: string;
+  endsOn?: string;
 }
 
 export interface ServiceRequestPush {
@@ -350,6 +363,20 @@ export class PlanfixAdapter implements CrmAdapter {
     await this.client.request("POST", `task/${taskId}`, { customFieldData: engagementFields(e) });
   }
 
+  // The same fields and call as updateEngagement, sending only what was given.
+  async patchEngagement(taskId: number, p: EngagementPatch): Promise<void> {
+    const f = FIELD.engagement;
+    const data: FieldValue[] = [];
+    if (p.apartmentCode !== undefined) data.push({ field: { id: f.apartmentCode }, value: p.apartmentCode });
+    if (p.address !== undefined) data.push({ field: { id: f.address }, value: p.address });
+    if (p.propertyTaskId !== undefined) data.push({ field: { id: f.property }, value: task(p.propertyTaskId) });
+    if (p.ownerPlanfixId !== undefined) data.push({ field: { id: f.owner }, value: contact(p.ownerPlanfixId) });
+    if (p.clientPlanfixId !== undefined) data.push({ field: { id: f.client }, value: contact(p.clientPlanfixId) });
+    if (p.startsOn !== undefined) data.push({ field: { id: f.startsOn }, value: pfDate(p.startsOn) });
+    if (p.endsOn !== undefined) data.push({ field: { id: f.endsOn }, value: pfDate(p.endsOn) });
+    await this.client.request("POST", `task/${taskId}`, { customFieldData: data });
+  }
+
   createSupplierInvoice(i: SupplierInvoicePush): Promise<number> {
     const f = FIELD.supplierInvoice;
     return this.createTask({
@@ -420,6 +447,7 @@ export class PlanfixAdapter implements CrmAdapter {
       planfixTaskId: t.id,
       propertyTaskId: readTaskId(fieldOf(t, f.property)) ?? t.parent?.id ?? null,
       apartmentCode: readText(fieldOf(t, f.apartmentCode)),
+      address: readText(fieldOf(t, f.address)),
       owner: readContact(fieldOf(t, f.owner)),
       client: readContact(fieldOf(t, f.client)),
       startsOn: readDate(fieldOf(t, f.startsOn)),

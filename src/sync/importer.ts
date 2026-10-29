@@ -1,5 +1,7 @@
+import { z } from "zod";
 import { withTx, type Db, type Tx } from "../db/pool.js";
-import type { ContactRef, CrmAdapter } from "../planfix/adapter.js";
+import { isoDate, RuleError } from "../domain/common.js";
+import type { ContactRef, CrmAdapter, ImportedEngagement } from "../planfix/adapter.js";
 
 // One-way import of the apartments that already live in the CRM: owners and
 // clients, physical properties and engagements. Records are matched on their
@@ -8,14 +10,43 @@ import type { ContactRef, CrmAdapter } from "../planfix/adapter.js";
 
 type Kind = "owner" | "client";
 type Tally = { created: number; updated: number };
-export type Skip = { planfixTaskId: number; what: "property" | "engagement"; reason: string };
+// For a skipped engagement, what Planfix has now and what is missing, so it
+// can be completed from MAGLARD OS.
+type EngagementFix = {
+  apartmentCode: string | null;
+  address: string | null;
+  propertyTaskId: number | null;
+  owner: ContactRef | null;
+  client: ContactRef | null;
+  startsOn: string | null;
+  endsOn: string | null;
+  missing: string[];
+};
+export type Skip = { planfixTaskId: number; what: "property" | "engagement"; reason: string; fix?: EngagementFix };
 export type ImportReport = {
   dryRun: boolean;
   contacts: Tally;
   properties: Tally;
   engagements: Tally;
   skipped: Skip[];
+  // What a skipped engagement can be linked to: the apartments and people Planfix has.
+  choices?: {
+    properties: { planfixTaskId: number; baseNumber: number; address: string }[];
+    owners: ContactRef[];
+    clients: ContactRef[];
+  };
 };
+
+const fixOf = (e: ImportedEngagement, missing: string[]): EngagementFix => ({
+  apartmentCode: e.apartmentCode,
+  address: e.address ?? null,
+  propertyTaskId: e.propertyTaskId,
+  owner: e.owner,
+  client: e.client,
+  startsOn: e.startsOn,
+  endsOn: e.endsOn,
+  missing,
+});
 
 class Rollback extends Error {
   constructor(readonly report: ImportReport) {
@@ -33,8 +64,20 @@ export async function importFromCrm(db: Db, crm: CrmAdapter, opts: { dryRun: boo
     engagements: { created: 0, updated: 0 },
     skipped: [],
   };
-  const skip = (planfixTaskId: number, what: Skip["what"], reason: string) =>
-    report.skipped.push({ planfixTaskId, what, reason });
+  const skip = (planfixTaskId: number, what: Skip["what"], reason: string, fix?: EngagementFix) =>
+    report.skipped.push({ planfixTaskId, what, reason, ...(fix ? { fix } : {}) });
+  const people = (refs: (ContactRef | null)[]) =>
+    [...new Map(refs.filter((r): r is ContactRef => !!r).map((r) => [r.planfixId, r])).values()].sort((a, b) =>
+      a.name.localeCompare(b.name, "he"),
+    );
+  report.choices = {
+    properties: properties
+      .filter((p) => p.baseNumber !== null && p.address)
+      .map((p) => ({ planfixTaskId: p.planfixTaskId, baseNumber: p.baseNumber!, address: p.address! }))
+      .sort((a, b) => a.baseNumber - b.baseNumber),
+    owners: people([...properties.map((p) => p.owner), ...engagements.map((e) => e.owner)]),
+    clients: people([...properties.map((p) => p.client ?? null), ...engagements.map((e) => e.client)]),
+  };
 
   try {
     await withTx(db, async (tx) => {
@@ -87,16 +130,21 @@ export async function importFromCrm(db: Db, crm: CrmAdapter, opts: { dryRun: boo
 
       for (const e of engagements) {
         const propertyId = e.propertyTaskId === null ? undefined : propertyIds.get(e.propertyTaskId);
-        if (!propertyId) {
-          skip(e.planfixTaskId, "engagement", "אין דירה פיזית מקושרת שיובאה");
+        const missing = [
+          ...(!propertyId ? ["דירה פיזית"] : []),
+          ...(!e.apartmentCode ? ["קוד דירה"] : []),
+          ...(!e.owner ? ["בעל דירה"] : []),
+          ...(!e.client ? ["לקוח"] : []),
+          ...(!e.startsOn ? ["תאריך התחלה"] : []),
+          ...(!e.endsOn ? ["תאריך סיום"] : []),
+        ];
+        if (missing.length) {
+          const why = !propertyId && e.propertyTaskId !== null ? ` (הדירה הפיזית ${e.propertyTaskId} לא יובאה)` : "";
+          skip(e.planfixTaskId, "engagement", `חסרים: ${missing.join(", ")}${why}`, fixOf(e, missing));
           continue;
         }
-        if (!e.apartmentCode || !e.owner || !e.client || !e.startsOn || !e.endsOn) {
-          skip(e.planfixTaskId, "engagement", "חסרים קוד דירה, בעלים, לקוח או תאריכי התקשרות");
-          continue;
-        }
-        if (e.endsOn <= e.startsOn) {
-          skip(e.planfixTaskId, "engagement", "תאריך הסיום לא אחרי תאריך ההתחלה");
+        if (e.endsOn! <= e.startsOn!) {
+          skip(e.planfixTaskId, "engagement", "תאריך הסיום לא אחרי תאריך ההתחלה", fixOf(e, ["תאריך סיום"]));
           continue;
         }
         const clash = await tx.query(
@@ -110,8 +158,8 @@ export async function importFromCrm(db: Db, crm: CrmAdapter, opts: { dryRun: boo
         const values = [
           propertyId,
           e.apartmentCode,
-          await contact(e.owner, "owner"),
-          await contact(e.client, "client"),
+          await contact(e.owner!, "owner"),
+          await contact(e.client!, "client"),
           e.startsOn,
           e.endsOn,
           e.moveInOn,
@@ -165,4 +213,42 @@ async function upsert(
   const { rows } = await tx.query(insertSql, insertArgs);
   tally.created++;
   return rows[0].id;
+}
+
+export const engagementFixInput = z
+  .object({
+    apartmentCode: z.string().trim().min(1, "צריך קוד דירה").max(20).optional(),
+    address: z.string().trim().min(3, "צריך כתובת מלאה").optional(),
+    propertyTaskId: z.number().int().positive().optional(),
+    ownerPlanfixId: z.number().int().positive().optional(),
+    clientPlanfixId: z.number().int().positive().optional(),
+    startsOn: isoDate.optional(),
+    endsOn: isoDate.optional(),
+  })
+  .refine((v) => Object.values(v).some((x) => x !== undefined), { message: "לא שונה אף שדה" })
+  .refine((v) => !v.startsOn || !v.endsOn || v.endsOn > v.startsOn, { message: "תאריך הסיום צריך להיות אחרי תאריך ההתחלה", path: ["endsOn"] });
+
+// Completes in Planfix an engagement the import skipped, from MAGLARD OS.
+// Only an engagement Planfix still has and that is not imported yet; the
+// import then reads it again.
+export async function fixSkippedEngagement(
+  db: Db,
+  crm: CrmAdapter,
+  userId: string | null,
+  taskId: number,
+  input: z.infer<typeof engagementFixInput>,
+) {
+  const current = (await crm.readEngagements()).find((e) => e.planfixTaskId === taskId);
+  if (!current) throw new RuleError(`משימה ${taskId} לא נמצאה ב־Planfix כהתקשרות`);
+  const imported = await db.query("SELECT 1 FROM engagements WHERE planfix_task_id = $1", [taskId]);
+  if (imported.rowCount) throw new RuleError("ההתקשרות כבר יובאה. שינויים בה נעשים מכרטיס הדירה.");
+  const startsOn = input.startsOn ?? current.startsOn;
+  const endsOn = input.endsOn ?? current.endsOn;
+  if (startsOn && endsOn && endsOn <= startsOn) throw new RuleError("תאריך הסיום צריך להיות אחרי תאריך ההתחלה");
+  await crm.patchEngagement(taskId, input);
+  await db.query("INSERT INTO audit_log (user_id, action, entity_id, ok, detail) VALUES ($1, 'import.engagement_fixed', NULL, true, $2)", [
+    userId || null,
+    { planfixTaskId: taskId, before: current, changes: input },
+  ]);
+  return { planfixTaskId: taskId };
 }
