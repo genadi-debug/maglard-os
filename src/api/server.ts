@@ -21,6 +21,7 @@ import * as tasks from "../domain/tasks.js";
 import { createIntake, createSupplierInvoice, NotFoundError } from "../domain/services.js";
 import type { CrmAdapter } from "../planfix/adapter.js";
 import { engagementFixInput, fixSkippedEngagement, importFromCrm } from "../sync/importer.js";
+import { importSheet, readSheet, sheetImportInput, type FetchText } from "../sync/sheetImport.js";
 import { refreshPlanfixBilling } from "../sync/planfixBilling.js";
 import { refreshPlanfixInvoices } from "../sync/planfixInvoices.js";
 import * as readback from "../sync/readback.js";
@@ -81,6 +82,7 @@ const ROUTES: Record<string, Permission | null> = {
   "GET /audit": "audit.view",
   "POST /import/planfix": "import.run",
   "POST /import/engagements/:taskId": "import.run",
+  "POST /import/contacts/sheet": "import.run",
   "GET /readback": "sync.view",
   "POST /readback/run": "sync.retry",
   "POST /readback/changes/:id": "sync.resolve",
@@ -121,7 +123,7 @@ declare module "fastify" {
 
 export function buildServer(
   db: Db,
-  opts: { requireAuth?: boolean; secureCookie?: boolean; crm?: CrmAdapter } = {},
+  opts: { requireAuth?: boolean; secureCookie?: boolean; crm?: CrmAdapter; fetchSheet?: FetchText } = {},
 ) {
   const app = Fastify({ logger: false });
   const requireAuth = opts.requireAuth ?? true;
@@ -557,6 +559,21 @@ export function buildServer(
     if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
     const input = engagementFixInput.parse(req.body);
     return fixSkippedEngagement(db, opts.crm, req.user?.id || null, Number(req.params.taskId), input);
+  });
+
+  // Contacts from a Google Sheets link or a CSV file. A dry run unless told otherwise.
+  app.post("/import/contacts/sheet", { bodyLimit: 3 * 1024 * 1024 }, async (req) => {
+    const input = sheetImportInput.parse(req.body ?? {});
+    const report = await importSheet(db, await readSheet(input, opts.fetchSheet), input);
+    if (!report.dryRun) {
+      await audit(req.user?.id || null, "import.contacts_sheet", true, undefined, {
+        source: input.url ? "google_sheets" : "csv",
+        created: report.created.length,
+        updated: report.updated.length,
+        skipped: report.skipped.length,
+      });
+    }
+    return report;
   });
 
   // Changes made directly in Planfix: what was applied, and what waits for a person.
