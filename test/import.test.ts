@@ -101,16 +101,22 @@ describe.skipIf(!url)("import from Planfix", () => {
     expect(report.skipped).toContainEqual({
       planfixTaskId: 400,
       what: "property",
+      about: "דירה 10015 · רחוב הבדיקה 400 · לקוח: תאגיד לבדיקה · בעל דירה: בעלים לבדיקה",
       reason: "מספר בסיס 10015 כבר קיים בדירה אחרת",
     });
   });
 
   it("says what a skipped engagement lacks, and completes it in Planfix", async () => {
+    crm.engagements.push({ ...engagement(121, 0, null), propertyTaskId: null, owner: null, client: null, startsOn: null, endsOn: null });
     const report = await importFromCrm(db, crm, { dryRun: true });
     expect(report.skipped.find((s) => s.planfixTaskId === 119)).toMatchObject({
+      // No code of its own: named by the apartment it sits under.
+      about: "דירה 10015 · רחוב הבדיקה 113 · לקוח: תאגיד לבדיקה · בעל דירה: בעלים לבדיקה",
       reason: "חסרים: קוד דירה",
       fix: { apartmentCode: null, propertyTaskId: 113, startsOn: "2026-10-01", missing: ["קוד דירה"] },
     });
+    expect(report.skipped.find((s) => s.planfixTaskId === 121)!.about).toBe("בלי פרטים (משימה ריקה)");
+    expect(report.skipped.find((s) => s.planfixTaskId === 300)!.about).toBe("דירה 77777 · לקוח: תאגיד לבדיקה · בעל דירה: בעלים לבדיקה");
     expect(report.skipped.find((s) => s.planfixTaskId === 300)!.reason).toBe("חסרים: דירה פיזית (הדירה הפיזית 999 לא יובאה)");
     expect(report.choices).toEqual({
       properties: [

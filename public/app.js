@@ -1292,7 +1292,7 @@ function importReport(r) {
         .map(
           (s) => `<li>משימה <a href="${PLANFIX_TASK}${s.planfixTaskId}" target="_blank" rel="noopener">${s.planfixTaskId}</a> (${
             s.what === "property" ? "דירה" : "התקשרות"
-          }): ${esc(s.reason)}${s.fix ? ` <button class="btn" data-fix="${s.planfixTaskId}">תיקון</button>` : ""}</li>`,
+          })${s.about ? ` <b>${esc(s.about)}</b>` : ""}<br>${esc(s.reason)}${s.fix ? ` <button class="btn" data-fix="${s.planfixTaskId}">תיקון</button>` : ""}</li>`,
         )
         .join("")}</ul>`
     : "";
@@ -1314,7 +1314,7 @@ function fixEngagementDialog(skip, choices, onSaved) {
   const props = choices.properties;
   const d = dialog(
     `השלמת התקשרות: משימה ${skip.planfixTaskId} ב־Planfix`,
-    `<p class="full sub">חסר: ${esc(f.missing.join(", "))}. השדות יעודכנו במשימה ב־Planfix, ואחר כך הבדיקה תרוץ שוב.</p>` +
+    `<p class="full"><b>${esc(skip.about ?? "")}</b></p><p class="full sub">חסר: ${esc(f.missing.join(", "))}. השדות יעודכנו במשימה ב־Planfix, ואחר כך הבדיקה תרוץ שוב.</p>` +
       `<label class="full">דירה פיזית<select name="propertyTaskId"><option value="">— לא נבחרה —</option>${options(
         props.map((p) => [String(p.planfixTaskId), `${p.baseNumber} — ${p.address}`]),
         f.propertyTaskId ? String(f.propertyTaskId) : "",
