@@ -150,6 +150,44 @@ describe.skipIf(!url)("import from Planfix", () => {
     await app.close();
   });
 
+  it("imports every client, owner and supplier in Planfix, also without an apartment", async () => {
+    const pfContact = (planfixId: number, name: string, kind: "client" | "owner" | "supplier" | null, group: string | null) => ({
+      planfixId,
+      name,
+      isCompany: kind !== "owner",
+      kind,
+      group,
+      phone: "050-0000000",
+      email: null,
+      address: null,
+    });
+    crm.contacts = [
+      pfContact(15, "תאגיד לבדיקה", "client", "Customer"), // also on the apartments
+      pfContact(64, "MOS-TEST לקוח חדש", "client", "Customer"),
+      pfContact(65, "MOS-TEST ספק", "supplier", "Provider"),
+      pfContact(66, "MOS-TEST בלי קבוצה", null, null),
+      pfContact(67, "MOS-TEST שותף", null, "Partner"),
+    ];
+    const report = await importFromCrm(db, crm, { dryRun: false });
+    expect(report.contacts).toEqual({ created: 4, updated: 0 });
+    expect(report.contactsSkipped).toEqual([
+      { planfixId: 66, name: "MOS-TEST בלי קבוצה", group: null },
+      { planfixId: 67, name: "MOS-TEST שותף", group: "Partner" },
+    ]);
+    expect(report.choices!.clients.map((c) => c.planfixId).sort()).toEqual([15, 64]);
+    const { rows } = await db.query("SELECT planfix_id, kind, phone FROM contacts ORDER BY planfix_id");
+    expect(rows).toEqual([
+      { planfix_id: 15, kind: "client", phone: "050-0000000" },
+      { planfix_id: 16, kind: "owner", phone: null },
+      { planfix_id: 64, kind: "client", phone: "050-0000000" },
+      { planfix_id: 65, kind: "supplier", phone: "050-0000000" },
+    ]);
+    // A phone changed in MAGLARD OS is kept on the next import.
+    await db.query("UPDATE contacts SET phone = '03-9999999' WHERE planfix_id = 64");
+    await importFromCrm(db, crm, { dryRun: false });
+    expect((await db.query("SELECT phone FROM contacts WHERE planfix_id = 64")).rows[0].phone).toBe("03-9999999");
+  });
+
   it("is open to admins only, and dry-runs unless told otherwise", async () => {
     const app = buildServer(db, { requireAuth: false, crm });
     const res = await app.inject({ method: "POST", url: "/import/planfix", payload: {} });

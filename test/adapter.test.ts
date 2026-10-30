@@ -156,6 +156,27 @@ describe("PlanfixAdapter", () => {
 });
 
 describe("PlanfixAdapter reads", () => {
+  it("reads contacts with their group, in the shapes maglardsand returns", async () => {
+    const answers: Record<string, unknown> = {
+      "contact/groups?fields=id,name": { result: "success", groups: [{ id: 1, name: "Customer" }, { id: 3, name: "Partner" }] },
+      "contact/list": {
+        result: "success",
+        contacts: [
+          { id: 64, name: "דנה", lastname: "כהן", isCompany: false, group: { id: 1 }, email: "", phones: [{ number: "0501234567", type: 1 }] },
+          { id: 67, name: "שותף", isCompany: true, group: { id: 3 } },
+          { id: 70, name: "בלי קבוצה", address: " רחוב 1 " },
+        ],
+      },
+    };
+    const impl: Fetch = async (url) => new Response(JSON.stringify(answers[String(url).replace("https://x/rest/", "")]));
+    const rows = await new PlanfixAdapter(new PlanfixClient("https://x/rest/", "t", impl)).readContacts();
+    expect(rows).toEqual([
+      { planfixId: 64, name: "דנה כהן", isCompany: false, kind: "client", group: "Customer", phone: "0501234567", email: null, address: null },
+      { planfixId: 67, name: "שותף", isCompany: true, kind: null, group: "Partner", phone: null, email: null, address: null },
+      { planfixId: 70, name: "בלי קבוצה", isCompany: false, kind: null, group: null, phone: null, email: null, address: "רחוב 1" },
+    ]);
+  });
+
   it("reads engagements in the shapes maglardsand returns, page by page", async () => {
     const task = {
       id: 114,

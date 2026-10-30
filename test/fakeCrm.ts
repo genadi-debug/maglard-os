@@ -2,6 +2,7 @@ import type {
   CrmAdapter,
   ExpenseType,
   ImportedBilling,
+  ImportedContact,
   ImportedEngagement,
   ImportedProperty,
   ImportedServiceRequest,
@@ -54,9 +55,11 @@ export class FakeCrm implements CrmAdapter {
   updateServiceRequest = async (taskId: number, i: any) => {
     await this.record("updateServiceRequest", { taskId, ...i });
   };
-  // What readProperties / readEngagements return.
+  // What readContacts / readProperties / readEngagements return.
+  contacts: ImportedContact[] = [];
   properties: ImportedProperty[] = [];
   engagements: ImportedEngagement[] = [];
+  readContacts = async () => this.contacts;
   readProperties = async () => this.properties;
   readEngagements = async () => this.engagements;
   serviceRequests: ImportedServiceRequest[] = [];

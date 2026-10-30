@@ -1,5 +1,5 @@
 import { PlanfixClient } from "./client.js";
-import { CONTACT_TEMPLATE, EXPENSE_TYPES, FIELD, SERVICE_REQUEST_STATUS, TEMPLATE, type ContactKind } from "./fields.js";
+import { CONTACT_KIND_BY_GROUP, CONTACT_TEMPLATE, EXPENSE_TYPES, FIELD, SERVICE_REQUEST_STATUS, TEMPLATE, type ContactKind } from "./fields.js";
 
 // What the rest of MAGLARD OS needs from the CRM. Planfix is the only
 // implementation today; keeping the interface narrow lets us swap or fake it.
@@ -20,6 +20,7 @@ export interface CrmAdapter {
   updateProperty(taskId: number, input: PropertyUpdate): Promise<void>;
   // Read side: the import of what already lives in the CRM, and the periodic
   // check for changes made directly in Planfix.
+  readContacts(): Promise<ImportedContact[]>;
   readProperties(): Promise<ImportedProperty[]>;
   readEngagements(): Promise<ImportedEngagement[]>;
   readServiceRequests(): Promise<ImportedServiceRequest[]>;
@@ -145,6 +146,18 @@ export interface PropertyUpdate {
 export interface ContactRef {
   planfixId: number;
   name: string;
+}
+
+// A Planfix contact; kind is null when its group is not one MAGLARD OS uses.
+export interface ImportedContact {
+  planfixId: number;
+  name: string;
+  isCompany: boolean;
+  kind: ContactKind | null;
+  group: string | null;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
 }
 
 export interface ImportedProperty {
@@ -299,6 +312,18 @@ function engagementFields(e: EngagementPush): FieldValue[] {
   ];
 }
 
+interface RawContact {
+  id: number;
+  name?: string;
+  midname?: string;
+  lastname?: string;
+  isCompany?: boolean;
+  group?: { id: number; name?: string };
+  email?: string;
+  phones?: { number?: string }[];
+  address?: string;
+}
+
 export class PlanfixAdapter implements CrmAdapter {
   constructor(private readonly client: PlanfixClient) {}
 
@@ -437,6 +462,34 @@ export class PlanfixAdapter implements CrmAdapter {
       address: readText(fieldOf(t, f.address)),
       owner: readContact(fieldOf(t, f.currentOwner)),
       client: readContact(fieldOf(t, f.client)),
+    }));
+  }
+
+  // contact/list and contact/groups were verified read-only on maglardsand 2026-10-29.
+  async readContacts(): Promise<ImportedContact[]> {
+    const { groups } = await this.client.request<{ groups: { id: number; name: string }[] }>("GET", "contact/groups?fields=id,name");
+    const groupName = new Map(groups.map((g) => [g.id, g.name]));
+    const pageSize = 100;
+    const all: RawContact[] = [];
+    for (let offset = 0; ; offset += pageSize) {
+      const res = await this.client.request<{ contacts: RawContact[] }>("POST", "contact/list", {
+        pageSize,
+        offset,
+        fields: "id,name,midname,lastname,isCompany,group,email,phones,address",
+      });
+      all.push(...res.contacts);
+      if (res.contacts.length < pageSize) break;
+    }
+    const text = (v: string | undefined) => (v ?? "").trim() || null;
+    return all.map((c) => ({
+      planfixId: c.id,
+      name: [c.name, c.midname, c.lastname].map((x) => (x ?? "").trim()).filter(Boolean).join(" "),
+      isCompany: !!c.isCompany,
+      kind: c.group ? (CONTACT_KIND_BY_GROUP[c.group.id] ?? null) : null,
+      group: c.group ? (groupName.get(c.group.id) ?? c.group.name ?? null) : null,
+      phone: text(c.phones?.find((p) => (p.number ?? "").trim())?.number),
+      email: text(c.email),
+      address: text(c.address),
     }));
   }
 

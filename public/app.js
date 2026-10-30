@@ -1279,10 +1279,73 @@ async function statementSection(supplierId, month) {
 // first shows what would change; only the second button writes.
 function importCard() {
   if (!allowed("import.run")) return "";
-  return `<div class="card" id="import"><div class="grow"><b>ייבוא דירות מ-Planfix</b><br>
-    <small>מביא בעלי דירות, לקוחות, דירות והתקשרויות שכבר קיימים ב-Planfix. הרצה חוזרת מעדכנת ולא יוצרת כפילויות. Planfix לא משתנה.</small>
+  return `<div class="card" id="import"><div class="grow"><b>ייבוא מ-Planfix</b><br>
+    <small>מביא את כל הלקוחות, בעלי הדירות והספקים (לפי הקבוצה שלהם ב-Planfix), וגם דירות והתקשרויות. הרצה חוזרת מעדכנת ולא יוצרת כפילויות. Planfix לא משתנה.</small>
     <div id="import-result"></div></div>
     <button class="btn" id="import-dry">בדיקה בלי לשמור</button></div>`;
+}
+
+// Contacts from a Google Sheets link or a CSV file exported from it (admin).
+function sheetCard() {
+  if (!allowed("import.run")) return "";
+  return `<div class="card" id="sheet"><div class="grow"><b>ייבוא אנשי קשר מגיליון</b><br>
+    <small>מקישור ל־Google Sheets (משותף ל"כל מי שיש לו את הקישור") או מקובץ CSV. השורה הראשונה היא כותרות: שם (חובה), סוג, טלפון, דוא״ל, כתובת, ת.ז / ח.פ, הערות.
+    איש קשר שכבר קיים מתעדכן רק בשדות ריקים. חדשים נוצרים גם ב־Planfix.</small>
+    <form id="sheet-form" class="grid">
+      ${field("url", "קישור לגיליון", 'type="url" placeholder="https://docs.google.com/spreadsheets/d/…" dir="ltr"', true)}
+      <label class="full">או קובץ CSV<input type="file" name="file" accept=".csv,text/csv"></label>
+      <label>סוג, כשאין עמודת "סוג"<select name="kind">${options(
+        [["client", "לקוחות"], ["owner", "בעלי דירות"], ["supplier", "ספקים"]],
+        "client",
+      )}</select></label>
+    </form>
+    <div id="sheet-result"></div></div>
+    <button class="btn" id="sheet-dry">בדיקה בלי לשמור</button></div>`;
+}
+
+const KIND_NAME = { client: "לקוח", owner: "בעל דירה", supplier: "ספק" };
+
+function sheetReport(r) {
+  const list = (title, items, show) =>
+    items.length
+      ? `<details${items.length <= 20 ? " open" : ""}><summary>${title}: ${items.length}</summary><ul>${items.map(show).join("")}</ul></details>`
+      : "";
+  const who = (x) => `<li>שורה ${x.row}: ${esc(x.name)} (${KIND_NAME[x.kind]})</li>`;
+  return `<p><b>${r.dryRun ? "בדיקה, שום דבר לא נשמר:" : "הייבוא הסתיים:"}</b> ${r.rows} שורות בגיליון</p>
+    ${list(r.dryRun ? "ייווצרו" : "נוצרו", r.created, who)}
+    ${list(r.dryRun ? "קיימים, ישלימו שדות ריקים" : "קיימים, הושלמו שדות ריקים", r.updated, who)}
+    ${list(r.dryRun ? "לא ייובאו" : "לא יובאו", r.skipped, (x) => `<li>שורה ${x.row}${x.name ? `: ${esc(x.name)}` : ""}. ${esc(x.reason)}</li>`)}
+    ${r.dryRun && (r.created.length || r.updated.length) ? `<button class="btn primary" id="sheet-run">ייבוא בפועל</button>` : ""}`;
+}
+
+function wireSheet() {
+  const box = view.querySelector("#sheet-result");
+  if (!box) return;
+  const form = view.querySelector("#sheet-form");
+  let source = null;
+  const run = async (dryRun, btn) => {
+    btn.disabled = true;
+    try {
+      if (dryRun) {
+        const file = form.file.files[0];
+        const url = form.url.value.trim();
+        if (!file && !url) throw new Error("צריך קישור לגיליון או קובץ CSV");
+        source = file ? { csv: await file.text() } : { url };
+      }
+      box.innerHTML = "<p>קורא את הגיליון…</p>";
+      const report = await api("POST", "/import/contacts/sheet", { ...source, kind: form.kind.value, dryRun });
+      box.innerHTML = sheetReport(report);
+      box.querySelector("#sheet-run")?.addEventListener("click", (e) => run(false, e.target));
+      if (!dryRun) toast(`נוצרו ${report.created.length} אנשי קשר, עודכנו ${report.updated.length}`);
+    } catch (err) {
+      box.innerHTML = `<p class="err">${esc(err.message)}</p>`;
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  // A new source needs a new check before importing.
+  form.addEventListener("input", () => (box.innerHTML = ""));
+  view.querySelector("#sheet-dry").onclick = (e) => run(true, e.target);
 }
 
 function importReport(r) {
@@ -1296,12 +1359,18 @@ function importReport(r) {
         )
         .join("")}</ul>`
     : "";
+  const others = r.contactsSkipped?.length
+    ? `<details><summary>${r.contactsSkipped.length} אנשי קשר ב־Planfix לא ${r.dryRun ? "ייובאו" : "יובאו"}, כי הם לא בקבוצה Customer, בעלי דירות או Provider</summary><ul>${r.contactsSkipped
+        .map((c) => `<li><a href="${PLANFIX_CONTACT}${c.planfixId}" target="_blank" rel="noopener">${esc(c.name || `איש קשר ${c.planfixId}`)}</a> (${esc(c.group || "בלי קבוצה")})</li>`)
+        .join("")}</ul><small>כדי לייבא אותם: לשייך אותם לקבוצה ב־Planfix ולהריץ שוב.</small></details>`
+    : "";
   return `<p><b>${r.dryRun ? "בדיקה, שום דבר לא נשמר:" : "הייבוא הסתיים:"}</b></p><ul>
-    ${line("אנשי קשר", r.contacts)}${line("דירות", r.properties)}${line("התקשרויות", r.engagements)}</ul>${skipped}
+    ${line("אנשי קשר", r.contacts)}${line("דירות", r.properties)}${line("התקשרויות", r.engagements)}</ul>${others}${skipped}
     ${r.dryRun ? `<button class="btn primary" id="import-run">ייבוא בפועל</button>` : ""}`;
 }
 
 const PLANFIX_TASK = "https://maglardsand.planfix.com/task/";
+const PLANFIX_CONTACT = "https://maglardsand.planfix.com/contact/";
 
 // Completes in Planfix an engagement the import skipped: only the fields that
 // changed are sent, then the check runs again.
@@ -1454,6 +1523,7 @@ async function syncView() {
     <h1>סנכרון Planfix</h1><p class="sub">כל פעולה נשמרת קודם כאן ונשלחת ל-Planfix ברקע. פעולה שנכשלה אפשר לשלוח שוב.</p>
     ${readbackSection(rb)}
     ${importCard()}
+    ${sheetCard()}
     <h2>שליחות ל-Planfix</h2>
     ${
       jobs.length
@@ -1467,6 +1537,7 @@ async function syncView() {
         : `<div class="empty">עדיין לא נשלח דבר ל-Planfix</div>`
     }`;
   wireImport();
+  wireSheet();
   wireReadback();
   view.querySelectorAll("[data-retry]").forEach((b) => {
     b.onclick = async () => {
@@ -2203,6 +2274,8 @@ const AUDIT_ACTION = {
   "POST /users": "יצירת משתמש",
   "POST /users/:id": "עדכון משתמש",
   "POST /import/planfix": "ייבוא מ-Planfix",
+  "POST /import/engagements/:taskId": "השלמת התקשרות ב-Planfix",
+  "POST /import/contacts/sheet": "ייבוא אנשי קשר מגיליון",
   "POST /tasks": "יצירת משימה",
   "POST /tasks/:id": "עדכון משימה",
   "POST /tasks/:id/notes": "הערה במשימה",

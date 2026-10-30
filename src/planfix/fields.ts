@@ -17,6 +17,10 @@ export const TEMPLATE = {
 // 9, 11, 13; creating a contact without a template fails with code 41).
 export const CONTACT_TEMPLATE = { client: 7, owner: 8, supplier: 6 } as const;
 export type ContactKind = keyof typeof CONTACT_TEMPLATE;
+// The group a contact of each template lands in, read from contact/list and
+// contact/groups on maglardsand 2026-10-29 (contacts 9, 11, 13). Contacts in
+// other groups (Contractor, Partner, Competitor) or none are not imported.
+export const CONTACT_KIND_BY_GROUP: Record<number, ContactKind> = { 1: "client", 132: "owner", 5: "supplier" };
 
 // Planfix "מוקד" statuses, by MAGLARD OS service request status. Setting status
 // through POST task/{id} was verified on task 336.

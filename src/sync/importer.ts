@@ -37,6 +37,8 @@ export type ImportReport = {
   properties: Tally;
   engagements: Tally;
   skipped: Skip[];
+  // Planfix contacts outside the client, owner and supplier groups: not imported.
+  contactsSkipped: { planfixId: number; name: string; group: string | null }[];
   // What a skipped engagement can be linked to: the apartments and people Planfix has.
   choices?: {
     properties: { planfixTaskId: number; baseNumber: number; address: string }[];
@@ -64,13 +66,18 @@ class Rollback extends Error {
 
 export async function importFromCrm(db: Db, crm: CrmAdapter, opts: { dryRun: boolean }): Promise<ImportReport> {
   // Read everything first, so a slow CRM never holds a transaction open.
-  const [properties, engagements] = await Promise.all([crm.readProperties(), crm.readEngagements()]);
+  const [contacts, properties, engagements] = await Promise.all([
+    crm.readContacts(),
+    crm.readProperties(),
+    crm.readEngagements(),
+  ]);
   const report: ImportReport = {
     dryRun: opts.dryRun,
     contacts: { created: 0, updated: 0 },
     properties: { created: 0, updated: 0 },
     engagements: { created: 0, updated: 0 },
     skipped: [],
+    contactsSkipped: [],
   };
   const skip = (planfixTaskId: number, what: Skip["what"], about: string, reason: string, fix?: EngagementFix) =>
     report.skipped.push({ planfixTaskId, what, about, reason, ...(fix ? { fix } : {}) });
@@ -101,7 +108,11 @@ export async function importFromCrm(db: Db, crm: CrmAdapter, opts: { dryRun: boo
     });
   };
   const people = (refs: (ContactRef | null)[]) =>
-    [...new Map(refs.filter((r): r is ContactRef => !!r).map((r) => [r.planfixId, r])).values()].sort((a, b) =>
+    [
+      ...new Map(
+        refs.filter((r): r is ContactRef => !!r).map((r) => [r.planfixId, { planfixId: r.planfixId, name: r.name }]),
+      ).values(),
+    ].sort((a, b) =>
       a.name.localeCompare(b.name, "he"),
     );
   report.choices = {
@@ -109,8 +120,16 @@ export async function importFromCrm(db: Db, crm: CrmAdapter, opts: { dryRun: boo
       .filter((p) => p.baseNumber !== null && p.address)
       .map((p) => ({ planfixTaskId: p.planfixTaskId, baseNumber: p.baseNumber!, address: p.address! }))
       .sort((a, b) => a.baseNumber - b.baseNumber),
-    owners: people([...properties.map((p) => p.owner), ...engagements.map((e) => e.owner)]),
-    clients: people([...properties.map((p) => p.client ?? null), ...engagements.map((e) => e.client)]),
+    owners: people([
+      ...contacts.filter((c) => c.kind === "owner"),
+      ...properties.map((p) => p.owner),
+      ...engagements.map((e) => e.owner),
+    ]),
+    clients: people([
+      ...contacts.filter((c) => c.kind === "client"),
+      ...properties.map((p) => p.client ?? null),
+      ...engagements.map((e) => e.client),
+    ]),
   };
 
   try {
@@ -132,6 +151,29 @@ export async function importFromCrm(db: Db, crm: CrmAdapter, opts: { dryRun: boo
         contactIds.set(ref.planfixId, id);
         return id;
       };
+
+      // Every client, owner and supplier in Planfix, also those not linked to
+      // an apartment yet. Details filled in here are kept; Planfix only fills blanks.
+      for (const c of contacts) {
+        if (!c.kind || !c.name) {
+          report.contactsSkipped.push({ planfixId: c.planfixId, name: c.name, group: c.group });
+          continue;
+        }
+        const id = await upsert(
+          tx,
+          report.contacts,
+          "SELECT id FROM contacts WHERE planfix_id = $1",
+          [c.planfixId],
+          `UPDATE contacts SET name = $2, phone = COALESCE(phone, $3), email = COALESCE(email, $4),
+                  address = COALESCE(address, $5), updated_at = now()
+            WHERE id = $1`,
+          [c.name, c.phone, c.email, c.address],
+          `INSERT INTO contacts (kind, name, is_company, phone, email, address, planfix_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+          [c.kind, c.name, c.isCompany, c.phone, c.email, c.address, c.planfixId],
+        );
+        contactIds.set(c.planfixId, id);
+      }
 
       const propertyIds = new Map<number, string>();
       for (const p of properties) {
