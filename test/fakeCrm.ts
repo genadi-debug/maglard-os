@@ -49,6 +49,9 @@ export class FakeCrm implements CrmAdapter {
   updateProperty = async (taskId: number, i: any) => {
     await this.record("updateProperty", { taskId, ...i });
   };
+  setContractPrice = async (contractTaskId: number, monthlyPrice: number) => {
+    await this.record("setContractPrice", { contractTaskId, monthlyPrice });
+  };
   patchEngagement = async (taskId: number, i: any) => {
     await this.record("patchEngagement", { taskId, ...i });
   };

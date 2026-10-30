@@ -72,6 +72,7 @@ const ROUTES: Record<string, Permission | null> = {
   "GET /clients/:id/rent-charges": "billing.manage",
   "POST /clients/:id/rent-charges": "billing.manage",
   "POST /clients/:id/charges/:chargeId/amount": "billing.manage",
+  "POST /clients/:id/contracts/:contractId/price": "billing.manage",
   "POST /clients/:id/credits/:creditId/refunds": "billing.manage",
   "GET /clients/:id/bills/:billId": "billing.view",
   "GET /sync/status": "sync.view",
@@ -359,6 +360,11 @@ export function buildServer(
     if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
     const input = billing.amountInput.parse(req.body);
     return billing.correctChargeAmount(db, opts.crm, req.user?.id || null, req.params.id, Number(req.params.chargeId), input);
+  });
+  app.post<{ Params: { id: string; contractId: string } }>("/clients/:id/contracts/:contractId/price", async (req, reply) => {
+    if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
+    const input = billing.contractPriceInput.parse(req.body);
+    return billing.setContractPrice(db, opts.crm, req.user?.id || null, req.params.id, Number(req.params.contractId), input);
   });
   app.post<{ Params: { id: string; creditId: string } }>("/clients/:id/credits/:creditId/refunds", async (req, reply) => {
     if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
