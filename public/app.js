@@ -856,6 +856,9 @@ function contactFields(kind) {
       ["withholdingTax", "withholding_tax", "ניכוי מס במקור", "bool", true],
       ["withholdingRate", "withholding_rate", "שיעור ניכוי במקור (%)", "number", false],
       ["ledgerCard", "ledger_card", "מספר כרטיס", "text", true],
+      ["managementFee", "management_fee", "דמי ניהול (לפני מע״מ)", "money", true],
+      ["managementFeeBasis", "management_fee_basis", "דמי ניהול לפי", "basis", false],
+      ["setupFee", "setup_fee", "דמי הקמה לדירה חדשה, כשאין דמי תיווך (₪ לפני מע״מ)", "money", true],
     );
   }
   if (kind === "owner") {
@@ -885,6 +888,11 @@ function contactFields(kind) {
   return f;
 }
 
+const FEE_BASIS = { per_apartment: "₪ לדירה לחודש", percent_of_rent: "% משכר הדירה" };
+// "₪ 450 לדירה לחודש" or "8% משכר הדירה", as the card shows the management fee.
+const feeText = (fee, basis) =>
+  fee == null ? "—" : basis === "percent_of_rent" ? `${Number(fee)}% משכר הדירה` : `${money(fee)}${basis ? " לדירה לחודש" : ""}`;
+
 function contactDialog(kind, c, onSaved) {
   const input = ([key, col, label, type, required]) => {
     const v = c?.[col];
@@ -906,12 +914,21 @@ function contactDialog(kind, c, onSaved) {
         v,
       )}</select></label>`;
     }
+    if (type === "basis") {
+      return `<label>${esc(label)}<select name="${key}"><option value="">—</option>${options(
+        Object.entries(FEE_BASIS),
+        v,
+      )}</select></label>`;
+    }
+    if (type === "money") {
+      return `<label>${esc(label + mark)}<input name="${key}" type="number" step="0.01" min="0" inputmode="decimal" value="${esc(v ?? "")}"></label>`;
+    }
     if (type === "textarea") return `<label class="full">${esc(label)}<textarea name="${key}" rows="2">${esc(v ?? "")}</textarea></label>`;
     const attrs = `type="${type}" value="${esc(v ?? "")}" ${key === "name" ? "required" : ""} ${type === "number" ? 'step="0.01" min="0" max="100"' : ""}`;
     return `<label>${esc(label + mark)}<input name="${key}" ${attrs}></label>`;
   };
   const fields = contactFields(kind);
-  dialog(
+  const d = dialog(
     c ? `עריכת פרטי ${KIND_LABEL[kind]}` : `${KIND_LABEL[kind]} חדש`,
     fields.map(input).join("") + `<p class="full"><small>(חובה) נדרש כדי לפתוח את הכרטיס. * נדרש כדי שהכרטיס יהיה מלא: אפשר לשמור גם בלי, והכרטיס יסומן "לא מלא" עד שישלימו.</small></p>`,
     async (v) => {
@@ -920,7 +937,7 @@ function contactDialog(kind, c, onSaved) {
         const raw = v[key];
         if (raw === undefined) continue;
         if (type === "bool" || type === "company") body[key] = raw === "" ? null : raw === "true";
-        else if (type === "number") body[key] = raw === "" ? null : Number(raw);
+        else if (type === "number" || type === "money") body[key] = raw === "" ? null : Number(raw);
         else body[key] = raw.trim() === "" ? null : raw.trim();
       }
       if (c) {
@@ -937,6 +954,13 @@ function contactDialog(kind, c, onSaved) {
     },
     c ? "שמירה" : "פתיחת כרטיס",
   );
+  // A percentage cannot exceed 100.
+  const form = d.querySelector("form");
+  const basis = () => {
+    if (form.managementFee) form.managementFee.max = form.managementFeeBasis.value === "percent_of_rent" ? "100" : "";
+  };
+  form.managementFeeBasis?.addEventListener("change", basis);
+  if (form.managementFeeBasis) basis();
 }
 
 // ---------- archive ----------
@@ -990,9 +1014,13 @@ function wireRecordActions(type, rec, back) {
 
 // Details, missing fields and contact people, on the client, owner and supplier cards.
 function contactSection(c) {
-  const shown = contactFields(c.kind).filter(([key]) => key !== "name" && key !== "notes");
-  const value = ([, col, , type]) =>
-    type === "bool" ? yesNo(c[col]) : type === "company" ? (c[col] ? "תאגיד" : "פרטי") : type === "date" ? date(c[col]) || "—" : esc(c[col] ?? "—");
+  const shown = contactFields(c.kind).filter(([key]) => !["name", "notes", "managementFeeBasis"].includes(key));
+  const value = ([key, col, , type]) =>
+    key === "managementFee"
+      ? esc(feeText(c.management_fee, c.management_fee_basis))
+      : type === "money"
+        ? (c[col] == null ? "—" : money(c[col]))
+        : type === "bool" ? yesNo(c[col]) : type === "company" ? (c[col] ? "תאגיד" : "פרטי") : type === "date" ? date(c[col]) || "—" : esc(c[col] ?? "—");
   const edit = allowed("contacts.manage");
   return `
     ${recordActions(c)}
@@ -1818,6 +1846,46 @@ function chargeDialog(clientId) {
     }
   };
   form.addEventListener("input", showSplit);
+  // The client's agreed fee fills the amount, until the user types their own.
+  const c = b.client;
+  let filled = "";
+  // A new apartment is charged brokerage or setup, once: has the picked one been?
+  const setupCharged = () => {
+    const apt = b.apartments.find((a) => a.id === form.engagementId.value);
+    return (
+      !!apt &&
+      [...b.unbilled, ...b.billed].some(
+        (x) => x.charge_type === "דמי תיווך והקמה" && x.apartment_code === apt.apartment_code && Number(x.amount_total) > 0,
+      )
+    );
+  };
+  const prefill = () => {
+    const type = b.chargeTypes.find((t) => t.name === form.chargeType.value);
+    const fee =
+      type.name === "דמי ניהול" && c.management_fee_basis === "per_apartment"
+        ? c.management_fee
+        : type.name === "דמי תיווך והקמה"
+          ? c.setup_fee
+          : null;
+    d.querySelector("#fee-hint").textContent =
+      type.name === "דמי ניהול" && c.management_fee != null
+        ? `לפי כרטיס הלקוח: ${feeText(c.management_fee, c.management_fee_basis)} (לפני מע״מ)`
+        : type.name === "דמי תיווך והקמה" && c.setup_fee != null
+          ? `דמי הקמה לפי כרטיס הלקוח: ${money(c.setup_fee)} לדירה חדשה (לפני מע״מ). נגבים רק כשלא נגבו דמי תיווך על הדירה.${
+              setupCharged() ? " ⚠️ לדירה הזו כבר נפתח חיוב דמי תיווך והקמה." : ""
+            }`
+          : "";
+    if (form.amountTotal.value !== filled) return;
+    filled = fee == null || type.vat === null ? "" : String(Math.round(Number(fee) * (type.vat ? 1 + b.vatRate / 100 : 1) * 100) / 100);
+    form.amountTotal.value = filled;
+  };
+  d.querySelector("#split").insertAdjacentHTML("beforebegin", `<p class="full sub" id="fee-hint"></p>`);
+  form.chargeType.addEventListener("change", () => {
+    prefill();
+    showSplit();
+  });
+  form.addEventListener("input", (e) => e.target !== form.amountTotal && prefill());
+  prefill();
   showSplit();
   apartment.wire(d);
 }

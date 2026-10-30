@@ -11,7 +11,11 @@ const APARTMENT = `coalesce(e.apartment_code, nullif(split_part(x.engagement_nam
   e.property_id`;
 
 export async function clientBilling(db: Db, clientId: string) {
-  const client = await db.query("SELECT id, name, planfix_id FROM contacts WHERE id = $1 AND kind = 'client'", [clientId]);
+  const client = await db.query(
+    `SELECT id, name, planfix_id, management_fee, management_fee_basis, setup_fee
+       FROM contacts WHERE id = $1 AND kind = 'client'`,
+    [clientId],
+  );
   if (!client.rows[0]) throw new NotFoundError(`client ${clientId} not found`);
   const pf = client.rows[0].planfix_id as number | null;
   const [contracts, charges, bills, read] = await Promise.all([
