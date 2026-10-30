@@ -280,6 +280,38 @@ describe.skipIf(!url)("the client's billing, read from Planfix", () => {
     await call("POST", "/billing/refresh");
   });
 
+  it("fills a contract's missing monthly price in Planfix, and marks ended contracts", async () => {
+    const contract = crm.billing.contracts[0];
+    const before = crm.billing;
+    crm.billing = {
+      ...before,
+      contracts: [
+        contract,
+        { ...contract, planfixTaskId: 7003, name: "חוזה בלי מחיר", monthlyPrice: null },
+        { ...contract, planfixTaskId: 7004, name: "חוזה שהסתיים", moveInOn: "2025-01-01", moveOutOn: "2025-12-31" },
+      ],
+    };
+    await call("POST", "/billing/refresh");
+    const b = (await call("GET", `/clients/${ids.client}/billing`)).json();
+    expect(b.contracts.map((k: any) => [k.planfix_task_id, k.ended, k.monthly_price])).toEqual([
+      [7001, false, "5000.00"],
+      [7003, false, null],
+      [7004, true, "5000.00"],
+    ]);
+    const price = (id: number, monthlyPrice: unknown) =>
+      call("POST", `/clients/${ids.client}/contracts/${id}/price`, { monthlyPrice });
+    // A price already set is changed in Planfix itself; another client's contract is not found.
+    expect((await price(7001, 5200)).statusCode).toBe(409);
+    expect((await price(9999, 5200)).statusCode).toBe(409);
+    expect((await price(7003, 0)).statusCode).toBe(400);
+    expect((await price(7003, 3500)).json()).toEqual({ planfixTaskId: 7003, monthlyPrice: 3500 });
+    expect(crm.calls.at(-1)).toEqual({ method: "setContractPrice", input: { contractTaskId: 7003, monthlyPrice: 3500 } });
+    const log = await db.query("SELECT detail FROM audit_log WHERE action = 'contract.price_set'");
+    expect(log.rows[0].detail).toMatchObject({ planfixTaskId: 7003, monthlyPrice: 3500 });
+    crm.billing = before;
+    await call("POST", "/billing/refresh");
+  });
+
   it("takes VAT on rent and on expenses from the client's card", async () => {
     await call("POST", "/settings", { vatRate: 18 });
     await call("POST", `/contacts/${ids.client}`, { vatOnRent: false, vatOnExpenses: true });

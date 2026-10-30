@@ -35,6 +35,8 @@ export interface CrmAdapter {
   setChargeAmount(chargeTaskId: number, amountTotal: number, split: { net: number; vat: number } | null): Promise<void>;
   // "סכום שהתקבל" (9898); on a credit, minus what was paid back to the client.
   setChargeReceived(chargeTaskId: number, received: number): Promise<void>;
+  // A client contract's "מחיר חודשי" (10026), from which Planfix computes rent by days.
+  setContractPrice(contractTaskId: number, monthlyPrice: number): Promise<void>;
 }
 
 export interface BillPush {
@@ -643,6 +645,13 @@ export class PlanfixAdapter implements CrmAdapter {
     const data: FieldValue[] = [{ field: { id: f.amountTotal }, value: amountTotal }];
     if (split) data.push({ field: { id: f.amountNet }, value: split.net }, { field: { id: f.amountVat }, value: split.vat });
     await this.client.request("POST", `task/${chargeTaskId}`, { customFieldData: data });
+  }
+
+  // The same POST task/{id} update as the charge fields, on a contract (template 83).
+  async setContractPrice(contractTaskId: number, monthlyPrice: number) {
+    await this.client.request("POST", `task/${contractTaskId}`, {
+      customFieldData: [{ field: { id: FIELD.clientContract.monthlyPrice }, value: monthlyPrice }],
+    });
   }
 
   // Verified on maglardsand task 352 (a MOS-TEST credit of -118): Planfix's

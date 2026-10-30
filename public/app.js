@@ -1819,18 +1819,7 @@ async function billingSection(clientId) {
       <div><span>חשבונות מצטברים</span><b>${b.bills.length}</b></div>
     </div>
     <h3>חוזי שכירות ללקוח</h3>
-    ${
-      b.contracts.length
-        ? `<div class="wrap"><table class="table"><thead><tr><th>דירה</th><th>חוזה</th><th>כניסה ויציאה</th><th>מחיר חודשי</th>
-          <th>דמי תיווך והקמה</th><th>פיקדון</th><th>סטטוס</th></tr></thead><tbody>${b.contracts
-            .map(
-              (k) => `<tr><td>${k.property_id ? `<a href="#/properties/${k.property_id}">${esc(k.apartment_code || "—")}</a>` : esc(k.apartment_code || "—")}</td>
-              <td>${esc(k.name)}</td><td>${span(k.move_in_on, k.move_out_on)}</td><td>${money(k.monthly_price)}</td>
-              <td>${money(k.setup_fee)}</td><td>${money(k.deposit)}</td><td>${esc(k.status || "")}</td></tr>`,
-            )
-            .join("")}</tbody></table></div>`
-        : `<div class="empty">אין חוזים ב־Planfix</div>`
-    }
+    <div id="contracts">${contractsTable(b)}</div>
     <h3>חיובים שעוד לא נכללו בחשבון</h3>
     ${b.unbilled.length ? chargesTable(b.unbilled, true, allowed("billing.manage")) : `<div class="empty">כל החיובים כבר בחשבון</div>`}
     ${creditsTable(b.credits)}
@@ -2099,7 +2088,66 @@ async function billView(clientId, billId) {
   view.querySelector("#print").addEventListener("click", () => window.print());
 }
 
+// Contracts that ended are hidden until asked for. A contract without a
+// monthly price gets no rent charge, so its price can be filled in from here.
+let showEndedContracts = false;
+function contractsTable(b) {
+  if (!b.contracts.length) return `<div class="empty">אין חוזים ב־Planfix</div>`;
+  const ended = b.contracts.filter((k) => k.ended).length;
+  const shown = b.contracts.filter((k) => showEndedContracts || !k.ended);
+  const fill = allowed("billing.manage");
+  const price = (k) =>
+    k.monthly_price !== null
+      ? money(k.monthly_price)
+      : `${pill(["חסר", "warn"])}${fill ? ` <button class="btn" data-price="${k.planfix_task_id}">השלמה</button>` : ""}`;
+  return `${
+    shown.length
+      ? `<div class="wrap"><table class="table"><thead><tr><th>דירה</th><th>חוזה</th><th>כניסה ויציאה</th><th>מחיר חודשי</th>
+          <th>דמי תיווך והקמה</th><th>פיקדון</th><th>סטטוס</th></tr></thead><tbody>${shown
+            .map(
+              (k) => `<tr${k.ended ? ' class="muted"' : ""}><td>${k.property_id ? `<a href="#/properties/${k.property_id}">${esc(k.apartment_code || "—")}</a>` : esc(k.apartment_code || "—")}</td>
+              <td>${esc(k.name)}</td><td>${span(k.move_in_on, k.move_out_on)}${k.ended ? " · הסתיים" : ""}</td><td>${price(k)}</td>
+              <td>${money(k.setup_fee)}</td><td>${money(k.deposit)}</td><td>${esc(k.status || "")}</td></tr>`,
+            )
+            .join("")}</tbody></table></div>`
+      : `<div class="empty">אין חוזים בתוקף</div>`
+  }${ended ? `<p><button class="btn" id="toggle-ended">${showEndedContracts ? "הסתרת חוזים שהסתיימו" : ended === 1 ? "הצגת חוזה אחד שהסתיים" : `הצגת ${ended} חוזים שהסתיימו`}</button></p>` : ""}`;
+}
+
+function contractPriceDialog(clientId, k) {
+  const suggested = k.engagement_rent !== null && k.engagement_rent !== undefined ? Number(k.engagement_rent) : null;
+  dialog(
+    `מחיר חודשי לחוזה ${k.apartment_code || ""}`,
+    `<p class="full sub">${esc(k.name)} · ${span(k.move_in_on, k.move_out_on)}</p>` +
+      `<p class="full sub">${
+        suggested !== null ? `בהתקשרות של הדירה רשום שכ״ד ${money(suggested)}, והוא מוצע כאן.` : "בהתקשרות של הדירה לא רשום שכ״ד."
+      } המחיר יירשם בשדה "מחיר חודשי" של החוזה ב־Planfix, וממנו יחושבו חיובי השכירות.</p>` +
+      field("monthlyPrice", "מחיר חודשי (₪)", `type="number" required step="0.01" min="0.01" value="${suggested ?? ""}"`),
+    async (v) => {
+      await api("POST", `/clients/${clientId}/contracts/${k.planfix_task_id}/price`, { monthlyPrice: Number(v.monthlyPrice) });
+      toast("המחיר נרשם בחוזה ב־Planfix");
+      view.querySelector("#billing").innerHTML = await billingSection(clientId);
+      wireBilling(clientId);
+    },
+    "רישום ב־Planfix",
+  );
+}
+
+function wireContracts(clientId) {
+  view.querySelector("#toggle-ended")?.addEventListener("click", () => {
+    showEndedContracts = !showEndedContracts;
+    view.querySelector("#contracts").innerHTML = contractsTable(billing);
+    wireContracts(clientId);
+  });
+  view.querySelectorAll("#contracts [data-price]").forEach((btn) =>
+    btn.addEventListener("click", () =>
+      contractPriceDialog(clientId, billing.contracts.find((k) => String(k.planfix_task_id) === btn.dataset.price)),
+    ),
+  );
+}
+
 function wireBilling(clientId) {
+  wireContracts(clientId);
   view.querySelector("#new-charge")?.addEventListener("click", () => chargeDialog(clientId));
   view.querySelector("#issue-bill")?.addEventListener("click", () => billDialog(clientId));
   view.querySelector("#rent-charges")?.addEventListener("click", () => rentDialog(clientId));

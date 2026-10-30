@@ -22,7 +22,8 @@ export async function clientBilling(db: Db, clientId: string) {
     db.query(
       `SELECT x.planfix_task_id, x.name, x.status, ${APARTMENT},
               to_char(x.move_in_on, 'YYYY-MM-DD') AS move_in_on, to_char(x.move_out_on, 'YYYY-MM-DD') AS move_out_on,
-              x.monthly_price, x.setup_fee, x.deposit
+              x.monthly_price, x.setup_fee, x.deposit, e.monthly_rent AS engagement_rent,
+              (x.move_out_on < current_date) AS ended
          FROM planfix_client_contracts x LEFT JOIN engagements e ON e.planfix_task_id = x.engagement_task_id
         WHERE x.client_planfix_id = $1 ORDER BY x.move_in_on DESC NULLS LAST, x.name`,
       [pf],
@@ -644,4 +645,33 @@ export async function recordRefund(
   });
   await refreshPlanfixBilling(db, crm).catch(() => undefined);
   return result;
+}
+
+export const contractPriceInput = z.object({
+  monthlyPrice: z.number().positive("המחיר צריך להיות גדול מ־0").max(1_000_000).multipleOf(0.01),
+});
+
+// Fills a client contract's empty monthly price in Planfix, which rent charges
+// are computed from. A price already set is changed in Planfix itself, since
+// charges may already follow it.
+export async function setContractPrice(
+  db: Db,
+  crm: CrmAdapter,
+  userId: string | null,
+  clientId: string,
+  contractTaskId: number,
+  input: z.infer<typeof contractPriceInput>,
+) {
+  const b = await clientBilling(db, clientId);
+  const contract = b.contracts.find((k) => k.planfix_task_id === contractTaskId);
+  if (!contract) throw new RuleError("החוזה לא נמצא אצל הלקוח הזה");
+  if (contract.monthly_price !== null) throw new RuleError("לחוזה כבר יש מחיר חודשי. שינוי שלו נעשה ב־Planfix.");
+  await crm.setContractPrice(contractTaskId, input.monthlyPrice);
+  await db.query("INSERT INTO audit_log (user_id, action, entity_id, ok, detail) VALUES ($1, 'contract.price_set', $2, true, $3)", [
+    userId,
+    clientId,
+    { planfixTaskId: contractTaskId, monthlyPrice: input.monthlyPrice, suggested: contract.engagement_rent },
+  ]);
+  await refreshPlanfixBilling(db, crm).catch(() => undefined);
+  return { planfixTaskId: contractTaskId, monthlyPrice: input.monthlyPrice };
 }
