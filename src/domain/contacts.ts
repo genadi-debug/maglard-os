@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { withTx, type Db } from "../db/pool.js";
 import { enqueue } from "./services.js";
-import { NotFoundError } from "./common.js";
+import { NotFoundError, RuleError } from "./common.js";
 
 // Card intake (spec process 1): a client, owner or supplier card with the
 // details finance needs. A card is complete once every required field of its
@@ -12,7 +12,7 @@ export type Kind = "client" | "owner" | "supplier";
 // Required fields by kind, from the finance spec (process 1, required fields).
 // A field missing here is optional for that kind.
 const REQUIRED: Record<Kind, string[]> = {
-  client: ["id_number", "vat_on_rent", "vat_on_expenses", "withholding_tax", "ledger_card"],
+  client: ["id_number", "vat_on_rent", "vat_on_expenses", "withholding_tax", "ledger_card", "management_fee", "setup_fee"],
   owner: ["id_number", "licensed_dealer", "withholding_cert_until", "bank", "ledger_card"],
   supplier: ["id_number", "supplier_type", "service_areas", "withholding_cert_until", "bank", "payment_terms"],
 };
@@ -24,6 +24,9 @@ export const FIELD_LABEL: Record<string, string> = {
   withholding_tax: "ניכוי מס במקור",
   withholding_rate: "שיעור ניכוי במקור",
   ledger_card: "מספר כרטיס",
+  management_fee: "דמי ניהול",
+  management_fee_basis: "דמי ניהול לפי",
+  setup_fee: "דמי הקמה",
   licensed_dealer: "עוסק מורשה",
   withholding_cert_until: "תוקף אישור ניכוי במקור",
   bank: "פרטי בנק",
@@ -51,6 +54,7 @@ export function missingFields(c: Record<string, unknown>): string[] {
     f === "bank" ? !(c.bank_name && c.bank_branch && c.bank_account) : c[f] === null || c[f] === undefined || c[f] === "",
   );
   if (kind === "client" && c.withholding_tax === true && c.withholding_rate == null) missing.push("withholding_rate");
+  if (kind === "client" && c.management_fee != null && !c.management_fee_basis) missing.push("management_fee_basis");
   return missing.map((f) => FIELD_LABEL[f]);
 }
 
@@ -78,6 +82,9 @@ export const contactInput = z
     vatOnExpenses: z.boolean().nullable().optional(),
     withholdingTax: z.boolean().nullable().optional(),
     withholdingRate: z.number().min(0).max(100).nullable().optional(),
+    managementFee: z.number().min(0, "דמי ניהול לא יכולים להיות שליליים").max(1_000_000).nullable().optional(),
+    managementFeeBasis: z.enum(["per_apartment", "percent_of_rent"]).nullable().optional(),
+    setupFee: z.number().min(0, "דמי הקמה לא יכולים להיות שליליים").max(1_000_000).nullable().optional(),
     licensedDealer: z.boolean().nullable().optional(),
     withholdingCertUntil: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
     bankName: text,
@@ -115,6 +122,9 @@ const COLUMN: Record<string, string> = {
   vatOnExpenses: "vat_on_expenses",
   withholdingTax: "withholding_tax",
   withholdingRate: "withholding_rate",
+  managementFee: "management_fee",
+  managementFeeBasis: "management_fee_basis",
+  setupFee: "setup_fee",
   licensedDealer: "licensed_dealer",
   withholdingCertUntil: "withholding_cert_until",
   bankName: "bank_name",
@@ -131,7 +141,13 @@ const BANK_KEYS = ["bankName", "bankBranch", "bankAccount"];
 
 const blankToNull = (v: unknown) => (v === "" ? null : v);
 
+// A management fee taken as a percentage of the rent cannot exceed 100%.
+function checkFee(fee: unknown, basis: unknown) {
+  if (basis === "percent_of_rent" && typeof fee === "number" && fee > 100) throw new RuleError("דמי ניהול באחוזים: עד 100%");
+}
+
 export async function createContact(db: Db, input: z.infer<typeof newContactInput>) {
+  checkFee(input.managementFee, input.managementFeeBasis);
   return withTx(db, async (tx) => {
     const { kind, ...rest } = input;
     const entries = Object.entries(rest).filter(([, v]) => v !== undefined);
@@ -160,6 +176,13 @@ export async function updateContact(
 ) {
   const entries = Object.entries(input).filter(([k, v]) => v !== undefined && (opts.bank || !BANK_KEYS.includes(k)));
   if (!entries.length) return getContact(db, id, opts);
+  if (input.managementFee !== undefined || input.managementFeeBasis !== undefined) {
+    const now = (await db.query("SELECT management_fee, management_fee_basis FROM contacts WHERE id = $1", [id])).rows[0];
+    checkFee(
+      input.managementFee !== undefined ? input.managementFee : now && Number(now.management_fee),
+      input.managementFeeBasis !== undefined ? input.managementFeeBasis : now?.management_fee_basis,
+    );
+  }
   const { rowCount } = await db.query(
     `UPDATE contacts SET ${entries.map(([k], i) => `${COLUMN[k]} = $${i + 2}`).join(", ")}, updated_at = now()
       WHERE id = $1`,
