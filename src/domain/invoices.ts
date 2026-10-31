@@ -87,8 +87,10 @@ const strip = ({ sort_at: _, ...row }: Record<string, unknown>) => row;
 export async function listSupplierInvoices(db: Db) {
   const [{ rows }, dups] = await Promise.all([
     db.query(
-      `SELECT x.*, coalesce(x.supplier_id::text, 'pf' || f.supplier_planfix_id) || '|' || ${NORMALIZED("x.invoice_number")} AS dup_key
+      `SELECT x.*, coalesce(x.supplier_id::text, 'pf' || f.supplier_planfix_id) || '|' || ${NORMALIZED("x.invoice_number")} AS dup_key,
+              ch.charge_task_id AS charged_as
          FROM (${BOTH}) x LEFT JOIN planfix_invoices f ON x.source = 'planfix' AND f.planfix_task_id = x.planfix_task_id
+         LEFT JOIN supplier_invoice_charges ch ON ch.invoice_ref = x.id
         ORDER BY sort_at DESC NULLS LAST`,
     ),
     duplicateKeys(db),

@@ -873,6 +873,7 @@ function contactFields(kind) {
     f.push(
       ["vatOnRent", "vat_on_rent", "מע״מ על שכירות", "bool", true],
       ["vatOnExpenses", "vat_on_expenses", "מע״מ על הוצאות (טכנאים, חשמל, מים וכד׳)", "bool", true],
+      ["expenseVatBasis", "expense_vat_basis", "המע״מ על הוצאות מחושב על", "vatbasis", false],
       ["withholdingTax", "withholding_tax", "ניכוי מס במקור", "bool", true],
       ["withholdingRate", "withholding_rate", "שיעור ניכוי במקור (%)", "number", false],
       ["ledgerCard", "ledger_card", "מספר כרטיס", "text", true],
@@ -909,6 +910,19 @@ function contactFields(kind) {
 }
 
 const FEE_BASIS = { per_apartment: "₪ לדירה לחודש", percent_of_rent: "% משכר הדירה" };
+// What the VAT on an expense charged on to the client is computed on.
+const EXPENSE_VAT_BASIS = { net: "מע״מ על הקרן", gross: "מע״מ על מלוא חשבונית הספק" };
+const BASIS_TEXT = { ...EXPENSE_VAT_BASIS, no_vat: "בלי מע״מ (הלקוח לא משלם מע״מ על הוצאות)" };
+// The two methods side by side, on a supplier invoice of ₪1,000 + VAT.
+const basisExample = (rate = 18) => {
+  const r = rate / 100;
+  const sup = 1000 * (1 + r);
+  return `<p class="full sub" id="basis-help"><b>מע״מ על הקרן:</b> המע״מ מחושב על סכום החשבונית לפני המע״מ של הספק.<br>
+    <b>מע״מ על מלוא חשבונית הספק:</b> המע״מ מחושב על כל החשבונית, כולל המע״מ של הספק.
+    <br>דוגמה: חשבונית ספק של ${money(1000)} + ${rate}% מע״מ = ${money(sup)}.
+    <br>על הקרן: ${money(1000)} + ${money(1000 * r)} מע״מ = <b>${money(1000 * (1 + r))}</b> ללקוח.
+    <br>על מלוא החשבונית: ${money(sup)} + ${money(sup * r)} מע״מ = <b>${money(sup * (1 + r))}</b> ללקוח.</p>`;
+};
 // "₪ 450 לדירה לחודש" or "8% משכר הדירה", as the card shows the management fee.
 const feeText = (fee, basis) =>
   fee == null ? "—" : basis === "percent_of_rent" ? `${Number(fee)}% משכר הדירה` : `${money(fee)}${basis ? " לדירה לחודש" : ""}`;
@@ -933,6 +947,9 @@ function contactDialog(kind, c, onSaved) {
         terms.map((t) => [t, t]),
         v,
       )}</select></label>`;
+    }
+    if (type === "vatbasis") {
+      return `<label>${esc(label)}<select name="${key}"><option value="">—</option>${options(Object.entries(EXPENSE_VAT_BASIS), v)}</select></label>` + basisExample();
     }
     if (type === "basis") {
       return `<label>${esc(label)}<select name="${key}"><option value="">—</option>${options(
@@ -981,6 +998,17 @@ function contactDialog(kind, c, onSaved) {
   };
   form.managementFeeBasis?.addEventListener("change", basis);
   if (form.managementFeeBasis) basis();
+  // The basis applies only to a client who pays VAT on expenses.
+  const vatBasis = () => {
+    const on = form.vatOnExpenses.value === "true";
+    form.expenseVatBasis.closest("label").hidden = !on;
+    d.querySelector("#basis-help").hidden = !on;
+    form.expenseVatBasis.disabled = !on;
+  };
+  if (form.expenseVatBasis) {
+    form.vatOnExpenses.addEventListener("change", vatBasis);
+    vatBasis();
+  }
 }
 
 // ---------- archive ----------
@@ -1038,6 +1066,8 @@ function contactSection(c) {
   const value = ([key, col, , type]) =>
     key === "managementFee"
       ? esc(feeText(c.management_fee, c.management_fee_basis))
+      : type === "vatbasis"
+        ? esc(c.vat_on_expenses === false ? "לא רלוונטי (בלי מע״מ על הוצאות)" : EXPENSE_VAT_BASIS[c[col]] ?? "—")
       : type === "money"
         ? (c[col] == null ? "—" : money(c[col]))
         : type === "bool" ? yesNo(c[col]) : type === "company" ? (c[col] ? "תאגיד" : "פרטי") : type === "date" ? date(c[col]) || "—" : esc(c[col] ?? "—");
@@ -1270,6 +1300,7 @@ const supplierLink = (i) => (i.supplier_id ? `<a href="#/suppliers/${i.supplier_
 
 async function invoicesView() {
   const rows = await api("GET", "/supplier-invoices");
+  const charge = allowed("billing.manage");
   view.innerHTML = `
     <div class="head"><div><h1>חשבוניות ספק</h1><p class="sub">חשבוניות שנקלטו כאן ומצב הסנכרון שלהן, וחשבוניות שנקלטו ישירות ב-Planfix (לקריאה בלבד).</p></div>
     <div class="actions" style="margin:0">
@@ -1279,16 +1310,32 @@ async function invoicesView() {
     ${
       rows.length
         ? `<div class="wrap"><table class="table stack"><thead><tr><th>מספר</th><th>ספק</th><th>דירה</th><th>תאריך</th>
-          <th>לפני מע״מ</th><th>סה״כ</th><th>אופן טיפול</th><th>Planfix</th></tr></thead><tbody>${rows
+          <th>לפני מע״מ</th><th>סה״כ</th><th>אופן טיפול</th><th>Planfix</th>${charge ? "<th>חיוב ללקוח</th>" : ""}</tr></thead><tbody>${rows
             .map(
               (i) => `<tr><td data-label="מספר">${esc(i.invoice_number || "—")}${i.suspected_duplicate ? ` ${pill(["חשד לכפילות", "warn"])}` : ""}</td><td data-label="ספק">${supplierLink(i)}</td><td data-label="דירה">${esc(i.apartment_code || "—")}</td>
               <td data-label="תאריך">${date(i.invoice_date)}</td><td data-label="לפני מע״מ">${money(i.amount_net)}</td><td data-label="סה״כ">${money(i.amount_total)}</td>
-              <td data-label="אופן טיפול">${esc(i.handling || "")}</td><td data-label="Planfix">${invoiceSource(i)}</td></tr>`,
+              <td data-label="אופן טיפול">${esc(i.handling || "")}</td><td data-label="Planfix">${invoiceSource(i)}</td>${
+                charge
+                  ? `<td data-label="חיוב ללקוח">${
+                      i.charged_as
+                        ? pill([`חויב #${i.charged_as}`, "good"])
+                        : i.handling === "לחיוב"
+                          ? `<button class="btn" data-charge="${esc(i.id)}">חיוב ללקוח</button>`
+                          : ""
+                    }</td>`
+                  : ""
+              }</tr>`,
             )
             .join("")}</tbody></table></div>`
         : `<div class="empty">אין עדיין חשבוניות ספק. חשבונית נקלטת מכאן ("קליטת חשבונית") או מתוך קריאת שירות, וחשבוניות שנקלטו ב-Planfix יופיעו אחרי "רענון מ-Planfix".</div>`
     }`;
   view.querySelector("#add")?.addEventListener("click", invoiceDialog);
+  view.querySelectorAll("[data-charge]").forEach((b) =>
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      expenseChargeDialog(b.dataset.charge).catch((err) => toast(err.message));
+    }),
+  );
   selectable(view.querySelector(".wrap"), rows, {
     file: "חשבוניות-ספק",
     name: (r) => `${r.invoice_number || "—"} · ${r.supplier_name || ""}`,
@@ -1316,6 +1363,56 @@ async function invoicesView() {
       e.target.disabled = false;
     }
   });
+}
+
+// Charges a supplier invoice on to the client. The server works out the base,
+// the VAT and the total by the client's card; the dialog shows them before
+// anything is written, and the server opens the charge only for that total.
+async function expenseChargeDialog(ref) {
+  const p = await api("GET", `/supplier-invoices/${encodeURIComponent(ref)}/charge`);
+  const inv = p.invoice;
+  const [y, m] = (inv.invoiceDate || today()).split("-");
+  const from = `${y}-${m}-01`;
+  const to = new Date(Date.UTC(Number(y), Number(m), 0)).toISOString().slice(0, 10);
+  const a = p.amounts;
+  const key = crypto.randomUUID();
+  const facts = `<div class="facts full">
+      <div><span>לקוח</span><b>${esc(p.client.name)}</b></div>
+      <div><span>דירה</span><b>${esc(p.apartmentCode || "—")}</b></div>
+      <div><span>חשבונית ספק</span><b>${esc(inv.invoiceNumber || "—")} · ${esc(inv.supplierName || "")}</b></div>
+      <div><span>בחשבונית</span><b>${money(inv.amountNet)} + ${money(inv.amountVat)} מע״מ = ${money(inv.amountTotal)}</b></div>
+    </div>`;
+  const sum = a
+    ? `<div class="full" id="charge-sum">
+        <p class="sub">שיטת הלקוח: <b>${esc(BASIS_TEXT[a.basis])}</b></p>
+        <div class="facts">
+          <div><span>בסיס חיוב</span><b>${money(a.base)}</b></div>
+          <div><span>מע״מ לחיוב${a.basis === "no_vat" ? "" : ` (${p.vatRate}%)`}</span><b>${money(a.vat)}</b></div>
+          <div><span>סכום סופי ללקוח</span><b>${money(a.total)}</b></div>
+        </div></div>`
+    : `<div class="missing full"><b>אי אפשר לחייב עדיין:</b> ${esc(p.problem)}
+        <a href="#/clients/${p.client.id}">לכרטיס הלקוח</a></div>`;
+  const d = dialog(
+    "חיוב הלקוח על חשבונית ספק",
+    facts +
+      (p.chargedAs ? `<div class="missing full">החשבונית כבר חויבה ללקוח (חיוב #${p.chargedAs} ב־Planfix).</div>` : sum) +
+      `<label>סוג חיוב<select name="chargeType">${options(p.chargeTypes.map((t) => [t, t]), "תפעול ואחזקה")}</select></label>` +
+      field("periodFrom", "תקופה מתאריך", `type="date" required value="${from}"`) +
+      field("periodTo", "עד תאריך", `type="date" required value="${to}"`),
+    async (v) => {
+      const r = await api("POST", `/supplier-invoices/${encodeURIComponent(ref)}/charge`, {
+        chargeType: v.chargeType,
+        periodFrom: v.periodFrom,
+        periodTo: v.periodTo,
+        expectedTotal: a.total,
+        requestKey: key,
+      });
+      toast(`החיוב נפתח ב־Planfix (#${r.planfixTaskId}): ${money(r.total)}`);
+      route();
+    },
+    "פתיחת חיוב",
+  );
+  d.querySelector(".primary").disabled = !a || !!p.chargedAs;
 }
 
 // The supplier's monthly account: the month's invoices, totals and due dates.
