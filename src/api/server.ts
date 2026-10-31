@@ -96,6 +96,8 @@ const ROUTES: Record<string, Permission | null> = {
   "POST /contacts/:id/delete": "records.delete",
   "POST /properties/:id/archive": "records.archive",
   "POST /properties/:id/delete": "records.delete",
+  "POST /bulk/archive": "records.archive",
+  "POST /bulk/delete": "records.delete",
   "GET /owners": "apartments.view",
   "GET /owners/:id": "apartments.view",
   "GET /suppliers": "requests.view",
@@ -287,6 +289,34 @@ export function buildServer(
     );
     app.post<IdParams>(`${base}/:id/delete`, async (req) => archive.deleteRecord(db, req.user!.id, type, req.params.id));
   }
+  // The same, for many records picked in a list. Each one follows its own
+  // rules: what cannot be archived or deleted is reported, the rest is done.
+  const bulkInput = z.object({ ids: z.array(z.string().uuid()).min(1).max(500) });
+  const each = async (ids: string[], one: (id: string) => Promise<unknown>) => {
+    const done: string[] = [];
+    const failed: { id: string; error: string }[] = [];
+    for (const id of new Set(ids)) {
+      try {
+        await one(id);
+        done.push(id);
+      } catch (err) {
+        failed.push({ id, error: (err as Error).message });
+      }
+    }
+    return { done, failed };
+  };
+  app.post("/bulk/archive", async (req) => {
+    const input = bulkInput.extend({ type: z.enum(["contact", "property"]), archived: z.boolean() }).parse(req.body);
+    const result = await each(input.ids, (id) => archive.setArchived(db, req.user!.id, input.type, id, input.archived));
+    await audit(req.user?.id || null, input.archived ? "bulk.archived" : "bulk.restored", true, undefined, { type: input.type, ...result });
+    return result;
+  });
+  app.post("/bulk/delete", async (req) => {
+    const input = bulkInput.extend({ type: z.enum(["contact", "property", "invoice"]) }).parse(req.body);
+    return each(input.ids, (id) =>
+      input.type === "invoice" ? invoices.deleteInvoice(db, req.user!.id, id) : archive.deleteRecord(db, req.user!.id, input.type, id),
+    );
+  });
   app.get<ListQuery>("/owners", async (req) => {
     const owners = await contacts.listByKind(db, "owner", archivedOf(req));
     const { rows } = await db.query("SELECT owner_id, count(*)::int AS n FROM properties GROUP BY owner_id");

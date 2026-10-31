@@ -146,6 +146,12 @@ body.loading::before{content:"";position:fixed;top:0;inset-inline:0;height:3px;b
   .table.stack td{border:0;padding:4px 12px;display:flex;gap:10px;justify-content:space-between}
   .table.stack td[data-label]::before{content:attr(data-label);color:var(--muted);font-size:13px;flex:none}
 }
+.table th.pick,.table td.pick{width:36px;padding-inline-end:0}
+.pick input{width:18px;height:18px;margin:0;cursor:pointer;accent-color:var(--accent)}
+.bulk{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 8px;padding:8px 12px;background:var(--surface);border:1px solid var(--accent);border-radius:10px}
+.bulk b{margin-inline-end:auto}
+@media (max-width:760px){.bulk{top:62px}}
+.btn.danger{color:var(--bad);border-color:var(--bad)}
 .table tr.total td{background:var(--sunk);font-weight:600}
 .table.summary td:last-child{text-align:left;white-space:nowrap}
 @media (max-width:760px){.table.stack tr.total td[colspan]{display:none}}

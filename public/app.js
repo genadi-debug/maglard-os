@@ -531,6 +531,7 @@ async function tasksView(params) {
     }`;
   view.querySelector("#add").onclick = () => newTaskDialog();
   clickableRows();
+  selectable(view.querySelector(".wrap"), rows, { file: "משימות", name: (r) => r.title });
 }
 
 async function taskView(id) {
@@ -648,6 +649,24 @@ async function apartmentsView(params) {
             )
             .join("")}</tbody></table></div>`
       : `<div class="empty">אין דירות שמתאימות לסינון. אפשר ללחוץ "איפוס".</div>`;
+    view.querySelector(".bulk")?.remove();
+    // An apartment is archived as a whole, once for all its engagements. (A
+    // listed apartment has engagements, so it is never one to delete.)
+    const properties = (picked) => [...new Map(picked.map((e) => [e.property_id, e])).values()];
+    selectable(view.querySelector("#apartment-rows .wrap"), shown, {
+      file: "דירות",
+      name: (e) => `${e.apartment_code} · ${e.address}`,
+      actions: [
+        {
+          label: archived ? "החזרה מהארכיון" : "העברה לארכיון",
+          allowed: "records.archive",
+          id: (e) => e.property_id,
+          items: properties,
+          ask: (n) => (archived ? `להחזיר ${n} דירות מהארכיון?` : `להעביר ${n} דירות לארכיון? דירה עם התקשרות פעילה או קריאה פתוחה לא תועבר.`),
+          run: (items) => api("POST", "/bulk/archive", { type: "property", archived: !archived, ids: items.map((e) => e.property_id) }),
+        },
+      ],
+    });
   };
   form.addEventListener("input", render);
   form.addEventListener("reset", () => setTimeout(render));
@@ -679,6 +698,7 @@ async function requestsView() {
     tr.onclick = go;
     tr.onkeydown = (e) => e.key === "Enter" && go();
   });
+  selectable(view.querySelector(".wrap"), rows, { file: "קריאות-שירות", name: (r) => `${r.apartment_code} · ${r.subject}` });
 }
 
 async function requestView(id) {
@@ -1097,6 +1117,7 @@ async function ownersView(params) {
     }`;
   view.querySelector("#add")?.addEventListener("click", () => contactDialog("owner", null, (id) => (location.hash = `#/owners/${id}`)));
   clickableRows();
+  selectable(view.querySelector(".wrap"), rows, { file: "בעלי-דירות", name: (r) => r.name, actions: contactActions(archived) });
 }
 
 async function ownerView(id) {
@@ -1134,6 +1155,7 @@ async function suppliersView(params) {
     }`;
   view.querySelector("#add")?.addEventListener("click", () => contactDialog("supplier", null, (id) => (location.hash = `#/suppliers/${id}`)));
   clickableRows();
+  selectable(view.querySelector(".wrap"), rows, { file: "ספקים", name: (r) => r.name, actions: contactActions(archived) });
 }
 
 async function supplierView(id, params) {
@@ -1267,6 +1289,22 @@ async function invoicesView() {
         : `<div class="empty">אין עדיין חשבוניות ספק. חשבונית נקלטת מכאן ("קליטת חשבונית") או מתוך קריאת שירות, וחשבוניות שנקלטו ב-Planfix יופיעו אחרי "רענון מ-Planfix".</div>`
     }`;
   view.querySelector("#add")?.addEventListener("click", invoiceDialog);
+  selectable(view.querySelector(".wrap"), rows, {
+    file: "חשבוניות-ספק",
+    name: (r) => `${r.invoice_number || "—"} · ${r.supplier_name || ""}`,
+    actions: [
+      {
+        label: "מחיקה",
+        allowed: "records.delete",
+        danger: true,
+        id: (r) => r.id,
+        // Invoices read from Planfix are not deleted here.
+        items: (picked) => picked.filter((r) => r.source === "maglard"),
+        ask: (n) => `למחוק לצמיתות ${n} חשבוניות? אפשר למחוק רק חשבונית שנקלטה כאן בטעות, לא נשלחה ל־Planfix ולא שייכת לקריאת שירות.`,
+        run: (items) => api("POST", "/bulk/delete", { type: "invoice", ids: items.map((r) => r.id) }),
+      },
+    ],
+  });
   view.querySelector("#refresh").addEventListener("click", async (e) => {
     e.target.disabled = true;
     try {
@@ -1679,6 +1717,7 @@ async function clientsView(params) {
     }`;
   view.querySelector("#add")?.addEventListener("click", () => contactDialog("client", null, (id) => (location.hash = `#/clients/${id}`)));
   clickableRows();
+  selectable(view.querySelector(".wrap"), rows, { file: "לקוחות", name: (r) => r.name, actions: contactActions(archived) });
 }
 
 async function clientView(id) {
@@ -2231,6 +2270,125 @@ async function propertyView(id) {
   view.querySelector("#new-req")?.addEventListener("click", () => newRequestDialog(current.id));
   view.querySelector("#new-task")?.addEventListener("click", () => newTaskDialog({ engagementId: current.id }));
 }
+
+// ---------- picking rows in a list ----------
+
+// Checkboxes on a list's rows, and actions on the rows picked: export to a
+// file for Excel, and the list's own actions (archive, delete). rows are the
+// table's data in the order it shows them. Each action asks before it runs;
+// the server still decides, row by row, what is allowed.
+function selectable(wrap, rows, { file, name, actions = [] }) {
+  const table = wrap?.querySelector("table");
+  if (!table || !rows.length) return;
+  table.tHead.rows[0].insertAdjacentHTML("afterbegin", `<th class="pick"><input type="checkbox" aria-label="בחירת כל השורות"></th>`);
+  [...table.tBodies[0].rows].forEach((tr, i) =>
+    tr.insertAdjacentHTML("afterbegin", `<td class="pick"><input type="checkbox" data-i="${i}" aria-label="בחירת ${esc(name(rows[i]))}"></td>`),
+  );
+  // Ticking a box does not open the row.
+  table.querySelectorAll(".pick").forEach((td) => {
+    td.addEventListener("click", (e) => e.stopPropagation());
+    td.addEventListener("keydown", (e) => e.stopPropagation());
+  });
+  const all = table.querySelector("thead .pick input");
+  const boxes = [...table.querySelectorAll("tbody .pick input")];
+  const bar = document.createElement("div");
+  bar.className = "bulk";
+  bar.hidden = true;
+  bar.setAttribute("role", "region");
+  bar.setAttribute("aria-label", "פעולות על השורות שנבחרו");
+  wrap.before(bar);
+  const picked = () => boxes.filter((b) => b.checked).map((b) => rows[b.dataset.i]);
+  const shown = actions.filter((a) => !a.allowed || allowed(a.allowed));
+  const update = () => {
+    const n = picked().length;
+    bar.hidden = !n;
+    all.checked = n === boxes.length;
+    all.indeterminate = n > 0 && n < boxes.length;
+    bar.innerHTML = `<b>${n === 1 ? "שורה אחת נבחרה" : `${n} נבחרו`}</b>
+      ${n < boxes.length ? `<button class="btn" data-act="all">בחירת הכל (${boxes.length})</button>` : ""}
+      <button class="btn" data-act="export">ייצוא ל־Excel</button>
+      ${shown.map((a, i) => `<button class="btn${a.danger ? " danger" : ""}" data-act="${i}">${esc(a.label)}</button>`).join("")}
+      <button class="btn" data-act="clear">ניקוי בחירה</button>`;
+  };
+  all.addEventListener("change", () => {
+    boxes.forEach((b) => (b.checked = all.checked));
+    update();
+  });
+  boxes.forEach((b) => b.addEventListener("change", update));
+  bar.addEventListener("click", (e) => {
+    const act = e.target.closest("[data-act]")?.dataset.act;
+    if (!act) return;
+    if (act === "clear" || act === "all") {
+      boxes.forEach((b) => (b.checked = act === "all"));
+      return update();
+    }
+    if (act === "export") return exportRows(table, boxes, file);
+    runBulk(shown[act], picked(), name);
+  });
+}
+
+// The picked rows as they are shown, in a CSV file Excel opens in Hebrew.
+function exportRows(table, boxes, file) {
+  const text = (cell) => cell.innerText.replace(/\s+/g, " ").trim();
+  const cols = [...table.tHead.rows[0].cells].slice(1);
+  const lines = [cols.map(text)];
+  boxes.forEach((b) => b.checked && lines.push([...b.closest("tr").cells].slice(1).map(text)));
+  const csv = lines.map((l) => l.map((v) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v)).join(",")).join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" }));
+  a.download = `${file}-${today()}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast(`יוצאו ${lines.length - 1} שורות`);
+}
+
+// Asks, runs the action on every picked row, and says what could not be done.
+function runBulk(action, picked, name) {
+  const items = action.items ? action.items(picked) : picked;
+  const skipped = picked.length - items.length;
+  dialog(
+    action.label,
+    `<p class="full">${esc(action.ask(items.length))}</p>` +
+      (skipped ? `<p class="full sub">${skipped} מהשורות שנבחרו לא מתאימות לפעולה הזו ולא ייכללו.</p>` : "") +
+      `<ul class="full">${items.slice(0, 12).map((r) => `<li>${esc(name(r))}</li>`).join("")}${items.length > 12 ? `<li>ועוד ${items.length - 12}</li>` : ""}</ul>`,
+    async () => {
+      if (!items.length) throw new Error("אין שורות שהפעולה מתאימה להן");
+      const { done, failed } = await action.run(items);
+      if (failed.length) {
+        const byId = new Map(items.map((r) => [action.id(r), r]));
+        dialog(
+          "חלק מהשורות לא עודכנו",
+          `<p class="full">${done.length} בוצעו. ${failed.length} לא:</p><ul class="full">${failed
+            .map((f) => `<li><b>${esc(byId.has(f.id) ? name(byId.get(f.id)) : f.id)}</b>: ${esc(f.error)}</li>`)
+            .join("")}</ul>`,
+          async () => {},
+          "סגירה",
+        );
+      } else toast(`${done.length} בוצעו`);
+      route();
+    },
+    action.label,
+  );
+}
+
+// Archive or restore, and delete, for the client, owner and supplier lists.
+const contactActions = (archived) => [
+  {
+    label: archived ? "החזרה מהארכיון" : "העברה לארכיון",
+    allowed: "records.archive",
+    id: (r) => r.id,
+    ask: (n) => (archived ? `להחזיר ${n} כרטיסים מהארכיון?` : `להעביר ${n} כרטיסים לארכיון? הם יוסתרו מהרשימות ומהחיפוש, וההיסטוריה נשמרת.`),
+    run: (items) => api("POST", "/bulk/archive", { type: "contact", archived: !archived, ids: items.map((r) => r.id) }),
+  },
+  {
+    label: "מחיקה",
+    allowed: "records.delete",
+    danger: true,
+    id: (r) => r.id,
+    ask: (n) => `למחוק לצמיתות ${n} כרטיסים? אפשר למחוק רק כרטיס שנפתח בטעות: בלי קישורים ושלא נשלח ל־Planfix. השאר יישארו ויוצגו ברשימה.`,
+    run: (items) => api("POST", "/bulk/delete", { type: "contact", ids: items.map((r) => r.id) }),
+  },
+];
 
 function clickableRows() {
   view.querySelectorAll("tr[data-href]").forEach((tr) => {

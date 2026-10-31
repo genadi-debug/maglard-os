@@ -1,4 +1,4 @@
-import type { Db, Tx } from "../db/pool.js";
+import { withTx, type Db, type Tx } from "../db/pool.js";
 import { NotFoundError, RuleError } from "./common.js";
 
 // Supplier invoices from both sides: the ones made in MAGLARD OS, and the ones
@@ -118,4 +118,33 @@ export async function supplierStatement(db: Db, supplierId: string, month: strin
     invoices,
     totals: { net: sum("amount_net"), vat: sum("amount_vat"), total: sum("amount_total") },
   };
+}
+
+// Deletes an invoice keyed in by mistake. Only one that never reached
+// Planfix, where nothing is deleted, and that no service request uses.
+export async function deleteInvoice(db: Db, actorId: string | null, id: string) {
+  return withTx(db, async (tx) => {
+    const { rows } = await tx.query(
+      `SELECT i.invoice_number, i.amount_total, s.name AS supplier_name, i.planfix_task_id,
+              EXISTS (SELECT 1 FROM outbox o WHERE o.entity_id = i.id AND o.status IN ('running', 'done')) AS pushed,
+              EXISTS (SELECT 1 FROM service_requests r WHERE r.supplier_invoice_id = i.id) AS linked
+         FROM supplier_invoices i JOIN contacts s ON s.id = i.supplier_id
+        WHERE i.id = $1 FOR UPDATE OF i`,
+      [id],
+    );
+    const i = rows[0];
+    if (!i) throw new NotFoundError(`invoice ${id} not found`);
+    if (i.planfix_task_id || i.pushed) throw new RuleError("אי אפשר למחוק: החשבונית כבר נשלחה ל־Planfix");
+    if (i.linked) throw new RuleError("אי אפשר למחוק: החשבונית שייכת לקריאת שירות");
+    await tx.query("UPDATE sync_log SET outbox_id = NULL WHERE outbox_id IN (SELECT id FROM outbox WHERE entity_id = $1)", [id]);
+    await tx.query("DELETE FROM outbox WHERE entity_id = $1", [id]);
+    await tx.query("DELETE FROM attachments WHERE entity_type = 'supplier_invoice' AND entity_id = $1", [id]);
+    await tx.query("DELETE FROM supplier_invoices WHERE id = $1", [id]);
+    await tx.query("INSERT INTO audit_log (user_id, action, entity_id, ok, detail) VALUES ($1, 'record.deleted', $2, true, $3)", [
+      actorId || null,
+      id,
+      { type: "invoice", invoice_number: i.invoice_number, supplier: i.supplier_name, amount_total: Number(i.amount_total) },
+    ]);
+    return { deleted: true };
+  });
 }
