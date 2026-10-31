@@ -161,6 +161,10 @@ const CHARGE_GROUP = {
 export const CREDIT_REASONS = ["טעות בחיוב", "יציאה מוקדמת", "זיכוי ספק שעובר ללקוח", "מחיקת הוצאה שלא תיגבה", "אחר"] as const;
 export const REFUND_METHODS = ["העברה בנקאית", "צ׳ק", "מזומן", "כרטיס אשראי"] as const;
 
+export const EXPENSE_TYPES = Object.entries(CHARGE_GROUP)
+  .filter(([, g]) => g === "expense")
+  .map(([name]) => name) as [string, ...string[]];
+
 export const CHARGE_TYPES = Object.keys(CHARGE_GROUP) as [keyof typeof CHARGE_GROUP, ...(keyof typeof CHARGE_GROUP)[]];
 
 type VatRule = { vat: boolean | null; source: "client_rent" | "client_expenses" | "planfix" | "planfix_unverified" };
@@ -260,13 +264,15 @@ export const chargeInput = z
 
 // Opens a charge in Planfix (template 21), where it is billed and collected.
 // Planfix computes the balance. The VAT split follows vatRules, and is left to
-// Planfix when the rule is not set.
+// Planfix when the rule is not set. A charge for a supplier invoice comes with
+// its split already worked out by the client's expense VAT basis (fixed).
 export async function createCharge(
   db: Db,
   crm: CrmAdapter,
   userId: string | null,
   clientId: string,
   input: z.infer<typeof chargeInput>,
+  fixed?: { net: number; vat: number },
 ) {
   const client = await db.query("SELECT name, planfix_id FROM contacts WHERE id = $1 AND kind = 'client'", [clientId]);
   if (!client.rows[0]) throw new NotFoundError(`client ${clientId} not found`);
@@ -289,8 +295,8 @@ export async function createCharge(
     vatRate(db),
   ]);
   const rule = type.get(input.chargeType)!;
-  if (rule.vat === null) throw new RuleError(missingVat(rule.source));
-  const split = rule.vat === null ? null : rule.vat ? splitVat(input.amountTotal, rate) : { net: input.amountTotal, vat: 0 };
+  if (rule.vat === null && !fixed) throw new RuleError(missingVat(rule.source));
+  const split = fixed ?? (rule.vat ? splitVat(input.amountTotal, rate) : { net: input.amountTotal, vat: 0 });
   if (input.creditFor) {
     const original = await db.query(
       `SELECT c.amount_total FROM planfix_charges c LEFT JOIN planfix_client_contracts k ON k.planfix_task_id = c.contract_task_id

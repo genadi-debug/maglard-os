@@ -21,6 +21,7 @@ export const FIELD_LABEL: Record<string, string> = {
   id_number: "ת.ז / ח.פ",
   vat_on_rent: "מע״מ על שכירות",
   vat_on_expenses: "מע״מ על הוצאות",
+  expense_vat_basis: "מע״מ על הוצאות מחושב על",
   withholding_tax: "ניכוי מס במקור",
   withholding_rate: "שיעור ניכוי במקור",
   ledger_card: "מספר כרטיס",
@@ -55,6 +56,7 @@ export function missingFields(c: Record<string, unknown>): string[] {
   );
   if (kind === "client" && c.withholding_tax === true && c.withholding_rate == null) missing.push("withholding_rate");
   if (kind === "client" && c.management_fee != null && !c.management_fee_basis) missing.push("management_fee_basis");
+  if (kind === "client" && c.vat_on_expenses === true && !c.expense_vat_basis) missing.push("expense_vat_basis");
   return missing.map((f) => FIELD_LABEL[f]);
 }
 
@@ -80,6 +82,9 @@ export const contactInput = z
     ledgerCard: text,
     vatOnRent: z.boolean().nullable().optional(),
     vatOnExpenses: z.boolean().nullable().optional(),
+    // What the VAT on an expense charged on is computed on: the supplier's
+    // amount before VAT ('net') or the whole supplier invoice ('gross').
+    expenseVatBasis: z.enum(["net", "gross"]).nullable().optional(),
     withholdingTax: z.boolean().nullable().optional(),
     withholdingRate: z.number().min(0).max(100).nullable().optional(),
     managementFee: z.number().min(0, "דמי ניהול לא יכולים להיות שליליים").max(1_000_000).nullable().optional(),
@@ -120,6 +125,7 @@ const COLUMN: Record<string, string> = {
   ledgerCard: "ledger_card",
   vatOnRent: "vat_on_rent",
   vatOnExpenses: "vat_on_expenses",
+  expenseVatBasis: "expense_vat_basis",
   withholdingTax: "withholding_tax",
   withholdingRate: "withholding_rate",
   managementFee: "management_fee",

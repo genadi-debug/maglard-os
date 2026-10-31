@@ -7,6 +7,7 @@ import { compressJson, serveAssets } from "./delivery.js";
 import * as archive from "../domain/archive.js";
 import * as files from "../domain/attachments.js";
 import * as billing from "../domain/billing.js";
+import * as expense from "../domain/expenseCharge.js";
 import * as invoices from "../domain/invoices.js";
 import * as contacts from "../domain/contacts.js";
 import { ForbiddenError } from "../domain/common.js";
@@ -68,6 +69,8 @@ const ROUTES: Record<string, Permission | null> = {
   "GET /clients/:id/billing": "billing.view",
   "POST /billing/refresh": "billing.view",
   "POST /clients/:id/charges": "billing.manage",
+  "GET /supplier-invoices/:ref/charge": "billing.manage",
+  "POST /supplier-invoices/:ref/charge": "billing.manage",
   "POST /clients/:id/bills": "billing.manage",
   "GET /clients/:id/rent-charges": "billing.manage",
   "POST /clients/:id/rent-charges": "billing.manage",
@@ -362,6 +365,14 @@ export function buildServer(
     return reply
       .status(201)
       .send(await billing.once(db, input.requestKey, () => billing.createCharge(db, crm, req.user?.id || null, req.params.id, input)));
+  });
+  // A supplier invoice charged on to the client, by the client's expense VAT basis.
+  type RefParams = { Params: { ref: string } };
+  app.get<RefParams>("/supplier-invoices/:ref/charge", async (req) => expense.expenseChargePreview(db, req.params.ref));
+  app.post<RefParams>("/supplier-invoices/:ref/charge", async (req, reply) => {
+    if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
+    const input = expense.expenseChargeInput.parse(req.body);
+    return reply.status(201).send(await expense.chargeExpense(db, opts.crm, req.user?.id || null, req.params.ref, input));
   });
   app.post<IdParams>("/clients/:id/bills", async (req, reply) => {
     if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
