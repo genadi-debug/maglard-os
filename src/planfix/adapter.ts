@@ -37,6 +37,16 @@ export interface CrmAdapter {
   setChargeReceived(chargeTaskId: number, received: number): Promise<void>;
   // A client contract's "מחיר חודשי" (10026), from which Planfix computes rent by days.
   setContractPrice(contractTaskId: number, monthlyPrice: number): Promise<void>;
+  // Cancels an accumulated bill: renamed "בוטל — ...", its charges list
+  // (9920) emptied, and each charge's link back to it (9976) removed.
+  cancelBill(c: BillCancel): Promise<void>;
+}
+
+export interface BillCancel {
+  billTaskId: number;
+  name: string;
+  // Each charge on the bill, with the bills it stays linked to.
+  charges: { chargeTaskId: number; keepBillTaskIds: number[] }[];
 }
 
 export interface BillPush {
@@ -665,6 +675,19 @@ export class PlanfixAdapter implements CrmAdapter {
   // Verified on maglardsand task 349: Planfix sums the linked charges, counts
   // the missing details, links each charge back to the bill, and opens the
   // bill in "חשבון — איסוף חיובים לדירות".
+  // POST task/{id} with name and a task-list field, as createBill writes it.
+  async cancelBill(c: BillCancel) {
+    await this.client.request("POST", `task/${c.billTaskId}`, {
+      name: c.name.startsWith("בוטל — ") ? c.name : `בוטל — ${c.name}`,
+      customFieldData: [{ field: { id: FIELD.bill.charges }, value: [] }],
+    });
+    for (const k of c.charges) {
+      await this.client.request("POST", `task/${k.chargeTaskId}`, {
+        customFieldData: [{ field: { id: FIELD.charge.bills }, value: k.keepBillTaskIds.map(task) }],
+      });
+    }
+  }
+
   createBill(b: BillPush): Promise<number> {
     const f = FIELD.bill;
     return this.createTask({

@@ -34,8 +34,9 @@ export async function clientBilling(db: Db, clientId: string) {
       `SELECT x.planfix_task_id, x.name, x.status, ${APARTMENT}, x.charge_type, x.vat_type, x.contract_task_id,
               to_char(x.period_from, 'YYYY-MM-DD') AS period_from, to_char(x.period_to, 'YYYY-MM-DD') AS period_to,
               x.amount_net, x.amount_vat, x.amount_total, x.received, x.balance,
-              (cardinality(x.bill_task_ids) > 0
-                 OR EXISTS (SELECT 1 FROM planfix_bills b WHERE x.planfix_task_id = ANY (b.charge_task_ids))) AS on_bill
+              (EXISTS (SELECT 1 FROM unnest(x.bill_task_ids) l(id) WHERE l.id NOT IN (SELECT bill_task_id FROM cancelled_bills))
+                 OR EXISTS (SELECT 1 FROM planfix_bills b WHERE x.planfix_task_id = ANY (b.charge_task_ids)
+                             AND b.planfix_task_id NOT IN (SELECT bill_task_id FROM cancelled_bills))) AS on_bill
          FROM (SELECT c.planfix_task_id, c.name, c.status, c.charge_type, c.vat_type, c.contract_task_id, c.period_from, c.period_to,
                       c.amount_net, c.amount_vat, c.amount_total, c.received, c.balance, c.bill_task_ids,
                       coalesce(c.client_planfix_id, k.client_planfix_id) AS client_planfix_id,
@@ -47,10 +48,12 @@ export async function clientBilling(db: Db, clientId: string) {
       [pf],
     ),
     db.query(
-      `SELECT planfix_task_id, name, status, to_char(period_from, 'YYYY-MM-DD') AS period_from,
-              to_char(period_to, 'YYYY-MM-DD') AS period_to, to_char(submitted_on, 'YYYY-MM-DD') AS submitted_on,
-              amount, computed_total, balance, missing_charges, approved, submission_verified
-         FROM planfix_bills WHERE client_planfix_id = $1 ORDER BY period_from DESC NULLS LAST, name`,
+      `SELECT b.planfix_task_id, b.name, b.status, to_char(b.period_from, 'YYYY-MM-DD') AS period_from,
+              to_char(b.period_to, 'YYYY-MM-DD') AS period_to, to_char(b.submitted_on, 'YYYY-MM-DD') AS submitted_on,
+              b.amount, b.computed_total, b.balance, b.missing_charges, b.approved, b.submission_verified,
+              k.cancelled_at, k.reason AS cancel_reason
+         FROM planfix_bills b LEFT JOIN cancelled_bills k ON k.bill_task_id = b.planfix_task_id
+        WHERE b.client_planfix_id = $1 ORDER BY (k.cancelled_at IS NOT NULL), b.period_from DESC NULLS LAST, b.name`,
       [pf],
     ),
     db.query(
@@ -392,6 +395,54 @@ export async function issueBill(
   return { planfixTaskId, name };
 }
 
+export const cancelBillInput = z.object({
+  reason: z.string().trim().min(2, "צריך לכתוב למה החשבון מבוטל").max(200),
+  requestKey,
+});
+
+// Cancels a bill that was not submitted to the client yet, so its charges can
+// go on a new bill (another period, other charges). In Planfix the bill is
+// renamed "בוטל — ..." and unlinked from its charges; nothing is deleted.
+export async function cancelBill(
+  db: Db,
+  crm: CrmAdapter,
+  userId: string | null,
+  clientId: string,
+  billTaskId: number,
+  input: z.infer<typeof cancelBillInput>,
+) {
+  const b = await clientBilling(db, clientId);
+  const bill = b.bills.find((x) => x.planfix_task_id === billTaskId);
+  if (!bill) throw new NotFoundError(`bill ${billTaskId} not found for this client`);
+  if (bill.cancelled_at) throw new RuleError("החשבון כבר בוטל.");
+  if (bill.submitted_on || bill.submission_verified) {
+    throw new RuleError("החשבון כבר הוגש ללקוח, ולכן לא מבטלים אותו. כדי לתקן סכום פותחים זיכוי או חיוב נוסף.");
+  }
+  if (bill.approved) throw new RuleError("גרסת המסמך של החשבון כבר אושרה ב־Planfix. כדי לבטל, צריך קודם להסיר את האישור שם.");
+  const { rows } = await db.query(
+    `SELECT c.planfix_task_id, c.bill_task_ids FROM planfix_charges c
+      WHERE $1 = ANY (c.bill_task_ids)
+         OR c.planfix_task_id = ANY (SELECT unnest(charge_task_ids) FROM planfix_bills WHERE planfix_task_id = $1)`,
+    [billTaskId],
+  );
+  const charges = rows.map((r) => ({
+    chargeTaskId: r.planfix_task_id as number,
+    keepBillTaskIds: ((r.bill_task_ids ?? []) as number[]).filter((id) => id !== billTaskId),
+  }));
+  await crm.cancelBill({ billTaskId, name: bill.name, charges });
+  await db.query(
+    "INSERT INTO cancelled_bills (bill_task_id, client_id, reason, charge_task_ids, cancelled_by) VALUES ($1, $2, $3, $4, $5)",
+    [billTaskId, clientId, input.reason, charges.map((c) => c.chargeTaskId), userId || null],
+  );
+  await db.query("INSERT INTO audit_log (user_id, action, entity_id, ok, detail) VALUES ($1, 'bill.cancelled', $2, true, $3)", [
+    userId,
+    clientId,
+    { planfixTaskId: billTaskId, name: bill.name, reason: input.reason, charges: charges.map((c) => c.chargeTaskId) },
+  ]);
+  await refreshPlanfixBilling(db, crm).catch(() => undefined);
+  return { planfixTaskId: billTaskId, charges: charges.length };
+}
+
 // The parts of the client's bill, in the order the bill lists them.
 export const BILL_SECTIONS = [
   ["rent", "שכירות"],
@@ -423,16 +474,17 @@ export async function getBill(db: Db, clientId: string, billTaskId: number) {
   const b = await clientBilling(db, clientId);
   const bill = b.bills.find((x) => x.planfix_task_id === billTaskId);
   if (!bill) throw new NotFoundError(`bill ${billTaskId} not found for this client`);
+  if (bill.cancelled_at) throw new RuleError(`החשבון בוטל: ${bill.cancel_reason}. החיובים שלו חזרו לרשימת החיובים שעוד לא נכללו בחשבון.`);
   // Each charge belongs to the first bill that took it.
   const links = await db.query(
     `SELECT b.planfix_task_id AS bill, x.planfix_task_id AS charge
        FROM planfix_bills b JOIN planfix_charges x
          ON x.planfix_task_id = ANY (b.charge_task_ids) OR b.planfix_task_id = ANY (x.bill_task_ids)
-      WHERE b.client_planfix_id = $1`,
+      WHERE b.client_planfix_id = $1 AND b.planfix_task_id NOT IN (SELECT bill_task_id FROM cancelled_bills)`,
     [b.client.planfix_id],
   );
   const order = (x: { period_to: string | null; planfix_task_id: number }) => `${x.period_to ?? "9999-12-31"}|${String(x.planfix_task_id).padStart(10, "0")}`;
-  const billsInOrder = [...b.bills].sort((x, y) => order(x).localeCompare(order(y)));
+  const billsInOrder = b.bills.filter((x) => !x.cancelled_at).sort((x, y) => order(x).localeCompare(order(y)));
   const rank = new Map(billsInOrder.map((x, i) => [x.planfix_task_id, i]));
   const billOf = new Map<number, number>();
   for (const l of links.rows) {
@@ -487,55 +539,75 @@ export async function getBill(db: Db, clientId: string, billTaskId: number) {
 }
 
 const MONTH = z.string().regex(/^\d{4}-\d{2}$/, "חודש בפורמט YYYY-MM");
-export const rentInput = z.object({ month: MONTH, requestKey });
+// A month, or any span of days: from a date to a date, both included.
+export const rentRange = z
+  .union([z.object({ month: MONTH }), z.object({ from: isoDate, to: isoDate })])
+  .transform((v) => ("month" in v ? monthSpan(v.month) : v))
+  .refine((v) => v.to >= v.from, { message: "התקופה מסתיימת לפני שהיא מתחילה", path: ["to"] })
+  .refine((v) => Date.parse(v.to) - Date.parse(v.from) <= 366 * 86_400_000, { message: "עד שנה בכל פעם", path: ["to"] });
+export const rentInput = z.intersection(rentRange, z.object({ requestKey }));
 
-// The month's rent per client contract: each contract with a monthly price
-// that runs in the month, over the days it runs. `charged` when a rent charge
-// on that contract already covers part of the month.
-export async function rentPlan(db: Db, clientId: string, month: string) {
-  MONTH.parse(month);
+function monthSpan(month: string) {
+  const [y, m] = month.split("-").map(Number);
+  return { from: `${month}-01`, to: new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10) };
+}
+
+// The rent per client contract over a span: one piece per calendar month the
+// span touches, over the days the contract runs in it. Planfix charges a
+// piece by days (the monthly price over the month's days); the estimate here
+// is the same sum. `charged` when a rent charge on that contract already
+// covers part of the piece.
+export async function rentPlan(db: Db, clientId: string, range: { from: string; to: string }) {
   const client = await db.query("SELECT name, planfix_id FROM contacts WHERE id = $1 AND kind = 'client'", [clientId]);
   if (!client.rows[0]) throw new NotFoundError(`client ${clientId} not found`);
   const { rows } = await db.query(
-    `WITH m AS (SELECT $2::date AS first, ($2::date + interval '1 month - 1 day')::date AS last)
-     SELECT x.planfix_task_id AS contract_task_id, x.name AS contract_name, x.engagement_task_id, x.monthly_price,
-            coalesce(e.apartment_code, nullif(split_part(x.engagement_name, ' — ', 1), '')) AS apartment_code,
-            to_char(greatest(m.first, coalesce(x.move_in_on, m.first)), 'YYYY-MM-DD') AS period_from,
-            to_char(least(m.last, coalesce(x.move_out_on, m.last)), 'YYYY-MM-DD') AS period_to,
+    `WITH m AS (
+       SELECT greatest(g::date, $2::date) AS first, least((g + interval '1 month - 1 day')::date, $3::date) AS last,
+              extract(day FROM g + interval '1 month - 1 day')::int AS month_days
+         FROM generate_series(date_trunc('month', $2::date), $3::date, interval '1 month') g),
+     p AS (
+       SELECT x.*, m.month_days,
+              greatest(m.first, coalesce(x.move_in_on, m.first)) AS p_from,
+              least(m.last, coalesce(x.move_out_on, m.last)) AS p_to
+         FROM planfix_client_contracts x CROSS JOIN m
+        WHERE x.client_planfix_id = $1 AND x.monthly_price > 0 AND x.engagement_task_id IS NOT NULL)
+     SELECT p.planfix_task_id AS contract_task_id, p.name AS contract_name, p.engagement_task_id, p.monthly_price,
+            coalesce(e.apartment_code, nullif(split_part(p.engagement_name, ' — ', 1), '')) AS apartment_code,
+            to_char(p.p_from, 'YYYY-MM-DD') AS period_from, to_char(p.p_to, 'YYYY-MM-DD') AS period_to,
+            (p.p_to - p.p_from + 1) AS days, p.month_days,
+            round(p.monthly_price * (p.p_to - p.p_from + 1) / p.month_days, 2) AS estimate,
             EXISTS (SELECT 1 FROM planfix_charges c
-                     WHERE c.contract_task_id = x.planfix_task_id AND c.charge_type = 'שכר דירה'
-                       AND c.period_from <= m.last AND c.period_to >= m.first) AS charged
-       FROM planfix_client_contracts x CROSS JOIN m
-       LEFT JOIN engagements e ON e.planfix_task_id = x.engagement_task_id
-      WHERE x.client_planfix_id = $1 AND x.monthly_price > 0 AND x.engagement_task_id IS NOT NULL
-        AND coalesce(x.move_in_on, m.first) <= m.last AND coalesce(x.move_out_on, m.last) >= m.first
-      ORDER BY apartment_code, x.planfix_task_id`,
-    [client.rows[0].planfix_id, `${month}-01`],
+                     WHERE c.contract_task_id = p.planfix_task_id AND c.charge_type = 'שכר דירה'
+                       AND c.period_from <= p.p_to AND c.period_to >= p.p_from) AS charged
+       FROM p LEFT JOIN engagements e ON e.planfix_task_id = p.engagement_task_id
+      WHERE p.p_from <= p.p_to
+      ORDER BY apartment_code, p.planfix_task_id, p.p_from`,
+    [client.rows[0].planfix_id, range.from, range.to],
   );
-  return { client: client.rows[0], month, contracts: rows };
+  return { client: client.rows[0], ...range, contracts: rows };
 }
 
-// Opens the month's rent charges in Planfix, one per contract not yet charged.
-// Planfix computes the rent by days from the contract; the amount is set to
-// that figure and split by the client's VAT on rent.
+// Opens rent charges in Planfix, one per contract and month piece not yet
+// charged. Planfix computes the rent by days from the contract; the amount is
+// set to that figure and split by the client's VAT on rent.
 export async function createRentCharges(
   db: Db,
   crm: CrmAdapter,
   userId: string | null,
   clientId: string,
-  month: string,
+  range: { from: string; to: string },
 ) {
-  const plan = await rentPlan(db, clientId, month);
+  const plan = await rentPlan(db, clientId, range);
   const pf = plan.client.planfix_id as number | null;
   if (!pf) throw new RuleError("הלקוח עוד לא נשלח ל־Planfix. אפשר לחייב אחרי הסנכרון.");
   const todo = plan.contracts.filter((k) => !k.charged);
-  if (!todo.length) throw new RuleError("אין חוזים שעוד לא חויבו בשכ״ד לחודש הזה");
+  if (!todo.length) throw new RuleError("אין חוזים שעוד לא חויבו בשכ״ד בתקופה הזו");
   const [rules, rate] = await Promise.all([vatRules(db, clientId), vatRate(db)]);
   const rule = rules.get("שכר דירה")!;
   if (rule.vat === null) throw new RuleError(missingVat(rule.source));
-  const [y, m] = month.split("-");
   const results = [];
   for (const k of todo) {
+    const [y, m] = (k.period_from as string).split("-");
     const name = `${k.apartment_code ?? "—"} — שכר דירה — ${m}/${y} — ${plan.client.name}`;
     const planfixTaskId = await crm.createCharge({
       name,
@@ -552,20 +624,20 @@ export async function createRentCharges(
     });
     const rent = await crm.readRentByDays(planfixTaskId);
     if (rent == null) {
-      results.push({ planfixTaskId, apartment_code: k.apartment_code, amount: null, problem: "Planfix לא חישב שכ״ד לחיוב. יש להשלים את הסכום ב־Planfix." });
+      results.push({ planfixTaskId, apartment_code: k.apartment_code, period_from: k.period_from, period_to: k.period_to, amount: null, problem: "Planfix לא חישב שכ״ד לחיוב. יש להשלים את הסכום ב־Planfix." });
       continue;
     }
-    const split = rule.vat === null ? null : rule.vat ? splitVat(rent, rate) : { net: rent, vat: 0 };
+    const split = rule.vat ? splitVat(rent, rate) : { net: rent, vat: 0 };
     await crm.setChargeAmount(planfixTaskId, rent, split);
-    results.push({ planfixTaskId, apartment_code: k.apartment_code, amount: rent, problem: null });
+    results.push({ planfixTaskId, apartment_code: k.apartment_code, period_from: k.period_from, period_to: k.period_to, amount: rent, problem: null });
   }
   await db.query("INSERT INTO audit_log (user_id, action, entity_id, ok, detail) VALUES ($1, 'rent.charged', $2, true, $3)", [
     userId,
     clientId,
-    { month, charges: results },
+    { from: range.from, to: range.to, charges: results },
   ]);
   await refreshPlanfixBilling(db, crm).catch(() => undefined);
-  return { month, created: results };
+  return { ...range, created: results };
 }
 
 export const amountInput = z.object({

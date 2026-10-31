@@ -7,6 +7,9 @@ const esc = (v) =>
 const money = (n) => (n == null ? "" : `₪${Number(n).toLocaleString("he-IL", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`);
 const date = (d) => (d ? new Date(d).toLocaleDateString("he-IL") : "");
 const today = () => new Date().toISOString().slice(0, 10);
+// The first and last day of a month given as YYYY-MM.
+const monthStart = (m) => `${m}-01`;
+const monthEnd = (m) => new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.slice(5, 7)), 0)).toISOString().slice(0, 10);
 
 const STATUS = {
   new: ["קריאה חדשה", "warn"],
@@ -1952,7 +1955,7 @@ async function billingSection(clientId) {
       <div><span>הוחזר ללקוח</span><b>${money(b.totals.refunded)}</b></div>
       <div><span>יתרה לגבייה ב־Planfix</span><b>${money(b.totals.balance)}</b></div>
       <div><span>חיובים שעוד לא נכללו בחשבון</span><b>${b.unbilled.length} · ${money(b.totals.unbilled)}</b></div>
-      <div><span>חשבונות מצטברים</span><b>${b.bills.length}</b></div>
+      <div><span>חשבונות מצטברים</span><b>${b.bills.filter((x) => !x.cancelled_at).length}</b></div>
     </div>
     <h3>חוזי שכירות ללקוח</h3>
     <div id="contracts">${contractsTable(b)}</div>
@@ -1963,11 +1966,18 @@ async function billingSection(clientId) {
     ${
       b.bills.length
         ? `<div class="wrap"><table class="table"><thead><tr><th>חשבון</th><th>תקופה</th><th>סכום</th><th>יתרה לגבייה</th>
-          <th>חיובים חסרים</th><th>הוגש</th><th>סטטוס</th></tr></thead><tbody>${b.bills
-            .map(
-              (x) => `<tr class="click" data-href="#/clients/${clientId}/bills/${x.planfix_task_id}" tabindex="0"><td>${esc(x.name)}</td><td>${span(x.period_from, x.period_to)}</td><td>${money(x.computed_total ?? x.amount)}</td>
+          <th>חיובים חסרים</th><th>הוגש</th><th>סטטוס</th>${allowed("billing.manage") ? "<th></th>" : ""}</tr></thead><tbody>${b.bills
+            .map((x) =>
+              x.cancelled_at
+                ? `<tr class="muted"><td>${esc(x.name)}</td><td>${span(x.period_from, x.period_to)}</td><td>—</td><td>—</td><td>—</td><td>—</td>
+                   <td>${pill(["בוטל", ""])} ${date(x.cancelled_at)} · ${esc(x.cancel_reason)}</td>${allowed("billing.manage") ? "<td></td>" : ""}</tr>`
+                : `<tr class="click" data-href="#/clients/${clientId}/bills/${x.planfix_task_id}" tabindex="0"><td>${esc(x.name)}</td><td>${span(x.period_from, x.period_to)}</td><td>${money(x.computed_total ?? x.amount)}</td>
               <td><b>${money(x.balance)}</b></td><td>${x.missing_charges ? pill([`${x.missing_charges} חסרים`, "warn"]) : "—"}</td>
-              <td>${x.submitted_on ? date(x.submitted_on) : "—"}</td><td>${esc(x.status || "")}</td></tr>`,
+              <td>${x.submitted_on ? date(x.submitted_on) : "—"}</td><td>${esc(x.status || "")}</td>${
+                allowed("billing.manage")
+                  ? `<td>${x.submitted_on || x.submission_verified || x.approved ? "" : `<button class="btn" data-cancel-bill="${x.planfix_task_id}">ביטול חשבון</button>`}</td>`
+                  : ""
+              }</tr>`,
             )
             .join("")}</tbody></table></div>`
         : `<div class="empty">אין חשבונות ב־Planfix</div>`
@@ -2128,15 +2138,40 @@ function billDialog(clientId) {
   total();
 }
 
-// The month's rent, one charge per contract not yet charged. Planfix computes
-// the rent by days from the contract.
+// Cancels a bill not submitted yet: its charges go back to the list of
+// charges not on a bill, ready for a new bill over other dates.
+function cancelBillDialog(clientId, billId) {
+  const x = billing.bills.find((b) => b.planfix_task_id === billId);
+  const key = crypto.randomUUID();
+  dialog(
+    "ביטול חשבון",
+    `<p class="full">${esc(x.name)} · ${span(x.period_from, x.period_to)} · ${money(x.computed_total ?? x.amount)}</p>
+     <p class="full sub">החשבון יסומן "בוטל" ב־Planfix (לא נמחק), והחיובים שבו יחזרו לרשימת החיובים שעוד לא נכללו בחשבון.
+       אחר כך אפשר לפתוח חיובי שכירות לתאריכים אחרים ולהפיק חשבון חדש. חשבון שכבר הוגש ללקוח לא מבטלים.</p>` +
+      field("reason", "למה מבטלים", 'required minlength="2" maxlength="200" placeholder="למשל: הפקה מחדש מ־7.10 עד 15.11"', true),
+    async (v) => {
+      const r = await api("POST", `/clients/${clientId}/bills/${billId}/cancel`, { reason: v.reason, requestKey: key });
+      toast(`החשבון בוטל, ${r.charges} חיובים חזרו לרשימה`);
+      view.querySelector("#billing").innerHTML = await billingSection(clientId);
+      wireBilling(clientId);
+    },
+    "ביטול החשבון",
+  );
+}
+
+// Rent from a date to a date, one charge per contract and month piece not yet
+// charged. Planfix computes each piece by days from the contract.
 function rentDialog(clientId) {
   const key = crypto.randomUUID();
   const d = dialog(
-    "חיובי שכירות לחודש",
-    field("month", "חודש", `type="month" required value="${today().slice(0, 7)}"`) + `<div class="full" id="rent-plan"></div>`,
+    "חיובי שכירות",
+    field("month", "חודש שלם", `type="month" value="${today().slice(0, 7)}"`) +
+      `<p class="sub" style="align-self:end">או תקופה בין תאריכים:</p>` +
+      field("from", "מתאריך", `type="date" required value="${monthStart(today().slice(0, 7))}"`) +
+      field("to", "עד תאריך (כולל)", `type="date" required value="${monthEnd(today().slice(0, 7))}"`) +
+      `<div class="full" id="rent-plan"></div>`,
     async (v) => {
-      const r = await api("POST", `/clients/${clientId}/rent-charges`, { month: v.month, requestKey: key });
+      const r = await api("POST", `/clients/${clientId}/rent-charges`, { from: v.from, to: v.to, requestKey: key });
       const problems = r.created.filter((c) => c.problem);
       toast(`נפתחו ${r.created.length} חיובי שכ״ד ב־Planfix${problems.length ? `, ${problems.length} צריכים השלמה ב־Planfix` : ""}`);
       view.querySelector("#billing").innerHTML = await billingSection(clientId);
@@ -2148,21 +2183,33 @@ function rentDialog(clientId) {
   const load = async () => {
     box.textContent = "בודק…";
     try {
-      const p = await api("GET", `/clients/${clientId}/rent-charges?month=${d.querySelector("form").month.value}`);
+      const f = d.querySelector("form");
+      const p = await api("GET", `/clients/${clientId}/rent-charges?from=${f.from.value}&to=${f.to.value}`);
       const todo = p.contracts.filter((k) => !k.charged);
+      const sum = todo.reduce((t, k) => t + Number(k.estimate), 0);
       box.innerHTML = p.contracts.length
-        ? `${p.contracts
+        ? `<div class="wrap"><table class="table"><thead><tr><th>דירה</th><th>תקופה</th><th>ימים</th><th>מחיר חודשי</th><th>לפי ימים</th><th></th></tr></thead><tbody>${p.contracts
             .map(
-              (k) => `<div>${esc(k.apartment_code || "—")} · ${span(k.period_from, k.period_to)} · ${money(k.monthly_price)} לחודש ·
-                ${k.charged ? pill(["כבר חויב", ""]) : pill(["ייפתח", "good"])}</div>`,
+              (k) => `<tr${k.charged ? ' class="muted"' : ""}><td>${esc(k.apartment_code || "—")}</td><td>${span(k.period_from, k.period_to)}</td>
+                <td>${k.days} מתוך ${k.month_days}</td><td>${money(k.monthly_price)}</td><td>${money(k.estimate)}</td>
+                <td>${k.charged ? pill(["כבר חויב", ""]) : pill(["ייפתח", "good"])}</td></tr>`,
             )
-            .join("")}<p class="sub">${todo.length} חיובים ייפתחו. הסכום לפי ימים יחושב ב־Planfix מתוך החוזה.</p>`
-        : `<p class="sub">אין חוזים עם מחיר חודשי שפעילים בחודש הזה</p>`;
+            .join("")}</tbody></table></div>
+            <p class="sub">${todo.length} חיובים ייפתחו, בערך ${money(sum)}. חודש חלקי מחושב לפי ימים: מחיר חודשי × ימים ÷ ימי החודש. הסכום הסופי של כל חיוב נקבע ב־Planfix מתוך החוזה.</p>`
+        : `<p class="sub">אין חוזים עם מחיר חודשי שפעילים בתקופה הזו</p>`;
     } catch (err) {
       box.textContent = err.message;
     }
   };
-  d.querySelector("form").month.addEventListener("change", load);
+  const f = d.querySelector("form");
+  f.month.addEventListener("change", () => {
+    if (!f.month.value) return;
+    f.from.value = monthStart(f.month.value);
+    f.to.value = monthEnd(f.month.value);
+    load();
+  });
+  f.from.addEventListener("change", () => ((f.month.value = ""), load()));
+  f.to.addEventListener("change", () => ((f.month.value = ""), load()));
   load();
 }
 
@@ -2287,6 +2334,13 @@ function wireBilling(clientId) {
   view.querySelector("#new-charge")?.addEventListener("click", () => chargeDialog(clientId));
   view.querySelector("#issue-bill")?.addEventListener("click", () => billDialog(clientId));
   view.querySelector("#rent-charges")?.addEventListener("click", () => rentDialog(clientId));
+  view.querySelectorAll("[data-cancel-bill]").forEach((btn) =>
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      cancelBillDialog(clientId, Number(btn.dataset.cancelBill));
+    }),
+  );
+  view.querySelectorAll("[data-cancel-bill]").forEach((btn) => btn.addEventListener("keydown", (e) => e.stopPropagation()));
   view.querySelectorAll("#billing [data-amount]").forEach((btn) =>
     btn.addEventListener("click", () => {
       const c = billing.unbilled.find((x) => String(x.planfix_task_id) === btn.dataset.amount);
