@@ -129,8 +129,18 @@ function nextStep(r) {
     }
     case "with_supplier":
       return { text: "כשהספק סיים: לקלוט את החשבונית שלו", action: "invoice", label: "קליטת חשבונית ספק" };
-    case "awaiting_resolution":
+    case "awaiting_resolution": {
+      const inv = r.invoice;
+      if (inv?.approval_state === "pending") {
+        const c = inv.check;
+        const missing = c.lines.filter((l) => l.startsWith("חסר:")).join(" · ") || "יש לבדוק שוב את החשבונית";
+        const text = `החשבונית ממתינה לאישור חריגה: אין להמשיך לחיוב הלקוח ולא לסגור. ${missing}`;
+        if (c.missing.includes("client")) return { text, action: "approve", label: "רישום אישור לקוח מחדש" };
+        if (c.missing.includes("manager") && r.approval?.status === "pending") return { text, action: "decide", label: "לתיבת האישורים" };
+        return { text, action: "review", label: "בדיקה מחדש" };
+      }
       return { text: "לוודא מול הפונה שהתקלה נפתרה ולסגור", action: "close", label: "סגירת קריאה" };
+    }
     default:
       return null;
   }
@@ -328,7 +338,9 @@ async function stepDialog(r, action) {
         field(
           "amount",
           "הלקוח אישר עד סכום (₪, כולל מע״מ)",
-          `type="number" min="0.01" step="0.01" required ${r.estimated_cost == null ? "" : `value="${r.estimated_cost}"`}`,
+          `type="number" min="0.01" step="0.01" required ${
+            r.invoice?.check?.clientAmount != null ? `value="${r.invoice.check.clientAmount}"` : r.estimated_cost == null ? "" : `value="${r.estimated_cost}"`
+          }`,
         ) +
         field("reference", "אסמכתה (מייל, הודעה, מסמך)", "required", true) +
         `<p class="full sub">אישור מנהל לחריגה אינו מחליף את אישור הלקוח. אם העלות תעלה מעל הסכום שאושר, יידרש אישור לקוח מחדש.</p>`,
@@ -336,8 +348,16 @@ async function stepDialog(r, action) {
         if (!v.approverName.trim()) throw new Error("צריך לרשום מי אישר אצל הלקוח");
         if (!(Number(v.amount) > 0)) throw new Error("צריך לרשום את הסכום שהלקוח אישר, כולל מע״מ");
         if (!v.reference.trim()) throw new Error("צריך אסמכתה: מייל, הודעה או מסמך");
-        await api("POST", `${base}/client-approval`, { reference: v.reference, method: v.method, approverName: v.approverName, amount: Number(v.amount) });
-        done("אישור הלקוח נרשם");
+        const res = await api("POST", `${base}/client-approval`, { reference: v.reference, method: v.method, approverName: v.approverName, amount: Number(v.amount) });
+        done(
+          res.unchanged
+            ? "האישור הזה כבר רשום"
+            : res.invoice?.state === "approved"
+              ? "אישור הלקוח נרשם. החשבונית אושרה להמשך חיוב"
+              : res.invoice?.state === "pending"
+                ? "אישור הלקוח נרשם. החשבונית עדיין ממתינה לאישור חריגה"
+                : "אישור הלקוח נרשם",
+        );
       },
     );
   } else if (action === "invoice") {
@@ -350,15 +370,31 @@ async function stepDialog(r, action) {
       async (v) => {
         const net = Number(v.amountNet);
         const vat = Number(v.amountVat);
-        await api("POST", `${base}/invoice`, {
+        const res = await api("POST", `${base}/invoice`, {
           invoiceNumber: v.invoiceNumber,
           invoiceDate: v.invoiceDate,
           amountNet: net,
           amountVat: vat,
           amountTotal: Math.round((net + vat) * 100) / 100,
         });
-        done("החשבונית נקלטה ונשלחת ל-Planfix");
+        done(
+          res.approval === "pending"
+            ? "החשבונית נשמרה וממתינה לאישור חריגה: הסכום מעל האישורים שניתנו"
+            : "החשבונית נקלטה ונשלחת ל-Planfix",
+        );
       },
+    );
+  } else if (action === "review") {
+    const rejected = r.invoice?.check?.lines.some((l) => l.includes("המנהל דחה"));
+    dialog(
+      "בדיקה מחדש של החשבונית",
+      `<p class="full">החשבונית תיבדק שוב מול האישורים ומול כרטיס הלקוח.${rejected ? " המנהל דחה את הבקשה הקודמת: כדי לבקש שוב צריך לנמק." : ""}</p>` +
+        (rejected ? `<label class="full">נימוק לבקשה החוזרת<textarea name="reason" rows="2" required></textarea></label>` : ""),
+      async (v) => {
+        const res = await api("POST", `${base}/invoice-review`, { reason: v.reason?.trim() || undefined });
+        done(res.state === "approved" ? "החשבונית אושרה להמשך חיוב" : res.asked ? "נשלחה בקשה לאישור מנהל" : "החשבונית עדיין ממתינה לאישור חריגה");
+      },
+      "בדיקה",
     );
   } else if (action === "close") {
     dialog("סגירת קריאה", `<p class="full">לסגור את הקריאה "${esc(r.subject)}"?</p>`, async () => {
@@ -732,7 +768,13 @@ async function requestView(id) {
     ${
       r.charge_to === "client"
         ? `<div class="card"><div class="grow"><b>אישור לקוח</b> ${
-            clientCovers(r) ? pill(["אושר", "good"]) : r.client_approved_at ? pill(["נדרש אישור מחדש", "warn"]) : pill(["ממתין לאישור הלקוח", "warn"])
+            r.invoice?.check?.missing.includes("client")
+              ? pill(["החשבונית מעל האישור: נדרש אישור מחדש", "warn"])
+              : clientCovers(r)
+                ? pill(["אושר", "good"])
+                : r.client_approved_at
+                  ? pill(["נדרש אישור מחדש", "warn"])
+                  : pill(["ממתין לאישור הלקוח", "warn"])
           }<br><small>${
             r.client_approved_at
               ? `${r.client_approver_name ? `${esc(r.client_approver_name)} אישר/ה ` : ""}עד ${money(r.client_approved_amount)} כולל מע״מ · ${esc(APPROVAL_METHOD[r.client_approval_method] || "")}: ${esc(r.client_approval_ref)} · נרשם על ידי ${esc(r.client_approved_by_name || "—")} · ${new Date(r.client_approved_at).toLocaleString("he-IL")}`
@@ -748,13 +790,68 @@ async function requestView(id) {
           }</small></div></div>`
         : ""
     }
+    ${invoiceApprovalCard(r)}
+    ${approvalHistory(r)}
     ${await filesSection("service_request", r.id, allowed("requests.manage"))}
     <h2>היסטוריה</h2>
     <ul class="timeline">${r.events
       .map((e) => `<li>${esc(STATUS[e.to_status][0])} ${e.note ? `· ${esc(e.note)}` : ""} <small>${new Date(e.created_at).toLocaleString("he-IL")}</small></li>`)
       .join("")}</ul>`;
   view.querySelector("#next")?.addEventListener("click", () => stepDialog(r, n.action));
+  view.querySelector("#invoice-review")?.addEventListener("click", () => stepDialog(r, "review"));
   wireFiles();
+}
+
+// The supplier's invoice against the approvals: what was approved, the new
+// amount, the difference and which approval is missing, as the server checks it.
+function invoiceApprovalCard(r) {
+  const inv = r.invoice;
+  if (!inv) return "";
+  const STATE = { approved: ["מאושרת להמשך חיוב", "good"], pending: ["ממתין לאישור חריגה", "warn"] };
+  const state = inv.approval_state ? pill(STATE[inv.approval_state]) : pill(["נקלטה לפני בקרת האישורים", ""]);
+  const c = inv.check;
+  return `<div class="card"><div class="grow"><b>חשבונית ספק ${esc(inv.invoice_number)}</b> ${state}
+    ${inv.charged_as ? pill([`חויבה ללקוח (#${inv.charged_as})`, "good"]) : ""}
+    <ul class="approval-lines">${c.lines
+      .map((l) => `<li class="${l.startsWith("חסר:") || l.startsWith("אי אפשר") ? "bad" : ""}">${esc(l)}</li>`)
+      .join("")}</ul>
+    ${!c.ok && inv.approval_state === null ? `<small>החשבונית נקלטה לפני הבקרה ולא שונתה. חיוב הלקוח עליה ייבדק בזמן החיוב.</small>` : ""}
+    </div>${
+      r.status === "awaiting_resolution" && allowed("requests.manage") && !inv.charged_as
+        ? `<button class="btn" id="invoice-review">בדיקה מחדש</button>`
+        : ""
+    }</div>`;
+}
+
+// Every approval given or asked for on the request, oldest first.
+function approvalHistory(r) {
+  const cl = r.client_approvals || [];
+  const mg = r.approvals || [];
+  if (!cl.length && !mg.length) return "";
+  const MG = { pending: "ממתין", approved: "אושר", rejected: "נדחה", superseded: "הוחלף" };
+  const when = (t) => (t ? new Date(t).toLocaleString("he-IL") : "");
+  return `<details class="history"><summary>היסטוריית אישורים (${cl.length + mg.length})</summary>
+    ${
+      cl.length
+        ? `<h3>אישורי לקוח</h3><ul class="timeline">${cl
+            .map(
+              (c) => `<li>${money(c.amount)} כולל מע״מ · ${esc(c.approver_name || "—")} · ${esc(APPROVAL_METHOD[c.method] || c.method || "")}: ${esc(c.reference || "")}
+              · נרשם על ידי ${esc(c.recorded_by_name || "—")}${c.migrated ? " (הועתק מהרשומה הקודמת)" : ""} <small>${when(c.recorded_at)}</small></li>`,
+            )
+            .join("")}</ul>`
+        : ""
+    }
+    ${
+      mg.length
+        ? `<h3>אישורי מנהל</h3><ul class="timeline">${mg
+            .map(
+              (a) => `<li>${money(a.amount)} (סף ${money(a.threshold)}) · ${a.supplier_invoice_id ? "חשבונית" : "הערכת עלות"} · ${esc(MG[a.status])}
+              · ביקש: ${esc(a.requested_by_name || "—")}${a.decided_by_name ? ` · ${esc(a.decided_by_name)}${a.decision_note ? `: ${esc(a.decision_note)}` : ""}` : ""}
+              · ${esc(a.reason)} <small>${when(a.decided_at || a.created_at)}</small></li>`,
+            )
+            .join("")}</ul>`
+        : ""
+    }</details>`;
 }
 
 // ---------- files ----------
@@ -828,7 +925,7 @@ async function approvalsView(params) {
         ? rows
             .map(
               (a) => `<div class="card"><div class="grow"><b><a href="#/requests/${a.service_request_id}">${esc(a.subject)}</a></b>
-              ${urgencyPill(a.urgency)} · ${money(a.amount)}<br>
+              ${urgencyPill(a.urgency)} · ${money(a.amount)}${a.supplier_invoice_id ? ` · ${pill([`חשבונית ${a.invoice_number}`, "warn"])}` : ""}<br>
               <small>${esc(a.apartment_code)} · ${esc(a.address)} · ספק: ${esc(a.supplier_name || "")} · על חשבון ${esc(CHARGE[a.charge_to] || "")}
               · ביקש: ${esc(a.requested_by_name || "")}</small><br>${esc(a.reason)}
               ${a.decided_by_name ? `<br><small>${a.status === "approved" ? "אושרה" : "נדחתה"} על ידי ${esc(a.decided_by_name)} ${a.decision_note ? `: ${esc(a.decision_note)}` : ""}</small>` : ""}</div>
@@ -1402,6 +1499,10 @@ async function expenseChargeDialog(ref) {
     "חיוב הלקוח על חשבונית ספק",
     facts +
       (p.chargedAs ? `<div class="missing full">החשבונית כבר חויבה ללקוח (חיוב #${p.chargedAs} ב־Planfix).</div>` : sum) +
+      (!p.chargedAs && p.blocked
+        ? `<div class="missing full"><b>${p.check.approvalState === "pending" ? "ממתין לאישור חריגה: " : ""}אי אפשר לחייב לפני האישורים</b>
+            <ul>${p.check.lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul></div>`
+        : "") +
       `<label>סוג חיוב<select name="chargeType">${options(p.chargeTypes.map((t) => [t, t]), "תפעול ואחזקה")}</select></label>` +
       field("periodFrom", "תקופה מתאריך", `type="date" required value="${from}"`) +
       field("periodTo", "עד תאריך", `type="date" required value="${to}"`),
@@ -1418,7 +1519,7 @@ async function expenseChargeDialog(ref) {
     },
     "פתיחת חיוב",
   );
-  d.querySelector(".primary").disabled = !a || !!p.chargedAs;
+  d.querySelector(".primary").disabled = !a || !!p.chargedAs || p.blocked;
 }
 
 // The supplier's monthly account: the month's invoices, totals and due dates.
@@ -2849,6 +2950,7 @@ const AUDIT_ACTION = {
   "POST /service-requests/:id/client-approval": "רישום אישור לקוח",
   "POST /service-requests/:id/invoice": "קליטת חשבונית לקריאה",
   "POST /service-requests/:id/close": "סגירת קריאה",
+  "POST /service-requests/:id/invoice-review": "בדיקה מחדש של חשבונית מול האישורים",
   "POST /supplier-invoices": "קליטת חשבונית ספק",
   "POST /sync/:id/retry": "שליחה חוזרת ל-Planfix",
   "POST /users": "יצירת משתמש",

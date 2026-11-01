@@ -63,6 +63,7 @@ const ROUTES: Record<string, Permission | null> = {
   "POST /service-requests/:id/client-approval": "requests.manage",
   "POST /service-requests/:id/close": "requests.manage",
   "POST /service-requests/:id/invoice": "invoices.create",
+  "POST /service-requests/:id/invoice-review": "requests.manage",
   "GET /supplier-invoices": "invoices.view",
   "POST /supplier-invoices": "invoices.create",
   "POST /supplier-invoices/refresh": "invoices.view",
@@ -478,7 +479,10 @@ export function buildServer(
     sr.recordClientApproval(db, req.user!, req.params.id, sr.approvalInput.parse(req.body)),
   );
   app.post<IdParams>("/service-requests/:id/invoice", async (req, reply) =>
-    reply.status(201).send(await sr.addSupplierInvoice(db, req.params.id, sr.invoiceInput.parse(req.body))),
+    reply.status(201).send(await sr.addSupplierInvoice(db, req.user!, req.params.id, sr.invoiceInput.parse(req.body))),
+  );
+  app.post<IdParams>("/service-requests/:id/invoice-review", async (req) =>
+    sr.reviewInvoice(db, req.user!, req.params.id, sr.reviewInput.parse(req.body ?? {})),
   );
   app.post<IdParams>("/service-requests/:id/close", async (req) => sr.closeRequest(db, req.params.id));
 
