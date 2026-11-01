@@ -74,6 +74,8 @@ const ROUTES: Record<string, Permission | null> = {
   "POST /clients/:id/bills": "billing.manage",
   "GET /clients/:id/rent-charges": "billing.manage",
   "POST /clients/:id/rent-charges": "billing.manage",
+  "GET /clients/:id/rent-bill": "billing.manage",
+  "POST /clients/:id/rent-bill": "billing.manage",
   "POST /clients/:id/charges/:chargeId/amount": "billing.manage",
   "POST /clients/:id/contracts/:contractId/price": "billing.manage",
   "POST /clients/:id/credits/:creditId/refunds": "billing.manage",
@@ -399,6 +401,17 @@ export function buildServer(
     return reply
       .status(201)
       .send(await billing.once(db, requestKey, () => billing.createRentCharges(db, crm, req.user?.id || null, req.params.id, { from, to })));
+  });
+  app.get<{ Params: { id: string }; Querystring: { month?: string } }>("/clients/:id/rent-bill", async (req) =>
+    billing.rentBillPlan(db, req.params.id, req.query.month ?? new Date().toISOString().slice(0, 7)),
+  );
+  app.post<IdParams>("/clients/:id/rent-bill", async (req, reply) => {
+    if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
+    const { month, pieces, requestKey } = billing.rentBillInput.parse(req.body);
+    const crm = opts.crm;
+    return reply
+      .status(201)
+      .send(await billing.once(db, requestKey, () => billing.issueRentBill(db, crm, req.user?.id || null, req.params.id, month, pieces)));
   });
   app.post<{ Params: { id: string; billId: string } }>("/clients/:id/bills/:billId/cancel", async (req, reply) => {
     if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
