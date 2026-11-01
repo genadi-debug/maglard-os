@@ -1554,6 +1554,7 @@ async function statementSection(supplierId, month) {
     <div class="head" style="align-items:end"><h2 style="margin:16px 0 0">חשבון חודשי</h2>
       <label>חודש <input type="month" id="statement-month" value="${month}"></label></div>
     <p class="sub">תנאי תשלום: ${esc(st.supplier.payment_terms || "לא נקבעו")}${st.supplier.payment_terms ? "" : " (בלי תנאי תשלום אין תאריך לתשלום)"}</p>
+    ${st.partial ? `<div class="notice" role="note">החשבון כולל רק חשבוניות של דירות שבתחום האחריות שלך, והסיכומים בהתאם.</div>` : ""}
     ${
       st.invoices.length
         ? `<div class="wrap"><table class="table"><thead><tr><th>מספר</th><th>דירה</th><th>תאריך</th><th>לפני מע״מ</th><th>מע״מ</th>
@@ -2038,6 +2039,7 @@ async function clientView(id) {
     <p><a href="#/clients">→ כל הלקוחות</a></p>
     <div class="head"><div><h1>${esc(c.name)}</h1><p class="sub">לקוח · ${cardPill(details.missing)}${c.planfix_id ? ` · איש קשר ${c.planfix_id} ב-Planfix` : ""}</p></div>
     ${allowed("requests.manage") && active.length ? `<button class="btn primary" id="new-req">פתיחת קריאת שירות</button>` : ""}</div>
+    ${c.partial ? `<div class="notice" role="note">מוצג חלק מהלקוח: רק הדירות שבתחום האחריות שלך. חיובים וחשבונות של הלקוח כולו פתוחים למי שהלקוח כולו בתחום שלו.</div>` : ""}
     ${gaps.length ? `<div class="missing"><b>מה חסר בדירות:</b> ${esc(gaps.join(" · "))}</div>` : ""}
     <div class="facts">
       <div><span>דירות בתוקף</span><b>${active.length}</b></div>
@@ -2061,7 +2063,7 @@ async function clientView(id) {
     }
     <h2>קריאות שירות</h2>${requestsTable(c.requests)}
     ${invoicesTable(c.invoices)}
-    ${allowed("billing.view") ? `<div id="billing">${await billingSection(id)}</div>` : ""}`;
+    ${allowed("billing.view") && !c.partial ? `<div id="billing">${await billingSection(id)}</div>` : ""}`;
   view.querySelector("#new-req")?.addEventListener("click", () =>
     newRequestDialog(active.length === 1 ? active[0].id : undefined, id),
   );
@@ -3046,6 +3048,185 @@ async function usersView() {
     );
 }
 
+// ---------- access scopes (admin) ----------
+
+const SCOPE_MODE = { all: ["כל החברה", ""], scoped: ["תחום מוגדר", "warn"] };
+const SCOPE_EFFECT = {
+  scoped: "לפי התחום",
+  own: "שלו בלבד",
+  company: "לא זמין בתחום",
+  directory: "משותף",
+};
+
+// Who works on which clients and properties. Grants can be prepared and
+// checked with "מה יראה" while the user still sees the whole company; the
+// access changes only when the admin switches the user to a scope.
+async function accessView() {
+  const [{ users }, { departments, grants, matrix }, clients, engagements] = await Promise.all([
+    api("GET", "/users"),
+    api("GET", "/access"),
+    api("GET", "/clients"),
+    api("GET", "/engagements"),
+  ]);
+  const properties = [...new Map(engagements.map((e) => [e.property_id, e])).values()];
+  const grantsOf = (u) => grants.filter((g) => g.user_id === u.id || (u.department_id && g.department_id === u.department_id));
+  const depOptions = (selected) =>
+    `<option value="">ללא מחלקה</option>` +
+    departments.map((d) => `<option value="${d.id}" ${d.id === selected ? "selected" : ""}>${esc(d.name)}</option>`).join("");
+  const roles = matrix.roles;
+  view.innerHTML = `
+    <div class="head"><div><h1>תחומי אחריות</h1>
+      <p class="sub">התפקיד קובע מה מותר לעובד לעשות. תחום האחריות קובע על אילו לקוחות ונכסים. עובד ב"כל החברה" רואה הכול, כמו היום.
+      שיוכים אפשר להכין ולבדוק ב"מה יראה" לפני שמפעילים תחימה. הגישה משתנה רק בלחיצה על "הפעלת תחימה".</p></div>
+      <div class="actions"><button class="btn" id="add-dep">מחלקה חדשה</button><button class="btn primary" id="add-grant">שיוך חדש</button></div></div>
+    <h2>עובדים</h2>
+    <div class="wrap"><table class="table"><thead><tr><th>עובד</th><th>תפקיד</th><th>מחלקה</th><th>גישה</th><th>שיוכים</th><th></th></tr></thead><tbody>${users
+      .map((u) => {
+        const own = grantsOf(u);
+        const canScope = matrix.scopable[u.role];
+        return `<tr><td>${esc(u.name)}${u.active ? "" : ` ${pill(["חסום", "bad"])}`}</td><td>${esc(roles[u.role])}</td>
+          <td><select data-dep="${u.id}" aria-label="מחלקה של ${esc(u.name)}">${depOptions(u.department_id)}</select></td>
+          <td>${pill(SCOPE_MODE[u.scope_mode])}</td>
+          <td>${own.length ? own.map((g) => esc(g.client_name || `${g.base_number} · ${g.property_address}`)).join("<br>") : "<small>אין</small>"}</td>
+          <td><button class="btn" data-preview="${u.id}">מה יראה</button>
+          ${
+            !canScope
+              ? `<small>תפקיד עם פעולות על כל החברה: נשאר בכל החברה</small>`
+              : u.scope_mode === "scoped"
+                ? `<button class="btn" data-mode="${u.id}" data-to="all">החזרה לכל החברה</button>`
+                : `<button class="btn" data-mode="${u.id}" data-to="scoped">הפעלת תחימה</button>`
+          }</td></tr>`;
+      })
+      .join("")}</tbody></table></div>
+    <h2>מחלקות</h2>
+    ${
+      departments.length
+        ? `<div class="wrap"><table class="table"><thead><tr><th>מחלקה</th><th>עובדים</th><th>שיוכים</th></tr></thead><tbody>${departments
+            .map((d) => `<tr><td>${esc(d.name)}</td><td>${d.members}</td><td>${grants.filter((g) => g.department_id === d.id).length}</td></tr>`)
+            .join("")}</tbody></table></div>`
+        : `<div class="empty">אין עדיין מחלקות</div>`
+    }
+    <h2>שיוכים</h2>
+    ${
+      grants.length
+        ? `<div class="wrap"><table class="table"><thead><tr><th>למי</th><th>על מה</th><th>הערה</th><th>נוסף</th><th></th></tr></thead><tbody>${grants
+            .map(
+              (g) => `<tr><td>${g.user_name ? esc(g.user_name) : `מחלקה: ${esc(g.department_name)}`}</td>
+              <td>${g.client_id ? `לקוח: <a href="#/clients/${g.client_id}">${esc(g.client_name)}</a>` : `נכס: <a href="#/properties/${g.property_id}">${g.base_number} · ${esc(g.property_address)}</a>`}</td>
+              <td>${esc(g.note || "")}</td><td><small>${esc(g.created_by_name || "")} · ${date(g.created_at)}</small></td>
+              <td><button class="btn" data-remove="${g.id}">הסרה</button></td></tr>`,
+            )
+            .join("")}</tbody></table></div>`
+        : `<div class="empty">אין עדיין שיוכים. בלי שיוכים, עובד שתחימה הופעלה לו לא יראה לקוחות ונכסים.</div>`
+    }
+    <h2>מטריצת הרשאות</h2>
+    <p class="sub">מה כל תפקיד רשאי לעשות, ואיך ההרשאה מתנהגת לעובד עם תחום מוגדר.</p>
+    <div class="wrap"><table class="table matrix"><thead><tr><th>הרשאה</th>${Object.values(roles)
+      .map((r) => `<th>${esc(r)}</th>`)
+      .join("")}<th>בתחום מוגדר</th></tr></thead><tbody>${matrix.permissions
+      .map(
+        (p) => `<tr><td>${esc(p.label)}</td>${Object.keys(roles)
+          .map((r) => `<td>${p.roles.includes(r) ? `<span aria-label="כן">✓</span>` : `<span aria-label="לא" class="sub">—</span>`}</td>`)
+          .join("")}<td><small>${esc(SCOPE_EFFECT[p.scope])}</small></td></tr>`,
+      )
+      .join("")}</tbody></table></div>`;
+
+  view.querySelectorAll("[data-dep]").forEach((sel) => {
+    sel.onchange = async () => {
+      try {
+        await api("POST", `/access/users/${sel.dataset.dep}`, { departmentId: sel.value || null });
+        toast("המחלקה עודכנה");
+      } catch (err) {
+        toast(err.message);
+      }
+      route();
+    };
+  });
+  const previewHtml = (p) => `
+    <div class="full"><p>${esc(p.user.name)} · ${pill(SCOPE_MODE[p.user.scope_mode])}${p.user.department_name ? ` · ${esc(p.user.department_name)}` : ""}</p>
+    <p class="sub">עם השיוכים הנוכחיים העובד יראה: ${p.counts.properties} נכסים, ${p.counts.engagements} התקשרויות, ${p.counts.clients} לקוחות
+      (${p.counts.fullClients} מהם במלואם, עם חיובים), ${p.counts.owners} בעלי דירות. משימות ועומסים: ${p.counts.team} עובדים.</p>
+    ${p.properties.length ? `<b>נכסים</b><ul>${p.properties.map((x) => `<li>${x.base_number} · ${esc(x.address)}</li>`).join("")}</ul>` : ""}
+    ${p.clients.length ? `<b>לקוחות</b><ul>${p.clients.map((c) => `<li>${esc(c.name)}${c.full ? "" : " <small>(רק הדירות שבתחום)</small>"}</li>`).join("")}</ul>` : ""}</div>`;
+  view.querySelectorAll("[data-preview]").forEach((b) => {
+    b.onclick = async () => {
+      try {
+        const p = await api("GET", `/access/users/${b.dataset.preview}`);
+        dialog("מה העובד יראה", previewHtml(p), async () => {}, "סגירה");
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+  });
+  view.querySelectorAll("[data-mode]").forEach((b) => {
+    b.onclick = async () => {
+      const to = b.dataset.to;
+      const p = await api("GET", `/access/users/${b.dataset.mode}`);
+      dialog(
+        to === "scoped" ? "הפעלת תחימה" : "החזרה לכל החברה",
+        (to === "scoped"
+          ? `<p class="full">מרגע ההפעלה העובד יראה רק את מה שמפורט כאן. מסכי סנכרון, משתמשים ויומן פעולות ייסגרו בפניו.
+             יש לוודא שהשיוך אושר מול ההנהלה לפני ההפעלה.</p>`
+          : `<p class="full">העובד יחזור לראות את כל החברה, לפי התפקיד שלו. השיוכים נשמרים.</p>`) + previewHtml(p),
+        async () => {
+          await api("POST", `/access/users/${b.dataset.mode}`, { scopeMode: to });
+          toast(to === "scoped" ? "התחימה הופעלה" : "העובד חזר לכל החברה");
+          route();
+        },
+        to === "scoped" ? "הפעלה" : "החזרה",
+      );
+    };
+  });
+  view.querySelectorAll("[data-remove]").forEach((b) => {
+    b.onclick = () =>
+      dialog("הסרת שיוך", `<p class="full">מי שהשיוך הזה נתן לו גישה יאבד אותה מיד, אם התחימה שלו מופעלת.</p>`, async () => {
+        await api("POST", `/access/grants/${b.dataset.remove}/remove`);
+        toast("השיוך הוסר");
+        route();
+      }, "הסרה");
+  });
+  view.querySelector("#add-dep").onclick = () =>
+    dialog("מחלקה חדשה", field("name", "שם המחלקה", "required minlength=2", true), async (v) => {
+      await api("POST", "/departments", v);
+      toast("המחלקה נוספה");
+      route();
+    }, "הוספה");
+  view.querySelector("#add-grant").onclick = () => {
+    const subjects =
+      users.filter((u) => u.active).map((u) => `<option value="user:${u.id}">${esc(u.name)} (${esc(roles[u.role])})</option>`).join("") +
+      departments.map((d) => `<option value="department:${d.id}">מחלקה: ${esc(d.name)}</option>`).join("");
+    const d = dialog(
+      "שיוך חדש",
+      `<label class="full">למי<select name="subject" required><option value="">בחירה</option>${subjects}</select></label>
+       <fieldset class="full"><legend>על מה</legend>
+         <label><span><input type="radio" name="kind" value="client" checked> לקוח, על כל הדירות שלו</span></label>
+         <label><span><input type="radio" name="kind" value="property"> נכס, על כל ההתקשרויות בו</span></label></fieldset>
+       <label class="full" data-for="client">לקוח<select name="clientId"><option value="">בחירה</option>${clients
+         .map((c) => `<option value="${c.id}">${esc(c.name)}</option>`)
+         .join("")}</select></label>
+       <label class="full" data-for="property" hidden>נכס<select name="propertyId"><option value="">בחירה</option>${properties
+         .map((e) => `<option value="${e.property_id}">${esc(e.apartment_code)} · ${esc(e.address)}</option>`)
+         .join("")}</select></label>
+       ${field("note", "הערה (למשל: אושר על ידי ההנהלה בתאריך)", "", true)}`,
+      async (v) => {
+        if (!v.subject) throw new Error("צריך לבחור למי השיוך");
+        const [type, id] = v.subject.split(":");
+        const target = v.kind === "client" ? { clientId: v.clientId } : { propertyId: v.propertyId };
+        if (!Object.values(target)[0]) throw new Error(v.kind === "client" ? "צריך לבחור לקוח" : "צריך לבחור נכס");
+        await api("POST", "/access/grants", { [type === "user" ? "userId" : "departmentId"]: id, ...target, ...(v.note ? { note: v.note } : {}) });
+        toast("השיוך נוסף. אם התחימה של העובד לא מופעלת, הגישה שלו לא השתנתה.");
+        route();
+      },
+      "הוספה",
+    );
+    d.querySelectorAll("input[name=kind]").forEach((r) =>
+      r.addEventListener("change", () => {
+        d.querySelectorAll("[data-for]").forEach((l) => (l.hidden = l.dataset.for !== r.value));
+      }),
+    );
+  };
+}
+
 const AUDIT_ACTION = {
   login: "כניסה",
   "POST /auth/logout": "יציאה",
@@ -3062,6 +3243,15 @@ const AUDIT_ACTION = {
   "POST /sync/operations/:id/decide": "החלטה על פעולה שתוצאתה לא ידועה",
   "POST /users": "יצירת משתמש",
   "POST /users/:id": "עדכון משתמש",
+  "POST /access/users/:id": "שינוי מחלקה או תחימה של עובד",
+  "POST /access/grants": "הוספת שיוך לתחום אחריות",
+  "POST /access/grants/:id/remove": "הסרת שיוך מתחום אחריות",
+  "POST /departments": "יצירת מחלקה",
+  "POST /departments/:id": "שינוי שם מחלקה",
+  "access.granted": "שיוך נוסף",
+  "access.revoked": "שיוך הוסר",
+  "access.user_scope": "תחימה של עובד שונתה",
+  "department.created": "מחלקה נוצרה",
   "POST /import/planfix": "ייבוא מ-Planfix",
   "POST /import/engagements/:taskId": "השלמת התקשרות ב-Planfix",
   "POST /import/contacts/sheet": "ייבוא אנשי קשר מגיליון",
@@ -3089,10 +3279,13 @@ async function auditView() {
 }
 
 function showUser() {
-  document.querySelectorAll(".nav[data-perm]").forEach((a) => (a.hidden = !allowed(a.dataset.perm)));
+  // A scoped user's company-wide screens are closed on the server; the menu
+  // leaves them out.
+  const scoped = me.scopeMode === "scoped";
+  document.querySelectorAll(".nav[data-perm]").forEach((a) => (a.hidden = !allowed(a.dataset.perm) || (scoped && a.hasAttribute("data-company"))));
   const box = document.createElement("div");
   box.className = "me";
-  box.innerHTML = `${esc(me.name)}<small>${esc(me.roleLabel)}</small><button type="button">יציאה</button>`;
+  box.innerHTML = `${esc(me.name)}<small>${esc(me.roleLabel)}${scoped ? " · תחום מוגדר" : ""}</small><button type="button">יציאה</button>`;
   box.querySelector("button").onclick = async () => {
     await api("POST", "/auth/logout");
     location.reload();
@@ -3147,6 +3340,7 @@ const GUIDE = [
   ["users", "משתמשים והרשאות", "users.manage", [
     "ב\"משתמשים\": הוספת עובד, תפקיד (שקובע מה הוא רואה ועושה), השבתה וקביעת סיסמה חדשה.",
     "עובד ששכח סיסמה פונה אליך, ואתה קובע לו סיסמה חדשה.",
+    "ב\"תחומי אחריות\": משייכים עובד או מחלקה ללקוח או לנכס. \"מה יראה\" מראה את התוצאה לפני שמפעילים, ו\"הפעלת תחימה\" משנה את הגישה בפועל.",
   ]],
 ];
 
@@ -3256,6 +3450,7 @@ async function route() {
     else if (section === "notifications") await notificationsView();
     else if (section === "sync") await syncView();
     else if (section === "users") await usersView();
+    else if (section === "access") await accessView();
     else if (section === "audit") await auditView();
     else if (section === "help") placed = helpView(params);
     else view.innerHTML = `<div class="empty">הדף לא נמצא</div>`;

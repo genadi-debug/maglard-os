@@ -1,7 +1,7 @@
 // Role-based permissions (spec section 4). Checked on the server for every
 // route; the screens use the same list only to hide what a role cannot do.
-// Scope by client, property and department comes with the Planfix import,
-// once there are records to assign.
+// Which clients and properties a user works on is the access scope, checked
+// next to these permissions (domain/scope.ts, api/server.ts SCOPE).
 
 export const ROLES = {
   admin: "מנהל מערכת",

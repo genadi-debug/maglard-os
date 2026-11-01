@@ -29,6 +29,8 @@ import { refreshPlanfixInvoices } from "../sync/planfixInvoices.js";
 import * as readback from "../sync/readback.js";
 import * as ops from "../sync/operations.js";
 import { PlanfixError } from "../planfix/client.js";
+import * as access from "../domain/access.js";
+import { assertEntity, assertRecord, assertSees, idsOf, OUT_OF_SCOPE, scopeOf, type Scope } from "../domain/scope.js";
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "public");
 const assets: Record<string, string> = {
@@ -41,7 +43,7 @@ const PUBLIC = new Set(["GET /", "GET /app.js", "GET /health", "POST /auth/login
 
 // What each route needs. `null` = any signed-in user. A route missing here is
 // refused, so a new route stays closed until it is given a permission.
-const ROUTES: Record<string, Permission | null> = {
+export const ROUTES: Record<string, Permission | null> = {
   "POST /auth/logout": null,
   "GET /auth/me": null,
   "GET /contacts": null,
@@ -127,7 +129,137 @@ const ROUTES: Record<string, Permission | null> = {
   "GET /files/:type/:id": null,
   "POST /files/:type/:id": null,
   "GET /files/:id": null,
+  "GET /access": "users.manage",
+  "GET /access/users/:id": "users.manage",
+  "POST /access/users/:id": "users.manage",
+  "POST /access/grants": "users.manage",
+  "POST /access/grants/:id/remove": "users.manage",
+  "POST /departments": "users.manage",
+  "POST /departments/:id": "users.manage",
 };
+
+// How each route is held to a scoped user's access scope (domain/scope.ts),
+// on top of the role's permission above. A route missing here is refused to
+// scoped users, so a new route stays closed to them until it is placed.
+//   "free"     - not about scoped records (the session, settings, notifications);
+//   "company"  - a company-wide screen: refused to scoped users;
+//   "filtered" - the handler lists only what is in scope;
+//   "body"     - the handler checks the records named in the body;
+//   a function - checks the record named in the path before the handler runs.
+type Params = Record<string, string>;
+type Guard = "free" | "company" | "filtered" | "body" | ((db: Db, scope: Scope, p: Params) => Promise<void>);
+const byId =
+  (kind: Parameters<typeof assertRecord>[2], param = "id"): Guard =>
+  (db, scope, p) =>
+    assertRecord(db, scope, kind, p[param]);
+// Charging a supplier invoice on to its client is client-wide money: the
+// client must be granted as a whole.
+const chargeGuard: Guard = async (db, scope, p) => {
+  await assertRecord(db, scope, "invoice_ref", p.ref);
+  const { rows } = await db.query(
+    p.ref.startsWith("planfix:")
+      ? "SELECT e.client_id FROM planfix_invoices f JOIN engagements e ON e.planfix_task_id = f.engagement_task_id WHERE f.planfix_task_id = $1"
+      : "SELECT e.client_id FROM supplier_invoices i JOIN engagements e ON e.id = i.engagement_id WHERE i.id = $1",
+    [p.ref.startsWith("planfix:") ? Number(p.ref.slice(8)) : p.ref],
+  );
+  assertSees(scope, "fullClients", rows[0]?.client_id);
+};
+const clientFull = byId("client_full");
+
+export const SCOPE: Record<string, Guard> = {
+  "POST /auth/logout": "free",
+  "GET /auth/me": "free",
+  "GET /contacts": "filtered",
+  "GET /work-center": "filtered",
+  "GET /engagements": "filtered",
+  "GET /clients": "filtered",
+  "GET /clients/:id": byId("client"),
+  "GET /properties/:id": byId("property"),
+  "GET /search": "filtered",
+  "GET /tasks": "filtered",
+  "GET /tasks/:id": byId("task"),
+  "POST /tasks": "body",
+  "POST /tasks/:id": byId("task"),
+  "POST /tasks/:id/notes": byId("task"),
+  "GET /team": "free",
+  "POST /intakes": "body",
+  "GET /service-requests": "filtered",
+  "GET /service-requests/:id": byId("request"),
+  "POST /service-requests": "body",
+  "POST /service-requests/:id/assign": byId("request"),
+  "POST /service-requests/:id/client-approval": byId("request"),
+  "POST /service-requests/:id/close": byId("request"),
+  "POST /service-requests/:id/invoice": byId("request"),
+  "POST /service-requests/:id/invoice-review": byId("request"),
+  "GET /supplier-invoices": "filtered",
+  "POST /supplier-invoices": "body",
+  "POST /supplier-invoices/refresh": "company",
+  "GET /suppliers/:id/statement": "filtered",
+  "GET /clients/:id/billing": clientFull,
+  "POST /billing/refresh": "company",
+  "POST /clients/:id/charges": clientFull,
+  "GET /supplier-invoices/:ref/charge": chargeGuard,
+  "POST /supplier-invoices/:ref/charge": chargeGuard,
+  "POST /clients/:id/bills": clientFull,
+  "GET /clients/:id/rent-charges": clientFull,
+  "POST /clients/:id/rent-charges": clientFull,
+  "GET /clients/:id/rent-bill": clientFull,
+  "POST /clients/:id/rent-bill": clientFull,
+  "POST /clients/:id/charges/:chargeId/amount": clientFull,
+  "POST /clients/:id/contracts/:contractId/price": clientFull,
+  "POST /clients/:id/credits/:creditId/refunds": clientFull,
+  "GET /clients/:id/bills/:billId": clientFull,
+  "POST /clients/:id/bills/:billId/cancel": clientFull,
+  "GET /sync/status": "company",
+  "GET /sync/operations": "company",
+  "POST /sync/operations/:id/lookup": "company",
+  "POST /sync/operations/:id/decide": "company",
+  "POST /sync/:id/retry": "company",
+  "GET /users": "company",
+  "POST /users": "company",
+  "POST /users/:id": "company",
+  "GET /audit": "company",
+  "POST /import/planfix": "company",
+  "POST /import/engagements/:taskId": "company",
+  "POST /import/contacts/sheet": "company",
+  "GET /readback": "company",
+  "POST /readback/run": "company",
+  "POST /readback/changes/:id": "company",
+  "POST /contacts": "body",
+  "GET /contacts/:id": byId("contact"),
+  "POST /contacts/:id": byId("contact"),
+  "POST /contacts/:id/people": byId("contact"),
+  "POST /contacts/:id/people/:personId/remove": byId("contact"),
+  "POST /contacts/:id/archive": byId("contact"),
+  "POST /contacts/:id/delete": byId("contact"),
+  "POST /properties/:id": byId("property"),
+  "POST /engagements/:id": byId("engagement"),
+  "POST /properties/:id/archive": byId("property"),
+  "POST /properties/:id/delete": byId("property"),
+  "POST /bulk/archive": "body",
+  "POST /bulk/delete": "body",
+  "GET /owners": "filtered",
+  "GET /owners/:id": byId("owner"),
+  "GET /suppliers": "filtered",
+  "GET /suppliers/:id": "filtered",
+  "GET /approvals": "filtered",
+  "POST /approvals/:id": byId("approval"),
+  "GET /settings": "free",
+  "POST /settings": "company",
+  "GET /notifications": "free",
+  "POST /notifications/read": "free",
+  "GET /files/:type/:id": (db, scope, p) => assertEntity(db, scope, p.type, p.id),
+  "POST /files/:type/:id": (db, scope, p) => assertEntity(db, scope, p.type, p.id),
+  "GET /files/:id": byId("attachment"),
+  "GET /access": "company",
+  "GET /access/users/:id": "company",
+  "POST /access/users/:id": "company",
+  "POST /access/grants": "company",
+  "POST /access/grants/:id/remove": "company",
+  "POST /departments": "company",
+  "POST /departments/:id": "company",
+};
+const COMPANY_ONLY = "המסך הזה כולל נתונים של כל החברה, ולכן הוא לא זמין למשתמש עם תחום אחריות מוגדר";
 
 // Used when auth is switched off (tests of the screens and flows).
 const SYSTEM_USER: auth.User = { id: "", email: "system", name: "system", role: "admin" };
@@ -135,6 +267,8 @@ const SYSTEM_USER: auth.User = { id: "", email: "system", name: "system", role: 
 declare module "fastify" {
   interface FastifyRequest {
     user: auth.User | null;
+    // The user's access scope, loaded with the session (domain/scope.ts).
+    scope: Scope;
     auditEntity?: string;
   }
 }
@@ -171,6 +305,7 @@ export function buildServer(
     ]);
 
   app.decorateRequest("user", null);
+  app.decorateRequest("scope", null as unknown as { all: true });
 
   app.addHook("onRequest", async (req, reply) => {
     if (!req.routeOptions.url) return; // unknown path: Fastify answers 404
@@ -183,6 +318,13 @@ export function buildServer(
     const needs = ROUTES[route];
     if (needs === undefined || (needs && !can(req.user.role, needs))) {
       return reply.status(403).send({ error: "אין לך הרשאה לפעולה הזו" });
+    }
+    // Then the scope: which records, for a user limited to some of them.
+    req.scope = await scopeOf(db, req.user);
+    if (!req.scope.all) {
+      const guard = SCOPE[route];
+      if (guard === undefined || guard === "company") return reply.status(403).send({ error: COMPANY_ONLY });
+      if (typeof guard === "function") await guard(db, req.scope, req.params as Params);
     }
   });
 
@@ -227,9 +369,13 @@ export function buildServer(
     return { ...user, roleLabel: ROLES[user.role], permissions: permissionsOf(user.role), planfixUrl: opts.planfixWebUrl ?? null };
   });
 
-  app.setErrorHandler((err, _req, reply) => {
+  app.setErrorHandler((err, req, reply) => {
     if (err instanceof ZodError) return reply.status(400).send({ error: "validation", issues: err.issues });
-    if (err instanceof NotFoundError) return reply.status(404).send({ error: err.message });
+    // To a scoped user, a record that is not there and one outside the scope
+    // look the same.
+    if (err instanceof NotFoundError) {
+      return reply.status(404).send({ error: req.scope && !req.scope.all ? OUT_OF_SCOPE : err.message });
+    }
     if ((err as { code?: string }).code === "22P02") return reply.status(400).send({ error: "invalid id" });
     if (err instanceof sr.RuleError) return reply.status(409).send({ error: err.message });
     if (err instanceof ForbiddenError) return reply.status(403).send({ error: err.message });
@@ -264,7 +410,7 @@ export function buildServer(
   compressJson(app);
 
   // Read models for the screens.
-  app.get<{ Querystring: { kind?: string } }>("/contacts", async (req) => q.listContacts(db, req.query.kind));
+  app.get<{ Querystring: { kind?: string } }>("/contacts", async (req) => q.listContacts(db, req.query.kind, req.scope));
   // Rent and invoice amounts, removed for roles that may not see them.
   const AMOUNTS = ["monthly_rent", "amount_total", "amount_net", "amount_vat"];
   const hideAmounts = <T extends object>(role: auth.User["role"], rows: T[]): T[] =>
@@ -276,10 +422,10 @@ export function buildServer(
   type ListQuery = { Querystring: { archived?: string } };
   const archivedOf = (req: { query: { archived?: string } }) => req.query.archived === "1";
   app.get<ListQuery>("/engagements", async (req) =>
-    hideAmounts(req.user!.role, await q.listEngagements(db, archivedOf(req))),
+    hideAmounts(req.user!.role, await q.listEngagements(db, archivedOf(req), req.scope)),
   );
 
-  app.get<ListQuery>("/clients", async (req) => cards.listClients(db, archivedOf(req)));
+  app.get<ListQuery>("/clients", async (req) => cards.listClients(db, archivedOf(req), req.scope));
 
   // Cards: everything about one client or one property on a single screen.
   // Supplier invoices appear only for roles that see invoices.
@@ -288,24 +434,31 @@ export function buildServer(
     engagements: hideAmounts(role, card.engagements),
     invoices: can(role, "invoices.view") ? hideAmounts(role, card.invoices) : [],
   });
-  app.get<IdParams>("/clients/:id", async (req) => cardFor(req.user!.role, await cards.clientCard(db, req.params.id)));
+  app.get<IdParams>("/clients/:id", async (req) => cardFor(req.user!.role, await cards.clientCard(db, req.params.id, req.scope)));
   app.get<IdParams>("/properties/:id", async (req) => ({
-    ...cardFor(req.user!.role, await cards.propertyCard(db, req.params.id)),
+    ...cardFor(req.user!.role, await cards.propertyCard(db, req.params.id, req.scope)),
     deletable: await archive.canDelete(db, "property", req.params.id),
   }));
 
   app.get<{ Querystring: { q?: string } }>("/search", async (req) => ({
-    hits: await cards.search(db, req.query.q ?? "", { invoices: can(req.user!.role, "invoices.view") }),
+    hits: await cards.search(db, req.query.q ?? "", { invoices: can(req.user!.role, "invoices.view") }, req.scope),
   }));
-  app.get("/service-requests", async () => q.listServiceRequests(db));
-  app.get<ListQuery>("/suppliers", async (req) => cards.listSuppliers(db, archivedOf(req)));
+  app.get("/service-requests", async (req) => q.listServiceRequests(db, req.scope));
+  app.get<ListQuery>("/suppliers", async (req) => cards.listSuppliers(db, archivedOf(req), req.scope));
 
   // Client, owner and supplier cards: details, contact people, what is missing.
   const bankOf = (req: { user: auth.User | null }) => ({ bank: can(req.user!.role, "bank.view") });
   app.post("/contacts", async (req, reply) => {
     const input = contacts.newContactInput.parse(req.body);
     if (!bankOf(req).bank) for (const k of ["bankName", "bankBranch", "bankAccount"] as const) delete input[k];
-    return reply.status(201).send(await contacts.createContact(db, input));
+    // An owner is reached through a property; a scoped user opens one in the
+    // apartment intake, where the property is granted to them with it.
+    if (!req.scope.all && input.kind === "owner") {
+      return reply.status(403).send({ error: "בעל דירה חדש נפתח בקליטת דירה, יחד עם הדירה שלו" });
+    }
+    const created = await contacts.createContact(db, input);
+    if (input.kind === "client") await access.grantToCreator(db, req.scope, { clientId: created.id });
+    return reply.status(201).send(created);
   });
   app.get<IdParams>("/contacts/:id", async (req) => ({
     ...(await contacts.getContact(db, req.params.id, bankOf(req))),
@@ -347,19 +500,26 @@ export function buildServer(
   };
   app.post("/bulk/archive", async (req) => {
     const input = bulkInput.extend({ type: z.enum(["contact", "property"]), archived: z.boolean() }).parse(req.body);
-    const result = await each(input.ids, (id) => archive.setArchived(db, req.user!.id, input.type, id, input.archived));
+    const result = await each(input.ids, async (id) => {
+      await assertRecord(db, req.scope, input.type, id);
+      return archive.setArchived(db, req.user!.id, input.type, id, input.archived);
+    });
     await audit(req.user?.id || null, input.archived ? "bulk.archived" : "bulk.restored", true, undefined, { type: input.type, ...result });
     return result;
   });
   app.post("/bulk/delete", async (req) => {
     const input = bulkInput.extend({ type: z.enum(["contact", "property", "invoice"]) }).parse(req.body);
-    return each(input.ids, (id) =>
-      input.type === "invoice" ? invoices.deleteInvoice(db, req.user!.id, id) : archive.deleteRecord(db, req.user!.id, input.type, id),
-    );
+    return each(input.ids, async (id) => {
+      await assertRecord(db, req.scope, input.type, id);
+      return input.type === "invoice" ? invoices.deleteInvoice(db, req.user!.id, id) : archive.deleteRecord(db, req.user!.id, input.type, id);
+    });
   });
   app.get<ListQuery>("/owners", async (req) => {
-    const owners = await contacts.listByKind(db, "owner", archivedOf(req));
-    const { rows } = await db.query("SELECT owner_id, count(*)::int AS n FROM properties GROUP BY owner_id");
+    const owners = await contacts.listByKind(db, "owner", archivedOf(req), req.scope);
+    const { rows } = await db.query(
+      "SELECT owner_id, count(*)::int AS n FROM properties WHERE $1::uuid[] IS NULL OR id = ANY($1) GROUP BY owner_id",
+      [idsOf(req.scope, "properties")],
+    );
     const props = new Map(rows.map((r) => [r.owner_id, r.n]));
     return owners.map((o) => ({ ...o, properties: props.get(o.id) ?? 0 }));
   });
@@ -368,17 +528,17 @@ export function buildServer(
       `SELECT p.id, p.base_number, p.address,
               (SELECT c.name FROM engagements e JOIN contacts c ON c.id = e.client_id
                 WHERE e.property_id = p.id ORDER BY e.starts_on DESC LIMIT 1) AS client_name
-         FROM properties p WHERE p.owner_id = $1 ORDER BY p.base_number`,
-      [req.params.id],
+         FROM properties p WHERE p.owner_id = $1 AND ($2::uuid[] IS NULL OR p.id = ANY($2)) ORDER BY p.base_number`,
+      [req.params.id, idsOf(req.scope, "properties")],
     );
     return { properties: rows };
   });
   app.get<IdParams>("/suppliers/:id", async (req) => {
-    const card = await cards.supplierCard(db, req.params.id);
+    const card = await cards.supplierCard(db, req.params.id, req.scope);
     const role = req.user!.role;
     return { ...card, invoices: can(role, "invoices.view") ? hideAmounts(role, card.invoices) : [] };
   });
-  app.get("/supplier-invoices", async () => invoices.listSupplierInvoices(db));
+  app.get("/supplier-invoices", async (req) => invoices.listSupplierInvoices(db, req.scope));
   // Read the invoices entered in Planfix now, instead of at the next readback.
   app.post("/supplier-invoices/refresh", async (_req, reply) => {
     if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
@@ -386,7 +546,7 @@ export function buildServer(
   });
   app.get<{ Params: { id: string }; Querystring: { month?: string } }>("/suppliers/:id/statement", async (req) => {
     const month = z.string().regex(/^\d{4}-\d{2}$/, "חודש בפורמט YYYY-MM").parse(req.query.month ?? new Date().toISOString().slice(0, 7));
-    return invoices.supplierStatement(db, req.params.id, month);
+    return invoices.supplierStatement(db, req.params.id, month, req.scope);
   });
   // The client's billing as Planfix computes it, and a read now instead of at
   // the next readback.
@@ -481,16 +641,24 @@ export function buildServer(
     );
     return reply.status(201).send(done);
   });
-  app.get("/work-center", async (req) => q.workCenter(db, req.user!));
+  app.get("/work-center", async (req) => q.workCenter(db, req.user!, req.scope));
 
   // Saved locally first; Planfix sync happens in the background ("saved, waiting for sync").
+  // A scoped user may link only an owner and client they see; the new
+  // property is then granted to them.
   app.post("/intakes", async (req, reply) => {
-    const result = await createIntake(db, intakeInput.parse(req.body));
+    const input = intakeInput.parse(req.body);
+    if ("id" in input.owner) await assertRecord(db, req.scope, "owner", input.owner.id);
+    if ("id" in input.client) await assertRecord(db, req.scope, "client", input.client.id);
+    const result = await createIntake(db, input);
+    await access.grantToCreator(db, req.scope, { propertyId: result.propertyId });
     return reply.status(201).send({ ...result, sync: "pending" });
   });
 
   app.post("/supplier-invoices", async (req, reply) => {
-    const result = await createSupplierInvoice(db, supplierInvoiceInput.parse(req.body));
+    const input = supplierInvoiceInput.parse(req.body);
+    await assertRecord(db, req.scope, "engagement", input.engagementId);
+    const result = await createSupplierInvoice(db, input);
     return reply.status(201).send({ ...result, sync: "pending" });
   });
 
@@ -499,7 +667,9 @@ export function buildServer(
   type IdParams = { Params: { id: string } };
 
   app.post("/service-requests", async (req, reply) => {
-    return reply.status(201).send(await sr.openRequest(db, req.user!, sr.openInput.parse(req.body)));
+    const input = sr.openInput.parse(req.body);
+    await assertRecord(db, req.scope, "engagement", input.engagementId);
+    return reply.status(201).send(await sr.openRequest(db, req.user!, input));
   });
   app.get<IdParams>("/service-requests/:id", async (req) => sr.getRequest(db, req.params.id));
   app.post<IdParams>("/service-requests/:id/assign", async (req) =>
@@ -547,11 +717,11 @@ export function buildServer(
 
   // Tasks. Everyone has their own; managers see and reassign everyone's.
   app.get<{ Querystring: { filter?: string } }>("/tasks", async (req) =>
-    tasks.listTasks(db, req.user!, req.query.filter ?? "mine"),
+    tasks.listTasks(db, req.user!, req.query.filter ?? "mine", req.scope),
   );
   app.get<IdParams>("/tasks/:id", async (req) => tasks.getTask(db, req.user!, req.params.id));
   app.post("/tasks", async (req, reply) =>
-    reply.status(201).send(await tasks.createTask(db, req.user!, tasks.taskInput.parse(req.body))),
+    reply.status(201).send(await tasks.createTask(db, req.user!, tasks.taskInput.parse(req.body), req.scope)),
   );
   app.post<IdParams>("/tasks/:id", async (req) =>
     tasks.updateTask(db, req.user!, req.params.id, tasks.taskChange.parse(req.body)),
@@ -567,7 +737,7 @@ export function buildServer(
 
   // Costs above the threshold, waiting for a manager.
   app.get<{ Querystring: { which?: string } }>("/approvals", async (req) =>
-    sr.listApprovals(db, req.query.which === "decided" ? "decided" : "pending"),
+    sr.listApprovals(db, req.query.which === "decided" ? "decided" : "pending", req.scope),
   );
   app.post<IdParams>("/approvals/:id", async (req) =>
     sr.decideApproval(db, req.user!, req.params.id, sr.decisionInput.parse(req.body)),
@@ -668,10 +838,25 @@ export function buildServer(
       return reply.status(409).send({ error: "אי אפשר להוריד לעצמך הרשאת מנהל או לחסום את עצמך" });
     }
     if (role !== undefined && !isRole(role)) return reply.status(400).send({ error: "תפקיד לא מוכר" });
+    if (role !== undefined && !access.scopable(role)) {
+      const { rows } = await db.query("SELECT scope_mode FROM users WHERE id = $1", [req.params.id]);
+      if (rows[0]?.scope_mode === "scoped") {
+        return reply.status(409).send({ error: "לתפקיד הזה יש פעולות על כל החברה. קודם צריך להחזיר את המשתמש לגישה לכל החברה" });
+      }
+    }
     const found = await auth.updateUser(db, req.params.id, { role, active, password });
     if (!found) return reply.status(404).send({ error: "user not found" });
     return { ok: true };
   });
+
+  // Access scopes: departments, grants and a user's scope mode (admin).
+  app.get("/access", async () => access.overview(db));
+  app.get<IdParams>("/access/users/:id", async (req) => access.preview(db, req.params.id));
+  app.post<IdParams>("/access/users/:id", async (req) => access.setUserScope(db, req.user!.id, req.params.id, access.userScopeInput.parse(req.body)));
+  app.post("/access/grants", async (req, reply) => reply.status(201).send(await access.addGrant(db, req.user!.id, access.grantInput.parse(req.body))));
+  app.post<IdParams>("/access/grants/:id/remove", async (req) => access.removeGrant(db, req.user!.id, req.params.id));
+  app.post("/departments", async (req, reply) => reply.status(201).send(await access.createDepartment(db, req.user!.id, access.departmentInput.parse(req.body))));
+  app.post<IdParams>("/departments/:id", async (req) => access.renameDepartment(db, req.user!.id, req.params.id, access.departmentInput.parse(req.body)));
 
   // Import of existing apartments from Planfix. A dry run reports what would
   // change and writes nothing.

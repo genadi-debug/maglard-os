@@ -1,5 +1,6 @@
 import { withTx, type Db, type Tx } from "../db/pool.js";
 import { NotFoundError, RuleError } from "./common.js";
+import { ALL, idsOf, type Scope } from "./scope.js";
 
 // Supplier invoices from both sides: the ones made in MAGLARD OS, and the ones
 // entered directly in Planfix, read back by their details only.
@@ -67,7 +68,7 @@ const syncState = `
 // its engagement's, or the start of the engagement task's name.
 const BOTH = `
   SELECT i.id::text, 'maglard' AS source, i.invoice_number, to_char(i.invoice_date, 'YYYY-MM-DD') AS invoice_date, i.amount_net, i.amount_vat,
-         i.amount_total, i.handling, e.apartment_code, p.address, p.id AS property_id, s.id AS supplier_id, s.name AS supplier_name,
+         i.amount_total, i.handling, e.apartment_code, p.address, p.id AS property_id, e.id AS engagement_id, s.id AS supplier_id, s.name AS supplier_name,
          i.planfix_task_id, ${syncState} AS sync, i.created_at AS sort_at
     FROM supplier_invoices i
     JOIN engagements e ON e.id = i.engagement_id
@@ -76,7 +77,7 @@ const BOTH = `
   UNION ALL
   SELECT 'planfix:' || f.planfix_task_id, 'planfix', f.invoice_number, to_char(f.invoice_date, 'YYYY-MM-DD'), f.amount_net, f.amount_vat,
          f.amount_total, f.handling, coalesce(e.apartment_code, nullif(split_part(f.engagement_name, ' — ', 1), '')),
-         p.address, p.id, s.id, coalesce(s.name, f.supplier_name), f.planfix_task_id, 'synced', f.invoice_date::timestamptz
+         p.address, p.id, e.id, s.id, coalesce(s.name, f.supplier_name), f.planfix_task_id, 'synced', f.invoice_date::timestamptz
     FROM planfix_invoices f
     LEFT JOIN engagements e ON e.planfix_task_id = f.engagement_task_id
     LEFT JOIN properties p ON p.id = e.property_id
@@ -84,14 +85,18 @@ const BOTH = `
 
 const strip = ({ sort_at: _, ...row }: Record<string, unknown>) => row;
 
-export async function listSupplierInvoices(db: Db) {
+// With a scope, only invoices of engagements in it; a Planfix invoice not
+// linked to an engagement here is left out.
+export async function listSupplierInvoices(db: Db, scope: Scope = ALL) {
   const [{ rows }, dups] = await Promise.all([
     db.query(
       `SELECT x.*, coalesce(x.supplier_id::text, 'pf' || f.supplier_planfix_id) || '|' || ${NORMALIZED("x.invoice_number")} AS dup_key,
               ch.charge_task_id AS charged_as
          FROM (${BOTH}) x LEFT JOIN planfix_invoices f ON x.source = 'planfix' AND f.planfix_task_id = x.planfix_task_id
          LEFT JOIN supplier_invoice_charges ch ON ch.invoice_ref = x.id
+        WHERE ($1::uuid[] IS NULL OR x.engagement_id = ANY($1))
         ORDER BY sort_at DESC NULLS LAST`,
+      [idsOf(scope, "engagements")],
     ),
     duplicateKeys(db),
   ]);
@@ -100,7 +105,7 @@ export async function listSupplierInvoices(db: Db) {
 
 // The supplier's monthly account: every invoice dated in the month, the
 // totals, and when each is due under the supplier's payment terms.
-export async function supplierStatement(db: Db, supplierId: string, month: string) {
+export async function supplierStatement(db: Db, supplierId: string, month: string, scope: Scope = ALL) {
   const s = await db.query("SELECT id, name, payment_terms FROM contacts WHERE id = $1 AND kind = 'supplier'", [
     supplierId,
   ]);
@@ -108,15 +113,17 @@ export async function supplierStatement(db: Db, supplierId: string, month: strin
   const terms = s.rows[0].payment_terms as string | null;
   const { rows } = await db.query(
     `SELECT * FROM (${BOTH}) x
-      WHERE x.supplier_id = $1 AND x.invoice_date LIKE $2 || '-%'
+      WHERE x.supplier_id = $1 AND x.invoice_date LIKE $2 || '-%' AND ($3::uuid[] IS NULL OR x.engagement_id = ANY($3))
       ORDER BY x.invoice_date, x.invoice_number`,
-    [supplierId, month],
+    [supplierId, month, idsOf(scope, "engagements")],
   );
   const invoices = rows.map((r) => ({ ...strip(r), due_on: dueDate(r.invoice_date, terms) }));
   const sum = (k: string) => Math.round(invoices.reduce((t, i) => t + Number(i[k as keyof typeof i] ?? 0), 0) * 100) / 100;
   return {
     supplier: s.rows[0],
     month,
+    // Totals of the invoices in the scope only.
+    partial: !scope.all,
     invoices,
     totals: { net: sum("amount_net"), vat: sum("amount_vat"), total: sum("amount_total") },
   };
