@@ -4,6 +4,7 @@ import { can, type Role } from "../permissions.js";
 import { ForbiddenError, isoDate, NotFoundError } from "./common.js";
 import { notify } from "./notifications.js";
 import { RuleError } from "./serviceRequests.js";
+import { ALL, assertRecord, idsOf, TASK_SCOPE_SQL, type Scope } from "./scope.js";
 
 export const taskInput = z.object({
   title: z.string().trim().min(1),
@@ -28,7 +29,10 @@ const STATUS_LABEL = { open: "פתוחה", in_progress: "בטיפול", done: "�
 
 type Actor = { id: string; role: Role };
 
-export async function createTask(db: Db, actor: Actor, input: z.infer<typeof taskInput>) {
+export async function createTask(db: Db, actor: Actor, input: z.infer<typeof taskInput>, scope: Scope = ALL) {
+  // A task can be linked only to records the person may see.
+  if (input.engagementId) await assertRecord(db, scope, "engagement", input.engagementId);
+  if (input.serviceRequestId) await assertRecord(db, scope, "request", input.serviceRequestId);
   return withTx(db, async (tx) => {
     const assignee = input.assigneeId ?? actor.id;
     const user = await tx.query("SELECT name FROM users WHERE id = $1 AND active", [assignee]);
@@ -110,11 +114,13 @@ const TASKS = `
          (t.status <> 'done' AND t.due_on < current_date) AS overdue
     FROM tasks t
     JOIN users a ON a.id = t.assignee_id
-    LEFT JOIN engagements e ON e.id = t.engagement_id`;
+    LEFT JOIN engagements e ON e.id = t.engagement_id
+    LEFT JOIN service_requests tr ON tr.id = t.service_request_id`;
 
 // filter: mine | all | overdue | urgent | done. Without tasks.manage_all a
-// person only ever sees their own tasks.
-export async function listTasks(db: Db, actor: Actor, filter: string) {
+// person only ever sees their own tasks; a scoped manager sees the tasks of
+// their scope and their department (domain/scope.ts).
+export async function listTasks(db: Db, actor: Actor, filter: string, scope: Scope = ALL) {
   const mineOnly = filter === "mine" || !can(actor.role, "tasks.manage_all");
   const where = [
     filter === "done" ? "t.status = 'done'" : "t.status <> 'done'",
@@ -124,7 +130,11 @@ export async function listTasks(db: Db, actor: Actor, filter: string) {
   const params: unknown[] = [];
   if (mineOnly) {
     params.push(actor.id || null);
-    where.push("t.assignee_id = $1");
+    where.push(`t.assignee_id = $${params.length}`);
+  } else if (!scope.all) {
+    params.push(scope.userId, idsOf(scope, "engagements"), idsOf(scope, "team"));
+    const n = params.length;
+    where.push(TASK_SCOPE_SQL(`$${n - 2}::uuid`, `$${n - 1}`, `$${n}::uuid[]`));
   }
   const { rows } = await db.query(
     `${TASKS} WHERE ${where.join(" AND ")} ORDER BY t.due_on NULLS LAST, t.urgent DESC, t.created_at`,

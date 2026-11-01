@@ -41,7 +41,10 @@ export async function createUser(db: Db, email: string, name: string, password: 
 }
 
 export async function listUsers(db: Db) {
-  const { rows } = await db.query("SELECT id, email, name, role, active, created_at FROM users ORDER BY name");
+  const { rows } = await db.query(
+    `SELECT u.id, u.email, u.name, u.role, u.active, u.created_at, u.scope_mode, u.department_id, d.name AS department_name
+       FROM users u LEFT JOIN departments d ON d.id = u.department_id ORDER BY u.name`,
+  );
   return rows;
 }
 
@@ -83,12 +86,21 @@ export async function login(
   return { token, userId: rows[0].id };
 }
 
-export type User = { id: string; email: string; name: string; role: Role };
+export type User = {
+  id: string;
+  email: string;
+  name: string;
+  role: Role;
+  // Access scope (domain/scope.ts): 'all' unless an admin switched it.
+  scopeMode?: "all" | "scoped";
+  departmentId?: string | null;
+};
 
 export async function userForToken(db: Db, token: string | undefined): Promise<User | null> {
   if (!token) return null;
   const { rows } = await db.query(
-    `SELECT u.id, u.email, u.name, u.role FROM sessions s JOIN users u ON u.id = s.user_id
+    `SELECT u.id, u.email, u.name, u.role, u.scope_mode AS "scopeMode", u.department_id AS "departmentId"
+       FROM sessions s JOIN users u ON u.id = s.user_id
       WHERE s.token_hash = $1 AND s.expires_at > now() AND u.active`,
     [hashToken(token)],
   );

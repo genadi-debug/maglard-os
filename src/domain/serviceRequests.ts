@@ -6,6 +6,7 @@ import { invoiceCheck, type InvoiceCheck } from "./invoiceApproval.js";
 import { assertNotDuplicate } from "./invoices.js";
 import { notify, notifyPermission } from "./notifications.js";
 import { enqueue } from "./services.js";
+import { ALL, idsOf, type Scope } from "./scope.js";
 
 export { RuleError };
 
@@ -265,7 +266,7 @@ export async function decideApproval(db: Db, actor: Actor, approvalId: string, i
   });
 }
 
-export async function listApprovals(db: Db, which: "pending" | "decided") {
+export async function listApprovals(db: Db, which: "pending" | "decided", scope: Scope = ALL) {
   const { rows } = await db.query(
     `SELECT a.id, a.amount, a.threshold, a.reason, a.status, a.decision_note, a.created_at, a.decided_at,
             a.requested_by, u.name AS requested_by_name, d.name AS decided_by_name,
@@ -280,7 +281,9 @@ export async function listApprovals(db: Db, which: "pending" | "decided") {
        LEFT JOIN users u ON u.id = a.requested_by
        LEFT JOIN users d ON d.id = a.decided_by
       WHERE ${which === "pending" ? "a.status = 'pending'" : "a.status IN ('approved', 'rejected')"}
+        AND ($1::uuid[] IS NULL OR e.id = ANY($1))
       ORDER BY ${which === "pending" ? "a.created_at" : "a.decided_at DESC"} LIMIT 100`,
+    [idsOf(scope, "engagements")],
   );
   return rows;
 }

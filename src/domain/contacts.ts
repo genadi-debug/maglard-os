@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ALL, idsOf, type Scope } from "./scope.js";
 import { withTx, type Db } from "../db/pool.js";
 import { enqueue } from "./services.js";
 import { NotFoundError, RuleError } from "./common.js";
@@ -231,10 +232,11 @@ export async function removePerson(db: Db, contactId: string, personId: string) 
 }
 
 // The list for a kind, with whether each card is complete.
-export async function listByKind(db: Db, kind: Kind, archived = false) {
+export async function listByKind(db: Db, kind: Kind, archived = false, scope: Scope = ALL) {
+  const ids = kind === "supplier" ? null : idsOf(scope, kind === "client" ? "clients" : "owners");
   const { rows } = await db.query(
-    "SELECT * FROM contacts WHERE kind = $1 AND (archived_at IS NOT NULL) = $2 ORDER BY name",
-    [kind, archived],
+    "SELECT * FROM contacts WHERE kind = $1 AND (archived_at IS NOT NULL) = $2 AND ($3::uuid[] IS NULL OR id = ANY($3)) ORDER BY name",
+    [kind, archived, ids],
   );
   return rows.map((c) => ({
     id: c.id,
