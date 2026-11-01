@@ -8,6 +8,7 @@ import * as archive from "../domain/archive.js";
 import * as files from "../domain/attachments.js";
 import * as billing from "../domain/billing.js";
 import * as expense from "../domain/expenseCharge.js";
+import * as edit from "../domain/propertyEdit.js";
 import * as invoices from "../domain/invoices.js";
 import * as contacts from "../domain/contacts.js";
 import { ForbiddenError } from "../domain/common.js";
@@ -100,6 +101,8 @@ const ROUTES: Record<string, Permission | null> = {
   "POST /contacts/:id/people/:personId/remove": "contacts.manage",
   "POST /contacts/:id/archive": "records.archive",
   "POST /contacts/:id/delete": "records.delete",
+  "POST /properties/:id": "apartments.create",
+  "POST /engagements/:id": "apartments.create",
   "POST /properties/:id/archive": "records.archive",
   "POST /properties/:id/delete": "records.delete",
   "POST /bulk/archive": "records.archive",
@@ -413,6 +416,13 @@ export function buildServer(
       .status(201)
       .send(await billing.once(db, requestKey, () => billing.issueRentBill(db, crm, req.user?.id || null, req.params.id, month, pieces)));
   });
+  // Completing or correcting an apartment from its card.
+  app.post<IdParams>("/properties/:id", async (req) =>
+    edit.editProperty(db, req.user?.id || null, req.params.id, edit.propertyEditInput.parse(req.body)),
+  );
+  app.post<IdParams>("/engagements/:id", async (req) =>
+    edit.editEngagement(db, req.user?.id || null, req.params.id, edit.engagementEditInput.parse(req.body)),
+  );
   app.post<{ Params: { id: string; billId: string } }>("/clients/:id/bills/:billId/cancel", async (req, reply) => {
     if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
     const input = billing.cancelBillInput.parse(req.body);

@@ -67,7 +67,7 @@ const syncState = `
 // its engagement's, or the start of the engagement task's name.
 const BOTH = `
   SELECT i.id::text, 'maglard' AS source, i.invoice_number, to_char(i.invoice_date, 'YYYY-MM-DD') AS invoice_date, i.amount_net, i.amount_vat,
-         i.amount_total, i.handling, e.apartment_code, p.address, s.id AS supplier_id, s.name AS supplier_name,
+         i.amount_total, i.handling, e.apartment_code, p.address, p.id AS property_id, s.id AS supplier_id, s.name AS supplier_name,
          i.planfix_task_id, ${syncState} AS sync, i.created_at AS sort_at
     FROM supplier_invoices i
     JOIN engagements e ON e.id = i.engagement_id
@@ -76,7 +76,7 @@ const BOTH = `
   UNION ALL
   SELECT 'planfix:' || f.planfix_task_id, 'planfix', f.invoice_number, to_char(f.invoice_date, 'YYYY-MM-DD'), f.amount_net, f.amount_vat,
          f.amount_total, f.handling, coalesce(e.apartment_code, nullif(split_part(f.engagement_name, ' — ', 1), '')),
-         p.address, s.id, coalesce(s.name, f.supplier_name), f.planfix_task_id, 'synced', f.invoice_date::timestamptz
+         p.address, p.id, s.id, coalesce(s.name, f.supplier_name), f.planfix_task_id, 'synced', f.invoice_date::timestamptz
     FROM planfix_invoices f
     LEFT JOIN engagements e ON e.planfix_task_id = f.engagement_task_id
     LEFT JOIN properties p ON p.id = e.property_id

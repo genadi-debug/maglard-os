@@ -44,13 +44,13 @@ const ENGAGEMENTS = `
 
 const REQUESTS = `
   SELECT r.id, r.subject, r.status, r.urgency, r.category, r.charge_to, r.client_approved_at, r.client_approved_amount, r.estimated_cost AS approval_estimate, r.created_at,
-         r.closed_at, e.apartment_code, s.name AS supplier_name
+         r.closed_at, e.apartment_code, e.property_id, s.name AS supplier_name
     FROM service_requests r
     JOIN engagements e ON e.id = r.engagement_id
     LEFT JOIN contacts s ON s.id = r.supplier_id`;
 
 const INVOICES = `
-  SELECT i.id, i.invoice_number, i.invoice_date, i.amount_total, i.handling, e.apartment_code,
+  SELECT i.id, i.invoice_number, i.invoice_date, i.amount_total, i.handling, e.apartment_code, e.property_id,
          s.name AS supplier_name
     FROM supplier_invoices i
     JOIN engagements e ON e.id = i.engagement_id

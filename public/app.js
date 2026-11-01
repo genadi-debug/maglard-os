@@ -7,6 +7,9 @@ const esc = (v) =>
 const money = (n) => (n == null ? "" : `₪${Number(n).toLocaleString("he-IL", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`);
 const date = (d) => (d ? new Date(d).toLocaleDateString("he-IL") : "");
 const today = () => new Date().toISOString().slice(0, 10);
+// An apartment code that opens the apartment's card, where it can be completed.
+const apt = (code, propertyId) =>
+  propertyId ? `<a href="#/properties/${propertyId}">${esc(code || "—")}</a>` : esc(code || "—");
 // The first and last day of a month given as YYYY-MM.
 const monthStart = (m) => `${m}-01`;
 const monthEnd = (m) => new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.slice(5, 7)), 0)).toISOString().slice(0, 10);
@@ -527,7 +530,7 @@ async function tasksView(params) {
             .map(
               (t) => `<tr class="click" data-href="#/tasks/${t.id}" tabindex="0"><td>${esc(t.title)} ${t.urgent ? pill(["דחוף", "bad"]) : ""}</td>
               <td>${esc(t.assignee_name)}</td><td>${t.due_on ? date(t.due_on) : "—"} ${t.overdue ? pill(["באיחור", "bad"]) : ""}</td>
-              <td>${pill(TASK_STATUS[t.status])}</td><td>${esc(t.apartment_code || "")}</td></tr>`,
+              <td>${pill(TASK_STATUS[t.status])}</td><td>${t.apartment_code ? apt(t.apartment_code, t.property_id) : ""}</td></tr>`,
             )
             .join("")}</tbody></table></div>`
         : `<div class="empty">אין משימות כאן</div>`
@@ -689,7 +692,7 @@ async function requestsView() {
             .map(
               (r) => `<tr class="click" data-id="${r.id}" tabindex="0"><td>${esc(r.subject)} ${urgencyPill(r.urgency)}</td>
               <td>${esc(CATEGORY[r.category] || "")}</td>
-              <td>${esc(r.apartment_code)}</td><td>${pill(STATUS[r.status])} ${r.awaiting_approval ? pill(["ממתין לאישור חריגה", "warn"]) : ""}</td><td>${esc(CHARGE[r.charge_to] || "")}</td>
+              <td>${apt(r.apartment_code, r.property_id)}</td><td>${pill(STATUS[r.status])} ${r.awaiting_approval ? pill(["ממתין לאישור חריגה", "warn"]) : ""}</td><td>${esc(CHARGE[r.charge_to] || "")}</td>
               <td>${esc(r.supplier_name || "")}</td><td>${date(r.created_at)}</td></tr>`,
             )
             .join("")}</tbody></table></div>`
@@ -698,7 +701,7 @@ async function requestsView() {
   view.querySelector("#add")?.addEventListener("click", () => newRequestDialog());
   view.querySelectorAll("tr.click").forEach((tr) => {
     const go = () => (location.hash = `#/requests/${tr.dataset.id}`);
-    tr.onclick = go;
+    tr.onclick = (e) => !e.target.closest("a, button, input, select") && go();
     tr.onkeydown = (e) => e.key === "Enter" && go();
   });
   selectable(view.querySelector(".wrap"), rows, { file: "קריאות-שירות", name: (r) => `${r.apartment_code} · ${r.subject}` });
@@ -1315,7 +1318,7 @@ async function invoicesView() {
         ? `<div class="wrap"><table class="table stack"><thead><tr><th>מספר</th><th>ספק</th><th>דירה</th><th>תאריך</th>
           <th>לפני מע״מ</th><th>סה״כ</th><th>אופן טיפול</th><th>Planfix</th>${charge ? "<th>חיוב ללקוח</th>" : ""}</tr></thead><tbody>${rows
             .map(
-              (i) => `<tr><td data-label="מספר">${esc(i.invoice_number || "—")}${i.suspected_duplicate ? ` ${pill(["חשד לכפילות", "warn"])}` : ""}</td><td data-label="ספק">${supplierLink(i)}</td><td data-label="דירה">${esc(i.apartment_code || "—")}</td>
+              (i) => `<tr><td data-label="מספר">${esc(i.invoice_number || "—")}${i.suspected_duplicate ? ` ${pill(["חשד לכפילות", "warn"])}` : ""}</td><td data-label="ספק">${supplierLink(i)}</td><td data-label="דירה">${apt(i.apartment_code, i.property_id)}</td>
               <td data-label="תאריך">${date(i.invoice_date)}</td><td data-label="לפני מע״מ">${money(i.amount_net)}</td><td data-label="סה״כ">${money(i.amount_total)}</td>
               <td data-label="אופן טיפול">${esc(i.handling || "")}</td><td data-label="Planfix">${invoiceSource(i)}</td>${
                 charge
@@ -1768,7 +1771,7 @@ function requestsTable(rows) {
   if (!rows.length) return `<div class="empty">אין קריאות שירות</div>`;
   return `<div class="wrap"><table class="table"><thead><tr><th>נושא</th><th>דירה</th><th>סטטוס</th><th>ספק</th><th>נפתחה</th></tr></thead><tbody>${rows
     .map(
-      (r) => `<tr><td><a href="#/requests/${r.id}">${esc(r.subject)}</a> ${urgencyPill(r.urgency)}</td><td>${esc(r.apartment_code)}</td>
+      (r) => `<tr><td><a href="#/requests/${r.id}">${esc(r.subject)}</a> ${urgencyPill(r.urgency)}</td><td>${apt(r.apartment_code, r.property_id)}</td>
       <td>${pill(STATUS[r.status])}</td><td>${esc(r.supplier_name || "")}</td><td>${date(r.created_at)}</td></tr>`,
     )
     .join("")}</tbody></table></div>`;
@@ -1782,7 +1785,7 @@ function invoicesTable(rows) {
           allowed("amounts.view") ? "<th>סה״כ</th>" : ""
         }<th>אופן טיפול</th></tr></thead><tbody>${rows
           .map(
-            (i) => `<tr><td>${esc(i.invoice_number)}</td><td>${esc(i.supplier_name)}</td><td>${esc(i.apartment_code)}</td>
+            (i) => `<tr><td>${esc(i.invoice_number)}</td><td>${esc(i.supplier_name)}</td><td>${apt(i.apartment_code, i.property_id)}</td>
             <td>${date(i.invoice_date)}</td>${allowed("amounts.view") ? `<td>${money(i.amount_total)}</td>` : ""}<td>${esc(i.handling)}</td></tr>`,
           )
           .join("")}</tbody></table></div>`
@@ -1867,7 +1870,7 @@ const chargesTable = (rows, status = true, edit = false) =>
   `<div class="wrap"><table class="table"><thead><tr><th>דירה</th><th>סוג</th><th>תקופה</th><th>לפני מע״מ</th><th>מע״מ</th>
     <th>סה״כ</th><th>התקבל</th><th>יתרה</th>${status ? "<th>סטטוס</th>" : ""}${edit ? "<th></th>" : ""}</tr></thead><tbody>${rows
       .map(
-        (c) => `<tr><td>${esc(c.apartment_code || "—")}</td><td>${esc(c.charge_type || c.name)}${Number(c.amount_total) < 0 ? ` ${pill(["זיכוי", ""])}` : ""}</td><td>${span(c.period_from, c.period_to)}</td>
+        (c) => `<tr><td>${apt(c.apartment_code, c.property_id)}</td><td>${esc(c.charge_type || c.name)}${Number(c.amount_total) < 0 ? ` ${pill(["זיכוי", ""])}` : ""}</td><td>${span(c.period_from, c.period_to)}</td>
         <td>${money(c.amount_net)}</td><td>${money(c.amount_vat)}</td><td>${money(c.amount_total)}</td><td>${money(c.received)}</td>
         <td><b>${money(c.balance)}</b></td>${status ? `<td>${esc(c.status || "")}</td>` : ""}${
           edit ? `<td>${Number(c.received || 0) || c.refunded ? "" : `<button class="btn" data-amount="${c.planfix_task_id}">תיקון סכום</button>`}</td>` : ""
@@ -1891,7 +1894,7 @@ function creditsTable(credits) {
     <div class="wrap"><table class="table stack"><thead><tr><th>זיכוי</th><th>חיוב מקורי</th><th>סיבה</th><th>סכום</th>
       <th>מצב</th><th>החזרים שבוצעו</th><th>נשאר להחזיר</th>${manage ? "<th></th>" : ""}</tr></thead><tbody>${credits
       .map(
-        (c) => `<tr><td data-label="זיכוי">${esc(c.apartment_code || "—")} · ${esc(c.charge_type || c.name)}</td>
+        (c) => `<tr><td data-label="זיכוי">${apt(c.apartment_code, c.property_id)} · ${esc(c.charge_type || c.name)}</td>
         <td data-label="חיוב מקורי">${c.original ? `${esc(c.original.name)} (${money(c.original.amount_total)})` : "—"}</td>
         <td data-label="סיבה">${esc(c.reason || "לא נרשמה")}</td><td data-label="סכום">${money(c.amount)}</td>
         <td data-label="מצב">${pill(CREDIT_STATE[c.state])}</td>
@@ -2479,7 +2482,7 @@ function wireBilling(clientId) {
   );
   view.querySelectorAll("#billing tr[data-href]").forEach((tr) => {
     const go = () => (location.hash = tr.dataset.href);
-    tr.addEventListener("click", go);
+    tr.addEventListener("click", (e) => !e.target.closest("a, button, input, select") && go());
     tr.addEventListener("keydown", (e) => e.key === "Enter" && go());
   });
   const btn = view.querySelector("#billing-refresh");
@@ -2502,12 +2505,13 @@ async function propertyView(id) {
   const gaps = current ? missingFor(current) : ["התקשרות"];
   view.innerHTML = `
     <p><a href="#/apartments">→ כל הדירות</a></p>
-    <div class="head"><div><h1>${esc(p.address)}</h1>
+    <div class="head"><div><h1>${allowed("apartments.create") && !p.archived_at ? `<a href="#" id="edit-address" title="עריכת פרטים">${esc(p.address)}</a>` : esc(p.address)}</h1>
       <p class="sub">דירה ${p.base_number} · ${current ? activePill(current) : pill(["אין התקשרות", "warn"])}
       ${p.planfix_task_id ? ` · משימה ${p.planfix_task_id} ב-Planfix` : ""}</p></div>
     <div class="actions" style="margin:0">
       ${allowed("requests.manage") && current && !p.archived_at ? `<button class="btn primary" id="new-req">פתיחת קריאת שירות</button>` : ""}
       ${current && !p.archived_at ? `<button class="btn" id="new-task">משימה לדירה</button>` : ""}
+      ${allowed("apartments.create") && !p.archived_at ? `<button class="btn" id="edit-property">עריכת פרטים</button>` : ""}
     </div></div>
     ${recordActions(p)}
     ${gaps.length && !p.archived_at ? `<div class="missing"><b>מה חסר:</b> ${esc(gaps.join(" · "))}</div>` : ""}
@@ -2535,6 +2539,42 @@ async function propertyView(id) {
   wireRecordActions("property", p, "#/apartments");
   view.querySelector("#new-req")?.addEventListener("click", () => newRequestDialog(current.id));
   view.querySelector("#new-task")?.addEventListener("click", () => newTaskDialog({ engagementId: current.id }));
+  view.querySelector("#edit-property")?.addEventListener("click", () => propertyEditDialog(p, current));
+  view.querySelector("#edit-address")?.addEventListener("click", (ev) => (ev.preventDefault(), propertyEditDialog(p, current)));
+}
+
+// The apartment's details and its current engagement's dates and rent. Saved
+// here at once, and written to the same tasks in Planfix by the sync queue.
+function propertyEditDialog(p, e) {
+  const d = dialog(
+    "עריכת פרטי הדירה",
+    field("baseNumber", "מספר דירה", `type="number" required min="1" value="${p.base_number}"`) +
+      field("address", "כתובת", `required minlength="3" value="${esc(p.address)}"`, true) +
+      (e
+        ? `<p class="full sub">התקשרות נוכחית: ${esc(e.client_name)}</p>` +
+          field("startsOn", "תחילת התקשרות", `type="date" required value="${e.starts_on?.slice(0, 10) || ""}"`) +
+          field("endsOn", "סיום התקשרות", `type="date" required value="${e.ends_on?.slice(0, 10) || ""}"`) +
+          field("moveInOn", "תאריך כניסה", `type="date" value="${e.move_in_on?.slice(0, 10) || ""}"`) +
+          (allowed("amounts.view")
+            ? field("monthlyRent", "שכ״ד חודשי (₪)", `type="number" step="0.01" min="0" value="${e.monthly_rent ?? ""}"`)
+            : "")
+        : "") +
+      `<p class="full sub">השינויים נשמרים כאן מיד ונשלחים ל־Planfix לאותה משימה.</p>`,
+    async (v) => {
+      await api("POST", `/properties/${p.id}`, { baseNumber: Number(v.baseNumber), address: v.address.trim() });
+      if (e) {
+        await api("POST", `/engagements/${e.id}`, {
+          startsOn: v.startsOn,
+          endsOn: v.endsOn,
+          moveInOn: v.moveInOn || null,
+          ...(v.monthlyRent !== undefined ? { monthlyRent: v.monthlyRent === "" ? null : Number(v.monthlyRent) } : {}),
+        });
+      }
+      toast("הפרטים נשמרו ויישלחו ל־Planfix");
+      route();
+    },
+  );
+  return d;
 }
 
 // ---------- picking rows in a list ----------
@@ -2659,7 +2699,7 @@ const contactActions = (archived) => [
 function clickableRows() {
   view.querySelectorAll("tr[data-href]").forEach((tr) => {
     const go = () => (location.hash = tr.dataset.href);
-    tr.onclick = go;
+    tr.onclick = (e) => !e.target.closest("a, button, input, select") && go();
     tr.onkeydown = (e) => e.key === "Enter" && go();
   });
 }
