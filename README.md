@@ -184,6 +184,39 @@ request waits in triage for a manager. A rejection needs a reason and sends
 the request back for a new estimate. Work the client pays for also still
 needs the client's approval: the supplier starts once both are in.
 
+Taking in the supplier's invoice is separate from approving it for billing.
+The server checks the invoice against the approvals every time it matters:
+when it is taken in, when a client or manager approval is recorded, when the
+request is closed, and when the invoice is charged to the client (from the
+request or from the supplier invoices list).
+
+- When the client pays, the amount compared is what the client will be
+  charged: the supplier's total, plus VAT on expenses by the client's card
+  (on the net or on the whole total). While the card does not say, the
+  highest possible charge is compared; the charge itself needs the card.
+- Above the threshold a manager's approval is needed for at least the
+  amount (the supplier's total, or the client charge when it is higher). A
+  manager's approval never replaces the client's, and nobody approves a
+  request they asked for.
+- An invoice above its approvals is kept, marked "ממתין לאישור חריגה". It is
+  not sent to Planfix, cannot be charged to the client and the request cannot
+  be closed until the missing approvals are recorded. The request shows what
+  was approved, the new amount, the difference and what is missing.
+- A manager is asked automatically; after a rejection, "בדיקה מחדש" asks
+  again with a reason. If the client's card or the threshold changes after
+  the approval, the charge is checked again and refused, and "בדיקה מחדש"
+  returns the invoice to waiting until it is approved again.
+- Every client approval is kept (amount, who approved, how, reference, when,
+  who recorded it) in `client_approvals`; manager approvals stay in
+  `approvals`, including superseded and rejected ones.
+- An invoice not linked to a service request (keyed in directly or entered
+  in Planfix) has no approvals to compare with: it is charged to the client
+  only up to the approval threshold, and never when it is marked for the
+  owner or absorbed ("בעלים", "נספג").
+- Invoices taken in before this rule (`approval_state` empty) are not
+  changed. Closing their requests works as before; charging them is checked
+  at the time of the charge.
+
 ## Archive and delete
 
 Clients, owners, suppliers and apartments are archived, not deleted. An
@@ -240,6 +273,11 @@ not imported yet.
   approval stay in MAGLARD OS until the "חריג" fields (10154–10160) are
   verified on a template.
 - Notifications are in the app only: no email or WhatsApp yet.
+- A supplier invoice's approval state stays in MAGLARD OS. An invoice
+  waiting for approval is not sent to Planfix, so a charge opened directly in
+  Planfix (outside MAGLARD OS) is not stopped by it.
+- An invoice not linked to a service request cannot get approvals: above the
+  threshold it cannot be charged from MAGLARD OS at all.
 - Only a contact's name goes to Planfix. Its other details (ID, bank, tax
   fields, contact people) stay in MAGLARD OS until the Planfix contact
   fields are verified.

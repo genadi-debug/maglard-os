@@ -3,6 +3,8 @@ import type { Db } from "../db/pool.js";
 import type { CrmAdapter } from "../planfix/adapter.js";
 import { CHARGE_TYPES, createCharge, EXPENSE_TYPES, once, requestKey, vatRate } from "./billing.js";
 import { isoDate, NotFoundError, RuleError } from "./common.js";
+import { expenseAmounts, type ExpenseAmounts } from "./expenseVat.js";
+import { invoiceCheck } from "./invoiceApproval.js";
 
 // A supplier invoice charged on to the client. What the client pays follows
 // the client's card:
@@ -11,33 +13,7 @@ import { isoDate, NotFoundError, RuleError } from "./common.js";
 //   VAT on all ('gross')    -> the whole supplier invoice, VAT included, plus VAT.
 // The server works the figures out; the screen only shows them.
 
-export type Basis = "net" | "gross" | "no_vat";
-export type ExpenseAmounts = { basis: Basis; base: number; vat: number; total: number };
-
-const round = (n: number) => Math.round(n * 100) / 100;
-
-export function expenseAmounts(
-  invoice: { net: number | null; total: number | null },
-  client: { vatOnExpenses: boolean | null; basis: "net" | "gross" | null },
-  rate: number,
-): ExpenseAmounts {
-  if (invoice.total == null) throw new RuleError("בחשבונית הספק אין סכום כולל. יש להשלים אותו לפני החיוב.");
-  if (client.vatOnExpenses === null) {
-    throw new RuleError("בכרטיס הלקוח לא הוגדר אם הוא משלם מע״מ על הוצאות. יש להשלים את השדה בכרטיס הלקוח.");
-  }
-  if (!client.vatOnExpenses) return { basis: "no_vat", base: invoice.total, vat: 0, total: invoice.total };
-  if (!client.basis) {
-    throw new RuleError(
-      "בכרטיס הלקוח לא נבחר על מה מחושב המע״מ בהוצאות: על הקרן או על מלוא חשבונית הספק. יש להשלים את השדה בכרטיס הלקוח.",
-    );
-  }
-  if (client.basis === "net" && invoice.net == null) {
-    throw new RuleError("בחשבונית הספק אין סכום לפני מע״מ, ולכן אי אפשר לחשב מע״מ על הקרן. יש להשלים אותו בחשבונית.");
-  }
-  const base = client.basis === "net" ? invoice.net! : invoice.total;
-  const vat = round((base * rate) / 100);
-  return { basis: client.basis, base, vat, total: round(base + vat) };
-}
+export { expenseAmounts, type Basis, type ExpenseAmounts } from "./expenseVat.js";
 
 const REF = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|planfix:\d+)$/;
 
@@ -73,10 +49,11 @@ async function invoiceOf(db: Db, ref: string) {
 // What charging the invoice on would open, before anything is written.
 export async function expenseChargePreview(db: Db, ref: string) {
   const inv = await invoiceOf(db, ref);
-  const [client, rate, done] = await Promise.all([
+  const [client, rate, done, check] = await Promise.all([
     db.query("SELECT id, name, vat_on_expenses, expense_vat_basis FROM contacts WHERE id = $1", [inv.client_id]),
     vatRate(db),
     db.query("SELECT charge_task_id FROM supplier_invoice_charges WHERE invoice_ref = $1", [ref]),
+    invoiceCheck(db, ref, true),
   ]);
   const c = client.rows[0];
   let amounts: ExpenseAmounts | null = null;
@@ -110,6 +87,9 @@ export async function expenseChargePreview(db: Db, ref: string) {
     problem,
     chargedAs: done.rows[0]?.charge_task_id ?? null,
     chargeTypes: EXPENSE_TYPES,
+    // The approvals the charge needs, checked again when it is opened.
+    check,
+    blocked: check.approvalState === "pending" || !check.ok,
   };
 }
 
@@ -136,6 +116,14 @@ export async function chargeExpense(
     const p = await expenseChargePreview(db, ref);
     if (p.chargedAs) throw new RuleError(`החשבונית כבר חויבה ללקוח (חיוב #${p.chargedAs} ב־Planfix).`);
     if (!p.amounts) throw new RuleError(p.problem!);
+    // The same approval rules as the service request, checked here again: the
+    // charge may come from the invoices list, not only the request's screen.
+    const c = p.check;
+    const missing = c.lines.filter((l) => l.startsWith("חסר:") || l.startsWith("אי אפשר")).join(" · ");
+    if (c.approvalState === "pending") {
+      throw new RuleError(`החשבונית ממתינה לאישור חריגה ולא ניתן לחייב את הלקוח. ${missing || "יש לבדוק אותה שוב בקריאת השירות."}`);
+    }
+    if (!c.ok) throw new RuleError(`אי אפשר לחייב את הלקוח: ${missing}`);
     const a = p.amounts;
     if (Math.round(a.total * 100) !== Math.round(input.expectedTotal * 100)) {
       throw new RuleError("הסכום השתנה מאז שנפתח החלון (כרטיס הלקוח או החשבונית עודכנו). כדאי לפתוח שוב ולבדוק.");

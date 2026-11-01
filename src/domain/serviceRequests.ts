@@ -2,6 +2,7 @@ import { z } from "zod";
 import { withTx, type Db, type Tx } from "../db/pool.js";
 import type { Role } from "../permissions.js";
 import { contactRef, ForbiddenError, isoDate, money, NotFoundError, resolveContact, RuleError } from "./common.js";
+import { invoiceCheck, type InvoiceCheck } from "./invoiceApproval.js";
 import { assertNotDuplicate } from "./invoices.js";
 import { notify, notifyPermission } from "./notifications.js";
 import { enqueue } from "./services.js";
@@ -259,6 +260,7 @@ export async function decideApproval(db: Db, actor: Actor, approvalId: string, i
       );
     }
     await notify(tx, [a.requested_by], `חריגה ${word}: ${sr.subject}`, `#/requests/${sr.id}`);
+    if (a.supplier_invoice_id) await reviewInvoiceTx(tx, actor, await load(tx, sr.id));
     return { status };
   });
 }
@@ -268,8 +270,9 @@ export async function listApprovals(db: Db, which: "pending" | "decided") {
     `SELECT a.id, a.amount, a.threshold, a.reason, a.status, a.decision_note, a.created_at, a.decided_at,
             a.requested_by, u.name AS requested_by_name, d.name AS decided_by_name,
             r.id AS service_request_id, r.subject, r.urgency, r.charge_to, e.apartment_code, p.address,
-            s.name AS supplier_name
+            s.name AS supplier_name, a.supplier_invoice_id, i.invoice_number, i.amount_total AS invoice_total
        FROM approvals a
+       LEFT JOIN supplier_invoices i ON i.id = a.supplier_invoice_id
        JOIN service_requests r ON r.id = a.service_request_id
        JOIN engagements e ON e.id = r.engagement_id
        JOIN properties p ON p.id = e.property_id
@@ -282,17 +285,44 @@ export async function listApprovals(db: Db, which: "pending" | "decided") {
   return rows;
 }
 
+// Records the client's approval. Each one is kept in client_approvals with the
+// amount, who approved and how, the reference, when, and who recorded it; the
+// request's columns hold the current one. After the supplier's invoice it is
+// how an invoice above the client's earlier approval is approved again.
 export async function recordClientApproval(db: Db, actor: Actor, id: string, input: z.infer<typeof approvalInput>) {
   return withTx(db, async (tx) => {
     const sr = await load(tx, id);
-    expect(sr, "new", "triage");
+    expect(sr, "new", "triage", "awaiting_resolution");
     const amount = input.amount;
+    // The same approval sent twice is recorded once.
+    const last = await tx.query(
+      `SELECT amount, method, reference, approver_name FROM client_approvals
+        WHERE service_request_id = $1 ORDER BY recorded_at DESC, id DESC LIMIT 1`,
+      [id],
+    );
+    const l = last.rows[0];
+    if (
+      l &&
+      sr.client_approved_at &&
+      Number(l.amount) === amount &&
+      l.method === input.method &&
+      l.reference === input.reference &&
+      l.approver_name === input.approverName
+    ) {
+      return { status: sr.status as Status, unchanged: true };
+    }
     await tx.query(
       `UPDATE service_requests SET client_approval_ref = $2, client_approved_at = now(), client_approval_method = $3,
               client_approved_by = $4, client_approved_amount = $5, client_approver_name = $6 WHERE id = $1`,
       [id, input.reference, input.method, actor.id || null, amount, input.approverName],
     );
-    const note = `${input.approverName} אישר/ה בשם הלקוח עד ₪${amount} כולל מע״מ (${APPROVAL_METHOD[input.method]}: ${input.reference}). נרשם על ידי ${actor.name}`;
+    await tx.query(
+      `INSERT INTO client_approvals (service_request_id, amount, method, reference, approver_name, recorded_by)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [id, amount, input.method, input.reference, input.approverName, actor.id || null],
+    );
+    const before = sr.client_approved_at ? ` (במקום ₪${sr.client_approved_amount})` : "";
+    const note = `${input.approverName} אישר/ה בשם הלקוח עד ₪${amount} כולל מע״מ${before} (${APPROVAL_METHOD[input.method]}: ${input.reference}). נרשם על ידי ${actor.name}`;
     const approved = { ...sr, client_approved_at: new Date(), client_approved_amount: amount };
     if (sr.status === "triage" && sr.supplier_id && sr.charge_to === "client" && ready(approved, await costApproval(tx, id))) {
       await move(tx, sr, "with_supplier", note);
@@ -302,13 +332,105 @@ export async function recordClientApproval(db: Db, actor: Actor, id: string, inp
       "INSERT INTO service_request_events (service_request_id, from_status, to_status, note) VALUES ($1, $2, $2, $3)",
       [id, sr.status, sr.estimated_cost != null && amount < Number(sr.estimated_cost) ? `${note}. נמוך מהעלות המשוערת ₪${sr.estimated_cost}` : note],
     );
-    return { status: sr.status };
+    if (sr.status === "awaiting_resolution") {
+      const r = await reviewInvoiceTx(tx, actor, await load(tx, id));
+      return { status: sr.status as Status, invoice: r };
+    }
+    return { status: sr.status as Status };
+  });
+}
+
+const event = (tx: Tx, id: string, status: Status, note: string) =>
+  tx.query("INSERT INTO service_request_events (service_request_id, from_status, to_status, note) VALUES ($1, $2, $2, $3)", [
+    id,
+    status,
+    note,
+  ]);
+
+const missingText = (c: InvoiceCheck) => c.lines.filter((l) => l.startsWith("חסר:")).join(" · ");
+
+// Asks a manager to approve the invoice's amount, unless a request is already
+// waiting. After a rejection a new request needs a reason.
+async function askManager(tx: Tx, actor: Actor, sr: { id: string; subject: string; status: Status }, invoiceId: string, c: InvoiceCheck, reason?: string) {
+  const pending = await tx.query("SELECT 1 FROM approvals WHERE service_request_id = $1 AND status = 'pending'", [sr.id]);
+  if (pending.rows[0]) return false;
+  const inv = await tx.query("SELECT invoice_number FROM supplier_invoices WHERE id = $1", [invoiceId]);
+  const why =
+    reason?.trim() ||
+    `חשבונית ${inv.rows[0].invoice_number}: ₪${c.managerAmount}${c.managerApproved == null ? ` מעל סף של ₪${c.threshold}` : `, מעל ₪${c.managerApproved} שאושרו`}`;
+  await tx.query(
+    `INSERT INTO approvals (service_request_id, amount, threshold, reason, requested_by, supplier_invoice_id)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [sr.id, c.managerAmount, c.threshold, why, actor.id || null, invoiceId],
+  );
+  await event(tx, sr.id, sr.status, `התבקש אישור מנהל לחשבונית: ₪${c.managerAmount} (${why})`);
+  await notifyPermission(tx, "approvals.decide", actor.id, `אישור חריגה בחשבונית: ${sr.subject} · ₪${c.managerAmount}`, "#/approvals");
+  return true;
+}
+
+async function pushOnce(tx: Tx, invoiceId: string) {
+  const { rows } = await tx.query(
+    `SELECT 1 FROM supplier_invoices i WHERE i.id = $1 AND (i.planfix_task_id IS NOT NULL
+        OR EXISTS (SELECT 1 FROM outbox o WHERE o.entity_id = i.id AND o.job_type = 'supplier_invoice.push'))`,
+    [invoiceId],
+  );
+  if (!rows[0]) await enqueue(tx, "supplier_invoice.push", invoiceId);
+}
+
+// Checks the request's invoice against the approvals as they are now:
+//  - waiting and now covered: approved for billing, and sent to Planfix;
+//  - approved but no longer covered (the amounts or the client's card changed
+//    since), and not yet charged: back to waiting;
+//  - still waiting for a manager and nobody asked: a manager is asked.
+// An invoice taken in before this rule (no state) is only checked, not changed.
+async function reviewInvoiceTx(tx: Tx, actor: Actor, sr: any, reason?: string) {
+  if (!sr.supplier_invoice_id) return null;
+  const c = await invoiceCheck(tx, sr.supplier_invoice_id, false);
+  let state = c.approvalState;
+  if (state === null) return { state, check: c, asked: false };
+  if (c.ok && state === "pending") {
+    await tx.query("UPDATE supplier_invoices SET approval_state = 'approved', updated_at = now() WHERE id = $1", [sr.supplier_invoice_id]);
+    await event(tx, sr.id, sr.status, "החשבונית אושרה להמשך חיוב: כל האישורים הנדרשים התקבלו");
+    await pushOnce(tx, sr.supplier_invoice_id);
+    state = "approved";
+  } else if (!c.ok && state === "approved") {
+    const charged = await tx.query("SELECT 1 FROM supplier_invoice_charges WHERE invoice_ref = $1", [sr.supplier_invoice_id]);
+    if (!charged.rows[0]) {
+      await tx.query("UPDATE supplier_invoices SET approval_state = 'pending', updated_at = now() WHERE id = $1", [sr.supplier_invoice_id]);
+      await event(tx, sr.id, sr.status, `החשבונית חזרה להמתנה לאישור חריגה: ${missingText(c)}`);
+      state = "pending";
+    }
+  }
+  let asked = false;
+  if (state === "pending" && c.missing.includes("manager") && (!c.lines.some((l) => l.includes("המנהל דחה")) || reason?.trim())) {
+    asked = await askManager(tx, actor, sr, sr.supplier_invoice_id, c, reason);
+  }
+  return { state, check: asked ? await invoiceCheck(tx, sr.supplier_invoice_id, false) : c, asked };
+}
+
+export const reviewInput = z.object({ reason: z.string().trim().max(500).optional() }).default({});
+
+// Checks the invoice again (after the client's card was completed, for
+// example), or asks a manager again after a rejection, with a reason.
+export async function reviewInvoice(db: Db, actor: Actor, id: string, input: z.infer<typeof reviewInput>) {
+  return withTx(db, async (tx) => {
+    const sr = await load(tx, id);
+    expect(sr, "awaiting_resolution");
+    if (!sr.supplier_invoice_id) throw new RuleError("אין חשבונית ספק בקריאה");
+    const c = await invoiceCheck(tx, sr.supplier_invoice_id, false);
+    if (c.missing.includes("manager") && c.lines.some((l) => l.includes("המנהל דחה")) && !input.reason?.trim()) {
+      throw new RuleError("המנהל דחה את הבקשה הקודמת: כדי לבקש שוב צריך לכתוב נימוק");
+    }
+    return reviewInvoiceTx(tx, actor, sr, input.reason);
   });
 }
 
 // The supplier reports the work done and sends an invoice. The invoice is
-// queued for Planfix like any other supplier invoice.
-export async function addSupplierInvoice(db: Db, id: string, input: z.infer<typeof invoiceInput>) {
+// always kept. Within the approvals it is approved for billing and queued for
+// Planfix; above them it waits ("ממתין לאישור חריגה"): not sent to Planfix,
+// not charged to the client and the request not closed, until the missing
+// approvals are given.
+export async function addSupplierInvoice(db: Db, actor: Actor, id: string, input: z.infer<typeof invoiceInput>) {
   return withTx(db, async (tx) => {
     const sr = await load(tx, id);
     expect(sr, "with_supplier");
@@ -328,10 +450,19 @@ export async function addSupplierInvoice(db: Db, id: string, input: z.infer<type
         HANDLING[sr.charge_to as ChargeTo],
       ],
     );
-    await tx.query("UPDATE service_requests SET supplier_invoice_id = $2 WHERE id = $1", [id, rows[0].id]);
-    await move(tx, sr, "awaiting_resolution", `חשבונית ${input.invoiceNumber}`);
-    await enqueue(tx, "supplier_invoice.push", rows[0].id);
-    return { status: "awaiting_resolution", invoiceId: rows[0].id as string };
+    const invoiceId = rows[0].id as string;
+    await tx.query("UPDATE service_requests SET supplier_invoice_id = $2 WHERE id = $1", [id, invoiceId]);
+    const c = await invoiceCheck(tx, invoiceId, false);
+    await tx.query("UPDATE supplier_invoices SET approval_state = $2 WHERE id = $1", [invoiceId, c.ok ? "approved" : "pending"]);
+    if (c.ok) {
+      await move(tx, sr, "awaiting_resolution", `חשבונית ${input.invoiceNumber}`);
+      await enqueue(tx, "supplier_invoice.push", invoiceId);
+      return { status: "awaiting_resolution", invoiceId, approval: "approved", check: c };
+    }
+    await move(tx, sr, "awaiting_resolution", `חשבונית ${input.invoiceNumber} נקלטה וממתינה לאישור חריגה. ${missingText(c)}`);
+    const next = { ...sr, status: "awaiting_resolution" as Status, supplier_invoice_id: invoiceId };
+    const asked = c.missing.includes("manager") ? await askManager(tx, actor, next, invoiceId, c) : false;
+    return { status: "awaiting_resolution", invoiceId, approval: "pending", check: asked ? await invoiceCheck(tx, invoiceId, false) : c };
   });
 }
 
@@ -339,6 +470,13 @@ export async function closeRequest(db: Db, id: string) {
   return withTx(db, async (tx) => {
     const sr = await load(tx, id);
     expect(sr, "awaiting_resolution");
+    if (sr.supplier_invoice_id) {
+      const { rows } = await tx.query("SELECT approval_state FROM supplier_invoices WHERE id = $1", [sr.supplier_invoice_id]);
+      if (rows[0]?.approval_state === "pending") {
+        const c = await invoiceCheck(tx, sr.supplier_invoice_id, false);
+        throw new RuleError(`אי אפשר לסגור: חשבונית הספק ממתינה לאישור חריגה. ${missingText(c) || "יש לבדוק שוב את החשבונית."}`);
+      }
+    }
     await move(tx, sr, "closed");
     return { status: "closed" };
   });
@@ -356,7 +494,7 @@ export async function getRequest(db: Db, id: string) {
     [id],
   );
   if (!rows[0]) throw new NotFoundError(`service request ${id} not found`);
-  const [events, approval] = await Promise.all([
+  const [events, approval, approvals, clientApprovals, invoice] = await Promise.all([
     db.query(
       "SELECT from_status, to_status, note, created_at FROM service_request_events WHERE service_request_id = $1 ORDER BY id",
       [id],
@@ -367,7 +505,39 @@ export async function getRequest(db: Db, id: string) {
         WHERE a.service_request_id = $1 AND a.status <> 'superseded' ORDER BY a.created_at DESC LIMIT 1`,
       [id],
     ),
+    // Every manager approval asked for this request, superseded ones included.
+    db.query(
+      `SELECT a.id, a.amount, a.threshold, a.reason, a.status, a.decision_note, a.created_at, a.decided_at,
+              a.supplier_invoice_id, u.name AS requested_by_name, d.name AS decided_by_name
+         FROM approvals a LEFT JOIN users u ON u.id = a.requested_by LEFT JOIN users d ON d.id = a.decided_by
+        WHERE a.service_request_id = $1 ORDER BY a.created_at`,
+      [id],
+    ),
+    // Every client approval recorded, oldest first.
+    db.query(
+      `SELECT c.amount, c.method, c.reference, c.approver_name, c.recorded_at, c.migrated, u.name AS recorded_by_name
+         FROM client_approvals c LEFT JOIN users u ON u.id = c.recorded_by
+        WHERE c.service_request_id = $1 ORDER BY c.recorded_at, c.id`,
+      [id],
+    ),
+    rows[0].supplier_invoice_id
+      ? db.query(
+          `SELECT i.id, i.invoice_number, to_char(i.invoice_date, 'YYYY-MM-DD') AS invoice_date, i.amount_net, i.amount_vat,
+                  i.amount_total, i.approval_state, ch.charge_task_id AS charged_as
+             FROM supplier_invoices i LEFT JOIN supplier_invoice_charges ch ON ch.invoice_ref = i.id::text
+            WHERE i.id = $1`,
+          [rows[0].supplier_invoice_id],
+        )
+      : Promise.resolve({ rows: [] as any[] }),
   ]);
-  return { ...rows[0], events: events.rows, approval: approval.rows[0] ?? null };
+  const inv = invoice.rows[0];
+  return {
+    ...rows[0],
+    events: events.rows,
+    approval: approval.rows[0] ?? null,
+    approvals: approvals.rows,
+    client_approvals: clientApprovals.rows,
+    invoice: inv ? { ...inv, check: await invoiceCheck(db, inv.id, false) } : null,
+  };
 }
 
