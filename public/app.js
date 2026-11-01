@@ -108,7 +108,10 @@ async function api(method, url, body) {
   }
   if (!res.ok) {
     const issue = data.issues?.[0];
-    throw new Error(issue ? `${issue.path.join(".")}: ${issue.message}` : data.error || `שגיאה ${res.status}`);
+    const err = new Error(issue ? `${issue.path.join(".")}: ${issue.message}` : data.error || `שגיאה ${res.status}`);
+    // Each field's problem, for a form to show next to the field.
+    err.issues = data.issues;
+    throw err;
   }
   return data;
 }
@@ -173,34 +176,218 @@ function nextStep(r) {
 
 // ---------- dialogs ----------
 
-function dialog(title, fields, onSubmit, submitLabel = "שמירה") {
+// A field's problem in Hebrew, from the browser's own check.
+function fieldProblem(el) {
+  const v = el.validity;
+  if (v.valid) return "";
+  if (v.customError) return el.validationMessage;
+  if (v.valueMissing) return el.type === "checkbox" ? "צריך לסמן" : el.tagName === "SELECT" ? "צריך לבחור" : "שדה חובה";
+  if (v.typeMismatch) return el.type === "email" ? "כתובת אימייל לא תקינה" : "ערך לא תקין";
+  if (v.rangeUnderflow) return `לא פחות מ־${el.min}`;
+  if (v.rangeOverflow) return `לא יותר מ־${el.max}`;
+  if (v.tooShort) return `לפחות ${el.minLength} תווים`;
+  if (v.stepMismatch) return el.step === "1" ? "מספר שלם" : "עד שתי ספרות אחרי הנקודה";
+  return "ערך לא תקין";
+}
+
+// Shows (or clears) a problem right under the field, tied to it for screen readers.
+function markField(el, msg) {
+  if (!el.id) el.id = `f-${Math.random().toString(36).slice(2, 9)}`;
+  let span = document.getElementById(`${el.id}-err`);
+  if (!span && msg) {
+    span = document.createElement("span");
+    span.className = "ferr";
+    span.id = `${el.id}-err`;
+    (el.closest("label") ?? el).append(span);
+    el.setAttribute("aria-describedby", [el.getAttribute("aria-describedby"), span.id].filter(Boolean).join(" "));
+  }
+  if (span) span.textContent = msg;
+  el.setAttribute("aria-invalid", msg ? "true" : "false");
+}
+
+// The fields of a form or step that are in use: not hidden inside it.
+const controls = (root) =>
+  [...root.querySelectorAll("input, select, textarea")].filter((el) => {
+    if (el.type === "hidden" || el.disabled) return false;
+    const h = el.closest("[hidden]");
+    return !h || h === root || !root.contains(h);
+  });
+
+// Checks the fields in view; marks each problem and returns the first bad field.
+function checkFields(root) {
+  let first = null;
+  for (const el of controls(root)) {
+    const msg = fieldProblem(el);
+    markField(el, msg);
+    if (msg && !first) first = el;
+  }
+  return first;
+}
+
+// Marks the required fields with an asterisk, so they are known before sending.
+function markRequired(root) {
+  root.querySelectorAll("[required]").forEach((el) => {
+    const label = el.closest("label");
+    if (!label || label.querySelector(".req")) return;
+    const req = document.createElement("span");
+    req.className = "req";
+    req.textContent = " *";
+    req.setAttribute("aria-hidden", "true");
+    const text = [...label.childNodes].find((n) => n.nodeType === 3 && n.textContent.trim());
+    if (text) text.after(req);
+  });
+}
+
+// Forms with unsaved changes, so leaving the page warns first.
+const dirtyForms = new Set();
+window.addEventListener("beforeunload", (e) => {
+  if (dirtyForms.size) e.preventDefault();
+});
+
+// A form in a dialog. `fields` is the HTML of the fields, or for a longer form
+// a list of steps ({ title, html }), shown one at a time with "next" and
+// "back"; `opts.summary(values)` adds a last step that shows what will be
+// sent. Problems show next to their field, from the browser's check and from
+// the server's answer. Closing with unsaved changes asks first.
+function dialog(title, fields, onSubmit, submitLabel = "שמירה", opts = {}) {
   const d = document.createElement("dialog");
   const titleId = `dlg-${Math.random().toString(36).slice(2, 8)}`;
+  const steps = Array.isArray(fields) ? [...fields] : [{ title: "", html: fields }];
+  if (opts.summary) steps.push({ title: "סיכום לפני שליחה", html: `<div class="full summary-box" data-summary></div>`, summary: true });
+  const many = steps.length > 1;
   d.setAttribute("aria-labelledby", titleId);
   d.innerHTML = `<form method="dialog" novalidate>
     <h3 id="${titleId}">${esc(title)}</h3>
-    <div class="grid">${fields}</div>
+    ${
+      many
+        ? `<ol class="steps" aria-label="שלבים">${steps
+            .map((st, i) => `<li data-dot="${i}"><span>${i + 1}</span> ${esc(st.title)}</li>`)
+            .join("")}</ol>`
+        : ""
+    }
+    ${steps.map((st, i) => `<fieldset class="grid step" data-step="${i}" ${i ? "hidden" : ""}>${many ? `<legend class="sr">${esc(st.title)}</legend>` : ""}${st.html}</fieldset>`).join("")}
     <div class="err" role="alert"></div>
-    <div class="actions"><button class="btn primary" value="ok">${esc(submitLabel)}</button>
-    <button class="btn" value="cancel" formnovalidate>ביטול</button></div></form>`;
+    <div class="confirm-leave" hidden role="alertdialog" aria-label="שינויים שלא נשמרו">יש שינויים שלא נשמרו. לצאת בלי לשמור?
+      <button type="button" class="btn danger" data-leave>יציאה בלי שמירה</button><button type="button" class="btn" data-stay>חזרה לטופס</button></div>
+    <div class="actions">
+      ${many ? `<button type="button" class="btn" data-back hidden>הקודם</button><button type="button" class="btn primary" data-next>הבא</button>` : ""}
+      <button class="btn primary" value="ok" ${many ? "hidden" : ""}>${esc(submitLabel)}</button>
+      <button class="btn" value="cancel" formnovalidate>ביטול</button></div></form>`;
   document.body.append(d);
   const form = d.querySelector("form");
-  form.addEventListener("submit", async (e) => {
-    if (e.submitter?.value === "cancel") return;
-    e.preventDefault();
-    const btn = form.querySelector(".primary");
-    btn.disabled = true;
-    try {
-      await onSubmit(Object.fromEntries(new FormData(form)));
-      d.close();
-    } catch (err) {
-      form.querySelector(".err").textContent = err.message;
-    } finally {
-      btn.disabled = false;
+  markRequired(form);
+  let at = 0;
+  let dirty = false;
+  let sent = false;
+  const values = () => Object.fromEntries(new FormData(form));
+  const show = (i) => {
+    at = i;
+    form.querySelectorAll("[data-step]").forEach((f) => (f.hidden = Number(f.dataset.step) !== i));
+    form.querySelectorAll("[data-dot]").forEach((li) => {
+      const n = Number(li.dataset.dot);
+      li.className = n < i ? "done" : n === i ? "now" : "";
+      if (n === i) li.setAttribute("aria-current", "step");
+      else li.removeAttribute("aria-current");
+    });
+    if (many) {
+      form.querySelector("[data-back]").hidden = i === 0;
+      form.querySelector("[data-next]").hidden = i === steps.length - 1;
+      form.querySelector("[value=ok]").hidden = i !== steps.length - 1;
+    }
+    if (steps[i].summary) form.querySelector("[data-summary]").innerHTML = opts.summary(values());
+    form.querySelector(".err").textContent = "";
+    (controls(form.querySelector(`[data-step="${i}"]`))[0] ?? form.querySelector(`[data-step="${i}"]`)).focus?.();
+  };
+  // Moving on checks the step in view; the server checks everything again.
+  const stepOk = (i) => {
+    const bad = checkFields(form.querySelector(`[data-step="${i}"]`));
+    if (bad) {
+      form.querySelector(".err").textContent = "יש שדות לתקן, מסומנים ליד השדה";
+      bad.focus();
+      return false;
+    }
+    return true;
+  };
+  form.querySelector("[data-next]")?.addEventListener("click", () => stepOk(at) && show(at + 1));
+  form.querySelector("[data-back]")?.addEventListener("click", () => show(at - 1));
+  form.addEventListener("input", (e) => {
+    dirty = true;
+    dirtyForms.add(form);
+    if (e.target.getAttribute?.("aria-invalid") === "true") markField(e.target, fieldProblem(e.target));
+  });
+  // Enter in a field of an earlier step goes to the next step.
+  form.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && many && at < steps.length - 1 && e.target.tagName !== "TEXTAREA") {
+      e.preventDefault();
+      form.querySelector("[data-next]").click();
     }
   });
-  d.addEventListener("close", () => d.remove());
+  const leave = form.querySelector(".confirm-leave");
+  const askLeave = () => {
+    leave.hidden = false;
+    leave.querySelector("[data-stay]").focus();
+  };
+  leave.querySelector("[data-leave]").onclick = () => {
+    dirty = false;
+    d.close();
+  };
+  leave.querySelector("[data-stay]").onclick = () => {
+    leave.hidden = true;
+    (controls(form.querySelector(`[data-step="${at}"]`))[0] ?? form).focus();
+  };
+  d.addEventListener("cancel", (e) => {
+    if (dirty && !sent) {
+      e.preventDefault();
+      askLeave();
+    }
+  });
+  form.addEventListener("submit", async (e) => {
+    if (e.submitter?.value === "cancel") {
+      if (dirty) {
+        e.preventDefault();
+        askLeave();
+      }
+      return;
+    }
+    e.preventDefault();
+    for (let i = 0; i < steps.length; i++) {
+      if (!checkFields(form.querySelector(`[data-step="${i}"]`))) continue;
+      show(i);
+      stepOk(i);
+      return;
+    }
+    const btn = form.querySelector("[value=ok]");
+    btn.disabled = true;
+    btn.setAttribute("aria-busy", "true");
+    form.querySelector(".err").textContent = "";
+    try {
+      await onSubmit(values());
+      sent = true;
+      dirty = false;
+      d.close();
+    } catch (err) {
+      // A problem the server tied to a field shows next to it, on its step.
+      const named = (err.issues || [])
+        .map((i) => [form.querySelector(`[name="${(opts.fieldOf?.[i.path[0]] ?? i.path[0])}"]`), i.message])
+        .filter(([el]) => el);
+      named.forEach(([el, msg]) => markField(el, msg));
+      if (named.length) {
+        const stepOf = Number(named[0][0].closest("[data-step]").dataset.step);
+        if (stepOf !== at) show(stepOf);
+        named[0][0].focus();
+        form.querySelector(".err").textContent = "יש שדות לתקן, מסומנים ליד השדה";
+      } else form.querySelector(".err").textContent = err.message;
+    } finally {
+      btn.disabled = false;
+      btn.removeAttribute("aria-busy");
+    }
+  });
+  d.addEventListener("close", () => {
+    dirtyForms.delete(form);
+    d.remove();
+  });
   d.showModal();
+  if (many) show(0);
   return d;
 }
 
@@ -225,6 +412,7 @@ function apartmentPicker(list, preset) {
       if (!input) return;
       input.addEventListener("input", () => {
         const match = list.find((e) => label(e) === input.value.trim());
+        input.setCustomValidity(match || !input.value ? "" : "צריך לבחור דירה מהרשימה");
         d.querySelector("input[name=engagementId]").value = match?.id ?? "";
         d.querySelector("#apartment-picked").textContent = match
           ? `נבחרה דירה ${match.apartment_code} · ${match.address} · לקוח: ${match.client_name ?? "—"}`
@@ -256,16 +444,26 @@ async function contactField(name, label, kind) {
 async function intakeDialog() {
   const owner = await contactField("owner", "בעל הדירה", "owner");
   const client = await contactField("client", "לקוח (תאגיד)", "client");
-  dialog(
+  const known = (c, value) => (c.resolve(value).id ? "קיים במערכת" : "ייפתח כרטיס חדש");
+  const d = dialog(
     "קליטת דירה חדשה",
-    field("baseNumber", "מספר בסיס דירה", 'type="number" required min="1"') +
-      field("monthlyRent", "שכר דירה חודשי", 'type="number" required min="0" step="0.01"') +
-      field("address", "כתובת מלאה", "required", true) +
-      owner.html +
-      client.html +
-      field("startsOn", "תחילת התקשרות", 'type="date" required') +
-      field("endsOn", "סיום התקשרות", 'type="date" required') +
-      field("moveInOn", "תאריך כניסה", 'type="date" required'),
+    [
+      {
+        title: "הדירה",
+        html:
+          field("baseNumber", "מספר בסיס דירה", 'type="number" required min="1" step="1"') +
+          (allowed("amounts.view") ? field("monthlyRent", "שכר דירה חודשי", 'type="number" required min="0" step="0.01"') : "") +
+          field("address", "כתובת מלאה", "required", true),
+      },
+      { title: "בעלים ולקוח", html: owner.html + client.html },
+      {
+        title: "תקופה",
+        html:
+          field("startsOn", "תחילת התקשרות", 'type="date" required') +
+          field("endsOn", "סיום התקשרות", 'type="date" required') +
+          field("moveInOn", "תאריך כניסה", 'type="date" required'),
+      },
+    ],
     async (v) => {
       await api("POST", "/intakes", {
         baseNumber: Number(v.baseNumber),
@@ -275,14 +473,38 @@ async function intakeDialog() {
         startsOn: v.startsOn,
         endsOn: v.endsOn,
         moveInOn: v.moveInOn,
-        monthlyRent: Number(v.monthlyRent),
+        monthlyRent: Number(v.monthlyRent ?? 0),
       });
-      toast("הדירה נשמרה. הסנכרון ל-Planfix רץ ברקע.");
+      toast(SAVED_NOT_SYNCED);
       route();
     },
     "קליטה",
+    {
+      summary: (v) => summaryList([
+        ["דירה", `${v.baseNumber} · ${v.address}`],
+        ...(allowed("amounts.view") ? [["שכר דירה חודשי", money(v.monthlyRent)]] : []),
+        ["בעל הדירה", `${v.owner} (${known(owner, v.owner)})`],
+        ["לקוח", `${v.client} (${known(client, v.client)})`],
+        ["תקופה", `${date(v.startsOn)} עד ${date(v.endsOn)} · כניסה ${date(v.moveInOn)}`],
+      ]),
+    },
   );
+  // The end of the engagement comes after its start.
+  const [startsOn, endsOn] = ["startsOn", "endsOn"].map((n) => d.querySelector(`[name=${n}]`));
+  const order = () => endsOn.setCustomValidity(startsOn.value && endsOn.value && endsOn.value <= startsOn.value ? "הסיום צריך להיות אחרי ההתחלה" : "");
+  startsOn.addEventListener("input", order);
+  endsOn.addEventListener("input", order);
 }
+
+// What a form will send, for its last step. Values are shown as text.
+const summaryList = (rows) =>
+  `<p class="sub">כך זה יישמר. אפשר לחזור לשלב קודם ולתקן.</p><dl class="summary">${rows
+    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v || "—")}</dd>`)
+    .join("")}</dl>`;
+
+// After a save: saved here, and on its way to Planfix. Success in Planfix is
+// shown only once Planfix confirmed it, on the record itself.
+const SAVED_NOT_SYNCED = "נשמר במערכת. השליחה ל־Planfix ממתינה, והמצב שלה מוצג ברשומה.";
 
 // Opened from an apartment, the request is on it; from a client card, the
 // list holds that client's apartments only.
@@ -293,19 +515,38 @@ async function newRequestDialog(engagementId, clientId) {
   const apartment = apartmentPicker(engagements, engagementId);
   const d = dialog(
     "פתיחת קריאת שירות",
-    apartment.html +
-      field("subject", "נושא התקלה", "required", true) +
-      `<label>סוג תקלה<select name="category">${options(Object.entries(CATEGORY), "other")}</select></label>` +
-      `<label>דחיפות<select name="urgency">${options(Object.entries(URGENCY).map(([k, [l]]) => [k, l]), "normal")}</select></label>` +
-      field("reportedBy", "פותח הקריאה", "required") +
-      `<label class="full">פירוט<textarea name="description" rows="3"></textarea></label>`,
+    [
+      { title: "דירה", html: apartment.html },
+      {
+        title: "התקלה",
+        html:
+          field("subject", "נושא התקלה", "required", true) +
+          `<label>סוג תקלה<select name="category">${options(Object.entries(CATEGORY), "other")}</select></label>` +
+          `<label>דחיפות<select name="urgency">${options(Object.entries(URGENCY).map(([k, [l]]) => [k, l]), "normal")}</select></label>` +
+          field("reportedBy", "מי דיווח (דייר, בעלים וכו׳)", "required") +
+          `<label class="full">פירוט<textarea name="description" rows="3"></textarea></label>`,
+      },
+    ],
     async (v) => {
       const { apartment: _, ...rest } = v;
       const { id } = await api("POST", "/service-requests", { ...rest, engagementId: apartment.value(v), description: v.description || undefined });
-      toast("הקריאה נפתחה");
+      toast(`הקריאה נפתחה. ${SAVED_NOT_SYNCED}`);
       location.hash = `#/requests/${id}`;
     },
     "פתיחה",
+    {
+      fieldOf: { engagementId: "apartment" },
+      summary: (v) => {
+        const e = engagements.find((x) => x.id === v.engagementId);
+        return summaryList([
+          ["דירה", e ? `${e.apartment_code} · ${e.address} · ${e.client_name}` : ""],
+          ["נושא", v.subject],
+          ["סוג ודחיפות", `${CATEGORY[v.category]} · ${URGENCY[v.urgency][0]}`],
+          ["דיווח", v.reportedBy],
+          ["פירוט", v.description],
+        ]);
+      },
+    },
   );
   apartment.wire(d);
 }
@@ -429,6 +670,84 @@ async function stepDialog(r, action) {
   }
 }
 
+// ---------- moving between screens ----------
+
+// The screens visited in this tab, so a card can lead back to where the
+// person came from (a client, a property, a filtered list) and not only to
+// the full list. Kept per tab; a private window simply starts empty.
+function readTrail() {
+  try {
+    return JSON.parse(sessionStorage.getItem("trail")) || [];
+  } catch {
+    return [];
+  }
+}
+function saveTrail(t) {
+  try {
+    sessionStorage.setItem("trail", JSON.stringify(t.slice(-10)));
+  } catch {
+    // no storage: the back link falls back to the full list
+  }
+}
+function noteTrail(hash, title) {
+  let t = readTrail();
+  const i = t.findIndex((x) => x.hash === hash);
+  if (i >= 0) t = t.slice(0, i);
+  t.push({ hash, title });
+  saveTrail(t);
+}
+const sectionOf = (hash) => hash.replace(/^#\/?/, "").split(/[/?]/)[0];
+
+// "Back to" the screen the person came from, or to the full list.
+function backLink(section, label) {
+  const here = location.hash;
+  const prev = readTrail().filter((x) => x.hash !== here).at(-1);
+  return prev && prev.hash !== `#/${section}`
+    ? `<p><a class="back" href="${esc(prev.hash)}">→ חזרה ל${esc(prev.title)}</a> · <a href="${esc(listHash(section))}">${esc(label)}</a></p>`
+    : `<p><a class="back" href="${esc(listHash(section))}">→ ${esc(label)}</a></p>`;
+}
+
+// The list as last filtered, so going back keeps the search and filters.
+function listHash(section) {
+  try {
+    return sessionStorage.getItem(`list:${section}`) || `#/${section}`;
+  } catch {
+    return `#/${section}`;
+  }
+}
+
+// Fills a filter form from the address, and writes it back on each change,
+// so the browser's back button and the back links return to the same view.
+function keepFilters(form, section, keep = []) {
+  const params = new URLSearchParams(location.hash.split("?")[1] || "");
+  for (const el of form.elements) {
+    if (!el.name || !params.has(el.name)) continue;
+    if (el.type === "checkbox") el.checked = params.get(el.name) === el.value;
+    else el.value = params.get(el.name);
+  }
+  const write = () => {
+    const next = new URLSearchParams();
+    for (const k of keep) if (params.has(k)) next.set(k, params.get(k));
+    for (const [k, v] of new FormData(form)) if (v) next.set(k, v);
+    const hash = `#/${section}${next.toString() ? `?${next}` : ""}`;
+    history.replaceState(null, "", hash);
+    try {
+      sessionStorage.setItem(`list:${section}`, hash);
+    } catch {
+      // ignore
+    }
+    const t = readTrail();
+    if (t.length && sectionOf(t.at(-1).hash) === section && !t.at(-1).hash.slice(2).includes("/")) {
+      t[t.length - 1].hash = hash;
+      saveTrail(t);
+    }
+  };
+  form.addEventListener("input", write);
+  form.addEventListener("change", write);
+  form.addEventListener("reset", () => setTimeout(write));
+  write();
+}
+
 // ---------- views ----------
 
 // A number on the work center that opens the list it was counted from.
@@ -447,12 +766,7 @@ async function workCenterView() {
   const c = w.counts;
   const hour = new Date().getHours();
   const hello = hour < 12 ? "בוקר טוב" : hour < 18 ? "צהריים טובים" : "ערב טוב";
-  const requests = w.requests.map((r) => {
-    const n = nextStep(r);
-    return `<div class="card"><div class="grow"><b>${esc(r.subject)}</b> ${pill(STATUS[r.status])} ${urgencyPill(r.urgency)}<br>
-      <small>${esc(r.apartment_code)} · ${esc(r.address)} · נפתחה ${date(r.created_at)}</small><br>${esc(n.text)}</div>
-      <a class="btn primary" href="#/requests/${r.id}">${esc(n.label)}</a></div>`;
-  });
+  const requests = w.requests.map(requestCard);
   view.innerHTML = `
     <div class="head"><div><h1>${hello}, ${esc(me.name)}</h1>
     <p class="sub">מה עליך לעשות, מה דחוף, ומה מחכה למישהו אחר.</p></div>
@@ -461,6 +775,7 @@ async function workCenterView() {
       ${allowed("requests.manage") ? `<button class="btn" id="new-req">קריאת שירות</button>` : ""}
     </div></div>
     ${welcomeCard()}
+    ${exceptionsCard(w)}
     <div class="kpis">
       ${kpi(c.my_today, "המשימות שלי להיום", "#/tasks?filter=mine")}
       ${kpi(c.my_overdue, "באיחור", "#/tasks?filter=overdue", c.my_overdue ? "bad" : "")}
@@ -471,8 +786,14 @@ async function workCenterView() {
       ${allowed("requests.view") ? kpi(c.awaiting_client, "ממתינות לאישור לקוח", "#/requests") : ""}
       ${allowed("requests.view") ? kpi(c.open_requests, "קריאות שירות פתוחות", "#/requests") : ""}
     </div>
-    <h2>המשימות הבאות שלי</h2>
-    ${w.myTasks.length ? w.myTasks.map(taskCard).join("") : `<div class="empty">אין לך משימות פתוחות</div>`}
+    <h2>המשימות שלי לפי מועד</h2>
+    ${myTasksByDue(w.myTasks)}
+    ${
+      w.myRequests?.length
+        ? `<h2>קריאות שפתחתי ועדיין פתוחות</h2>${w.myRequests.map(requestCard).join("")}
+           <p class="sub"><a href="#/requests?mine=1">לכל הקריאות שפתחתי</a></p>`
+        : ""
+    }
     ${
       w.syncFailures.length
         ? `<h2>כשלי סנכרון</h2>${w.syncFailures
@@ -492,10 +813,59 @@ async function workCenterView() {
   view.querySelector("#new-req")?.addEventListener("click", () => newRequestDialog());
 }
 
-// Department manager and up: who carries what, and what has not moved.
+// A request with its next action, as the work center lists it.
+function requestCard(r) {
+  const n = nextStep(r);
+  return `<div class="card"><div class="grow"><b><a href="#/requests/${r.id}">${esc(r.subject)}</a></b> ${pill(STATUS[r.status])} ${urgencyPill(r.urgency)}<br>
+    <small>${esc(r.apartment_code)} · ${esc(r.address)} · נפתחה ${date(r.created_at)}</small><br><span class="next-text">הבא: ${esc(n.text)}</span></div>
+    <a class="btn primary" href="#/requests/${r.id}" aria-label="${esc(`${n.label}: ${r.subject}`)}">${esc(n.label)}</a></div>`;
+}
+
+// What needs this person now: overdue tasks, emergencies, own requests that wait.
+function exceptionsCard(w) {
+  const c = w.counts;
+  const blocked = (w.myRequests || []).filter((r) => r.awaiting_approval || (r.status === "triage" && r.charge_to === "client" && !clientCovers(r)));
+  const items = [
+    c.my_overdue ? `<a href="#/tasks?filter=overdue">${c.my_overdue} משימות שלך באיחור</a>` : "",
+    allowed("requests.view") && c.emergencies ? `<a href="#/requests?urgency=emergency">${c.emergencies} קריאות חירום פתוחות</a>` : "",
+    blocked.length ? `<a href="#/requests?mine=1">${blocked.length} קריאות שפתחת ממתינות לאישור</a>` : "",
+    allowed("approvals.decide") && c.pending_approvals ? `<a href="#/approvals">${c.pending_approvals} חריגות ממתינות לאישורך</a>` : "",
+  ].filter(Boolean);
+  return items.length
+    ? `<div class="exceptions" role="region" aria-label="דורש טיפול"><b>דורש טיפול:</b><ul>${items.map((i) => `<li>${i}</li>`).join("")}</ul></div>`
+    : `<div class="notice">אין חריגות: אין משימות באיחור ואין קריאות שלך שממתינות.</div>`;
+}
+
+// The person's open tasks by when they are due.
+function myTasksByDue(tasks) {
+  if (!tasks.length) return `<div class="empty">אין לך משימות פתוחות. משימה חדשה נפתחת בכפתור "משימה חדשה".</div>`;
+  const t0 = today();
+  const week = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+  const due = (t) => String(t.due_on || "").slice(0, 10);
+  const groups = [
+    ["באיחור", tasks.filter((t) => t.overdue)],
+    ["היום", tasks.filter((t) => !t.overdue && due(t) === t0)],
+    ["השבוע", tasks.filter((t) => due(t) > t0 && due(t) <= week)],
+    ["בהמשך או בלי מועד", tasks.filter((t) => !due(t) || due(t) > week)],
+  ].filter(([, list]) => list.length);
+  return groups.map(([label, list]) => `<h3 class="group">${esc(label)} <small>(${list.length})</small></h3>${list.map(taskCard).join("")}`).join("");
+}
+
+// Department manager and up: who carries what, what holds work up, and what has not moved.
 function teamSection(w) {
   const pct = (u) => (u.done_30d ? `${Math.round((100 * u.on_time_30d) / u.done_30d)}%` : "—");
-  return `<h2>הצוות</h2>
+  const b = w.blockers || {};
+  const tone = (n) => (n ? "warn" : "");
+  return `<h2>עומסים וחסמים${me.scopeMode === "scoped" ? " בתחום שלך" : ""}</h2>
+    <div class="kpis">
+      ${kpi(b.awaiting_manager ?? 0, "ממתינות לאישור מנהל", "#/requests?state=awaiting_manager", tone(b.awaiting_manager))}
+      ${kpi(b.awaiting_client ?? 0, "ממתינות לאישור לקוח", "#/requests?state=awaiting_client", tone(b.awaiting_client))}
+      ${kpi(b.invoice_pending ?? 0, "חשבוניות ממתינות לאישור חריגה", "#/requests?state=invoice_pending", tone(b.invoice_pending))}
+      ${kpi(b.unassigned ?? 0, "חדשות בלי ספק יותר מיום", "#/requests?state=unassigned", tone(b.unassigned))}
+      ${kpi(b.stuck ?? 0, "קריאות שלא זזו 3 ימים", "#/requests?state=stuck", tone(b.stuck))}
+      ${kpi(b.overdue_tasks ?? 0, "משימות צוות באיחור", "#/tasks?filter=overdue", b.overdue_tasks ? "bad" : "")}
+    </div>
+    <h2>הצוות</h2>
     <div class="wrap"><table class="table"><thead><tr><th>עובד</th><th>משימות פתוחות</th><th>באיחור</th><th>הושלמו ב-30 יום</th><th>בזמן</th></tr></thead><tbody>${w.workload
       .map(
         (u) => `<tr><td>${esc(u.name)}</td><td>${u.open}</td><td>${u.overdue ? pill([String(u.overdue), "bad"]) : "0"}</td>
@@ -606,7 +976,7 @@ async function taskView(id) {
   const team = await api("GET", "/team");
   const next = { open: ["in_progress", "התחלת טיפול"], in_progress: ["done", "סימון כהושלמה"], done: ["open", "פתיחה מחדש"] }[t.status];
   view.innerHTML = `
-    <p><a href="#/tasks">→ כל המשימות</a></p>
+    ${backLink("tasks", "כל המשימות")}
     <h1>${esc(t.title)}</h1>
     <p class="sub">${pill(TASK_STATUS[t.status])} ${t.urgent ? pill(["דחוף", "bad"]) : ""} ${t.overdue ? pill(["באיחור", "bad"]) : ""}</p>
     <div class="next"><div class="grow" style="flex:1">אחראי: <b>${esc(t.assignee_name)}</b> · ${t.due_on ? `עד ${date(t.due_on)}` : "ללא מועד"}
@@ -691,6 +1061,7 @@ async function apartmentsView(params) {
   view.querySelector("#add")?.addEventListener("click", intakeDialog);
   const form = view.querySelector("#filters");
   if (!form) return;
+  keepFilters(form, "apartments", ["archived"]);
   const render = () => {
     const f = Object.fromEntries(new FormData(form));
     const q = f.q.trim().toLowerCase();
@@ -741,6 +1112,15 @@ async function apartmentsView(params) {
   render();
 }
 
+// What holds a request up, for the work center's links and the list filter.
+const BLOCKER = {
+  awaiting_manager: ["ממתינות לאישור מנהל", (r) => r.awaiting_approval],
+  awaiting_client: ["ממתינות לאישור לקוח", (r) => r.status === "triage" && r.charge_to === "client" && !clientCovers(r)],
+  invoice_pending: ["חשבונית ממתינה לאישור חריגה", (r) => r.invoice_pending],
+  unassigned: ["חדשות בלי ספק יותר מיום", (r) => r.status === "new" && Date.now() - new Date(r.created_at) > 86400000],
+  stuck: ["לא זזו 3 ימים", (r) => r.status !== "closed" && r.last_move && Date.now() - new Date(r.last_move) > 3 * 86400000],
+};
+
 async function requestsView() {
   const rows = await api("GET", "/service-requests");
   view.innerHTML = `
@@ -748,46 +1128,178 @@ async function requestsView() {
     ${allowed("requests.manage") ? `<button class="btn primary" id="add">קריאה חדשה</button>` : ""}</div>
     ${
       rows.length
-        ? `<div class="wrap"><table class="table"><thead><tr><th>נושא</th><th>סוג</th><th>דירה</th><th>סטטוס</th><th>על חשבון</th>
-          <th>ספק</th><th>נפתחה</th></tr></thead><tbody>${rows
-            .map(
-              (r) => `<tr class="click" data-id="${r.id}" tabindex="0"><td>${esc(r.subject)} ${urgencyPill(r.urgency)}</td>
-              <td>${esc(CATEGORY[r.category] || "")}</td>
-              <td>${apt(r.apartment_code, r.property_id)}</td><td>${pill(STATUS[r.status])} ${r.awaiting_approval ? pill(["ממתין לאישור חריגה", "warn"]) : ""}</td><td>${esc(CHARGE[r.charge_to] || "")}</td>
-              <td>${esc(r.supplier_name || "")}</td><td>${date(r.created_at)}</td></tr>`,
-            )
-            .join("")}</tbody></table></div>`
-        : `<div class="empty">אין קריאות</div>`
+        ? `<form class="filters" id="filters" role="search" aria-label="סינון קריאות">
+            <label>חיפוש<input name="q" type="search" placeholder="נושא, דירה, כתובת או לקוח"></label>
+            <label>מצב<select name="status"><option value="">פתוחות</option><option value="all">הכול</option>${Object.entries(STATUS)
+              .map(([k, [l]]) => `<option value="${k}">${esc(l)}</option>`)
+              .join("")}</select></label>
+            <label>דחיפות<select name="urgency"><option value="">כל הדחיפויות</option>${Object.entries(URGENCY)
+              .map(([k, [l]]) => `<option value="${k}">${esc(l)}</option>`)
+              .join("")}</select></label>
+            <label>חסם<select name="state"><option value="">הכול</option>${Object.entries(BLOCKER)
+              .map(([k, [l]]) => `<option value="${k}">${esc(l)}</option>`)
+              .join("")}</select></label>
+            <label class="check"><span><input type="checkbox" name="mine" value="1"> שפתחתי</span></label>
+            <button class="btn" type="reset">איפוס</button>
+            <span class="count" id="count" aria-live="polite"></span>
+          </form><div id="request-rows"></div>`
+        : `<div class="empty">אין קריאות. קריאה חדשה נפתחת מכרטיס הדירה או בכפתור "קריאה חדשה".</div>`
     }`;
   view.querySelector("#add")?.addEventListener("click", () => newRequestDialog());
-  view.querySelectorAll("tr.click").forEach((tr) => {
-    const go = () => (location.hash = `#/requests/${tr.dataset.id}`);
-    tr.onclick = (e) => !e.target.closest("a, button, input, select") && go();
-    tr.onkeydown = (e) => e.key === "Enter" && go();
-  });
-  selectable(view.querySelector(".wrap"), rows, { file: "קריאות-שירות", name: (r) => `${r.apartment_code} · ${r.subject}` });
+  const form = view.querySelector("#filters");
+  if (!form) return;
+  keepFilters(form, "requests");
+  const render = () => {
+    const f = Object.fromEntries(new FormData(form));
+    const q = (f.q || "").trim().toLowerCase();
+    const shown = rows.filter(
+      (r) =>
+        (f.status === "all" ? true : f.status ? r.status === f.status : r.status !== "closed") &&
+        (!f.urgency || r.urgency === f.urgency) &&
+        (!f.state || BLOCKER[f.state]?.[1](r)) &&
+        (!f.mine || r.created_by === me.id) &&
+        (!q || `${r.subject} ${r.apartment_code} ${r.address} ${r.client_name}`.toLowerCase().includes(q)),
+    );
+    view.querySelector("#count").textContent = `${shown.length} מתוך ${rows.length}`;
+    view.querySelector(".bulk")?.remove();
+    view.querySelector("#request-rows").innerHTML = shown.length
+      ? `<div class="wrap"><table class="table stack"><thead><tr><th>נושא</th><th>סוג</th><th>דירה</th><th>לקוח</th><th>סטטוס</th><th>על חשבון</th>
+          <th>ספק</th><th>נפתחה</th></tr></thead><tbody>${shown
+            .map(
+              (r) => `<tr class="click" data-id="${r.id}"><td data-label="נושא"><a href="#/requests/${r.id}">${esc(r.subject)}</a> ${urgencyPill(r.urgency)}</td>
+              <td data-label="סוג">${esc(CATEGORY[r.category] || "")}</td>
+              <td data-label="דירה">${apt(r.apartment_code, r.property_id)}</td>
+              <td data-label="לקוח"><a href="#/clients/${r.client_id}">${esc(r.client_name)}</a></td>
+              <td data-label="סטטוס">${pill(STATUS[r.status])} ${r.awaiting_approval ? pill(["ממתין לאישור חריגה", "warn"]) : ""}${r.invoice_pending ? pill(["חשבונית ממתינה", "warn"]) : ""}</td>
+              <td data-label="על חשבון">${esc(CHARGE[r.charge_to] || "")}</td>
+              <td data-label="ספק">${esc(r.supplier_name || "")}</td><td data-label="נפתחה">${date(r.created_at)}</td></tr>`,
+            )
+            .join("")}</tbody></table></div>`
+      : `<div class="empty">אין קריאות שמתאימות לסינון. אפשר ללחוץ "איפוס".</div>`;
+    view.querySelectorAll("#request-rows tr.click").forEach((tr) => {
+      // A block body: an on-handler that returns false cancels the click, which
+      // would stop the links inside the row.
+      tr.onclick = (e) => {
+        if (!e.target.closest("a, button, input, select")) location.hash = `#/requests/${tr.dataset.id}`;
+      };
+    });
+    selectable(view.querySelector("#request-rows .wrap"), shown, { file: "קריאות-שירות", name: (r) => `${r.apartment_code} · ${r.subject}` });
+  };
+  // On input only: a re-render on "change" (when the search box loses focus)
+  // would replace the link being clicked.
+  form.addEventListener("input", render);
+  form.addEventListener("reset", () => setTimeout(render));
+  form.addEventListener("submit", (e) => e.preventDefault());
+  render();
 }
+
+// Saved here, and separately where it stands in Planfix: success there is
+// shown only once Planfix confirmed it.
+const PLANFIX_STATE = {
+  synced: ["סונכרן ל־Planfix", "good"],
+  pending: ["ממתין לסנכרון ל־Planfix", "warn"],
+  failed: ["הסנכרון ל־Planfix נכשל", "bad"],
+  unknown: ["לא ידוע אם הגיע ל־Planfix: בבדיקה", "bad"],
+};
+const syncPills = (state, planfixId) =>
+  `${pill(["נשמר במערכת", "good"])} ${pill(PLANFIX_STATE[state] || PLANFIX_STATE.pending)}${
+    state === "synced" && planfixId ? ` ${planfixLink("task", planfixId, `#${planfixId}`)}` : ""
+  }`;
+
+// Who may take a step, for saying why a button is missing.
+const PERMISSION_NAME = {
+  "invoices.create": "קליטת חשבוניות ספק",
+  "approvals.decide": "אישור חריגות",
+  "requests.manage": "ניהול קריאות שירות",
+};
+
+// The request's way from opening to closing, each stage done, current,
+// waiting on someone, or not needed.
+function requestStages(r) {
+  const order = ["new", "triage", "with_supplier", "awaiting_resolution", "closed"];
+  const at = order.indexOf(r.status);
+  const a = r.approval;
+  const needsClient = r.charge_to === "client";
+  const approvalsBlocked = a?.status === "pending" || a?.status === "rejected" || (needsClient && !clientCovers(r) && at <= 1);
+  const inv = r.invoice;
+  const stage = (label, state, detail) => ({ label, state, detail });
+  return [
+    stage("נפתחה", "done", `${date(r.created_at)}${r.opened_by_name ? ` · ${r.opened_by_name}` : ""}`),
+    stage("ספק ועלות", r.supplier_id ? "done" : "now", r.supplier_name || "טרם נבחר ספק"),
+    stage(
+      "אישורים",
+      !a && !needsClient ? (r.supplier_id ? "skip" : "todo") : approvalsBlocked ? "blocked" : r.supplier_id ? "done" : "todo",
+      [
+        a ? `מנהל: ${{ pending: "ממתין", approved: "אושר", rejected: "נדחה", superseded: "הוחלף" }[a.status]}` : "מנהל: לא נדרש",
+        needsClient ? `לקוח: ${clientCovers(r) ? "אושר" : r.client_approved_at ? "נדרש מחדש" : "ממתין"}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    ),
+    stage("אצל הספק", at >= 3 ? "done" : at === 2 ? "now" : "todo", at >= 3 ? "הספק סיים" : at === 2 ? "בעבודה" : ""),
+    stage(
+      "חשבונית",
+      inv ? (inv.approval_state === "pending" ? "blocked" : "done") : at === 3 ? "now" : "todo",
+      inv ? `${inv.invoice_number}${inv.approval_state === "pending" ? " · ממתינה לאישור חריגה" : ""}` : "",
+    ),
+    stage("נסגרה", at === 4 ? "done" : "todo", r.closed_at ? date(r.closed_at) : ""),
+  ];
+}
+const STAGE = { done: "הושלם", now: "השלב הנוכחי", blocked: "ממתין, חסום", todo: "עוד לא", skip: "לא נדרש" };
+const stagesHtml = (stages) =>
+  `<ol class="progress" aria-label="התקדמות הקריאה">${stages
+    .map(
+      (st) => `<li class="${st.state}" ${st.state === "now" || st.state === "blocked" ? 'aria-current="step"' : ""}>
+        <b>${esc(st.label)}</b><span class="sr">: ${STAGE[st.state]}</span><small>${esc(st.detail || STAGE[st.state])}</small></li>`,
+    )
+    .join("")}</ol>`;
 
 async function requestView(id) {
   const r = await api("GET", `/service-requests/${id}`);
   const step = nextStep(r);
-  // Show the step to everyone, but the button only to a role that may take it.
+  // Show the step to everyone, but the button only to a role that may take it,
+  // and say why when it is missing.
   const needs = { invoice: "invoices.create", decide: "approvals.decide" }[step?.action] || "requests.manage";
-  const mayAct = step && allowed(needs) && !(step.action === "decide" && r.approval?.requested_by === me.id);
+  const own = step?.action === "decide" && r.approval?.requested_by === me.id;
+  const mayAct = step && allowed(needs) && !own;
+  const why = !step || mayAct ? "" : own ? "ביקשת את החריגה בעצמך, ולכן מנהל אחר יאשר אותה." : `הפעולה דורשת הרשאת ${PERMISSION_NAME[needs]}, ולתפקיד שלך (${me.roleLabel}) אין אותה.`;
   const n = step && { ...step, label: mayAct ? step.label : null };
   const a = r.approval;
   const APPROVAL = { pending: ["ממתין לאישור", "warn"], approved: ["אושרה", "good"], rejected: ["נדחתה", "bad"] };
+  const people = [
+    r.opened_by_name ? `פתח במערכת: ${r.opened_by_name}` : "",
+    ...r.tasks.filter((t) => t.status !== "done").map((t) => `${t.assignee_name}: ${t.title}${t.due_on ? ` (עד ${date(t.due_on)})` : ""}`),
+  ].filter(Boolean);
   view.innerHTML = `
-    <p><a href="#/requests">→ כל הקריאות</a></p>
-    <h1>${esc(r.subject)}</h1>
-    <p class="sub">${pill(STATUS[r.status])} ${urgencyPill(r.urgency)} · ${esc(CATEGORY[r.category] || "")} ·
-      <a href="#/properties/${r.property_id}">${esc(r.apartment_code)} · ${esc(r.address)}</a> · פתח: ${esc(r.reported_by)} · ${date(r.created_at)}</p>
-    ${n ? `<div class="next"><div class="grow" style="flex:1">${esc(n.text)}</div>${n.label ? `<button class="btn primary" id="next">${esc(n.label)}</button>` : ""}</div>` : ""}
+    ${backLink("requests", "כל הקריאות")}
+    <nav class="crumbs" aria-label="מיקום"><ol>
+      <li><a href="#/clients/${r.client_id}">${esc(r.client_name)}</a></li>
+      <li><a href="#/properties/${r.property_id}">${esc(r.address)}</a></li>
+      <li>התקשרות ${esc(r.apartment_code)}</li>
+      <li aria-current="page">${esc(r.subject)}</li>
+      ${r.invoice ? `<li><button type="button" class="linkish" data-jump="invoice-card">חשבונית ${esc(r.invoice.invoice_number)}</button></li>` : ""}
+    </ol></nav>
+    <div class="head"><div><h1>${esc(r.subject)}</h1>
+    <p class="sub">${pill(STATUS[r.status])} ${urgencyPill(r.urgency)} · ${esc(CATEGORY[r.category] || "")} · דיווח: ${esc(r.reported_by)} · ${date(r.created_at)}</p></div>
+    ${allowed("invoices.view") ? `<a class="btn" href="#/requests/${r.id}/file">תיק שירות לכספים</a>` : ""}</div>
+    <p class="sync-line">${syncPills(r.sync.request, r.planfix_task_id)}</p>
+    ${
+      n
+        ? `<div class="next" role="region" aria-label="הפעולה הבאה"><div class="grow" style="flex:1"><b>הפעולה הבאה:</b> ${esc(n.text)}
+            ${why ? `<br><small class="why">${esc(why)}</small>` : ""}</div>${n.label ? `<button class="btn primary" id="next">${esc(n.label)}</button>` : ""}</div>`
+        : r.status === "closed"
+          ? `<div class="next"><div class="grow">הקריאה נסגרה ${date(r.closed_at)}. אין פעולה נוספת.</div></div>`
+          : ""
+    }
+    ${stagesHtml(requestStages(r))}
     ${r.description ? `<p>${esc(r.description)}</p>` : ""}
     <div class="facts">
+      <div><span>אחראי</span><b>${people.length ? people.map(esc).join("<br>") : "אין משימה פתוחה על הקריאה"}</b></div>
       <div><span>ספק</span><b>${r.supplier_id ? `<a href="#/suppliers/${r.supplier_id}">${esc(r.supplier_name)}</a>` : "טרם נבחר"}</b></div>
       <div><span>על חשבון</span><b>${esc(CHARGE[r.charge_to] || "טרם נקבע")}</b></div>
       <div><span>עלות משוערת</span><b>${r.estimated_cost == null ? "—" : money(r.estimated_cost)}</b></div>
+      ${r.invoice?.amount_total != null ? `<div><span>חשבונית ספק</span><b>${money(r.invoice.amount_total)}</b></div>` : ""}
+      ${r.client_approved_amount != null ? `<div><span>הלקוח אישר עד</span><b>${money(r.client_approved_amount)}</b></div>` : ""}
       <div><span>אישור מנהל לעלות</span><b>${a ? pill(APPROVAL[a.status]) : r.estimated_cost == null ? "—" : "לא נדרש (מתחת לסף)"}</b></div>
     </div>
     ${
@@ -817,14 +1329,111 @@ async function requestView(id) {
     }
     ${invoiceApprovalCard(r)}
     ${approvalHistory(r)}
+    ${r.tasks.length ? `<h2>משימות על הקריאה</h2>${r.tasks.map(taskCard).join("")}` : ""}
     ${await filesSection("service_request", r.id, allowed("requests.manage"))}
     <h2>היסטוריה</h2>
     <ul class="timeline">${r.events
       .map((e) => `<li>${esc(STATUS[e.to_status][0])} ${e.note ? `· ${esc(e.note)}` : ""} <small>${new Date(e.created_at).toLocaleString("he-IL")}</small></li>`)
       .join("")}</ul>`;
   view.querySelector("#next")?.addEventListener("click", () => stepDialog(r, n.action));
+  view.querySelectorAll("[data-jump]").forEach((b) => {
+    b.onclick = () => {
+      const target = document.getElementById(b.dataset.jump);
+      target.scrollIntoView({ block: "center" });
+      target.focus({ preventScroll: true });
+    };
+  });
   view.querySelector("#invoice-review")?.addEventListener("click", () => stepDialog(r, "review"));
   wireFiles();
+}
+
+// The service file for finance: the client and apartment, approvals,
+// supplier, the work, the invoice and amounts, and where each part stands
+// with Planfix. Printed or saved as PDF from the browser; a file with
+// anything missing says so at the top of every printed page.
+async function serviceFileView(id) {
+  const f = await api("GET", `/service-requests/${id}/file`);
+  const r = f.request;
+  const row = (k, v) => `<tr><th scope="row">${esc(k)}</th><td>${v || "—"}</td></tr>`;
+  const inv = f.invoice;
+  const MG = { pending: "ממתין", approved: "אושר", rejected: "נדחה", superseded: "הוחלף" };
+  view.innerHTML = `
+    <div class="no-print">${backLink("requests", "כל הקריאות")}</div>
+    <div class="head"><div><h1>תיק שירות: ${esc(r.subject)}</h1>
+      <p class="sub">${esc(f.client.name)} · ${esc(f.property.address)} · התקשרות ${esc(f.engagement.apartment_code)} · הופק ${new Date(f.generated_at).toLocaleString("he-IL")} על ידי ${esc(me.name)}</p></div>
+      <div class="actions no-print" style="margin:0"><a class="btn" href="#/requests/${r.id}">לקריאה</a><button class="btn primary" id="print">הדפסה או שמירה כ־PDF</button></div></div>
+    ${
+      f.partial
+        ? `<div class="partial" role="note"><b>מסמך חלקי.</b> חסר: ${esc(f.missing.join(" · "))}</div>`
+        : `<div class="notice" role="note">התיק מלא: יש אישורים, חשבונית, חיוב וסנכרון.</div>`
+    }
+    <section class="file-part"><h2>לקוח ונכס</h2><table class="table kv"><tbody>
+      ${row("לקוח", `<a href="#/clients/${f.client.id}">${esc(f.client.name)}</a>`)}
+      ${row("נכס", `<a href="#/properties/${f.property.id}">${f.property.base_number} · ${esc(f.property.address)}</a>`)}
+      ${row("בעל הדירה", esc(f.engagement.owner_name))}
+      ${row("התקשרות", `${esc(f.engagement.apartment_code)} · ${date(f.engagement.starts_on)} עד ${date(f.engagement.ends_on)}`)}
+    </tbody></table></section>
+    <section class="file-part"><h2>הקריאה</h2><table class="table kv"><tbody>
+      ${row("נושא", esc(r.subject))}
+      ${row("סוג ודחיפות", `${esc(CATEGORY[r.category] || "")} · ${esc(URGENCY[r.urgency]?.[0] || "")}`)}
+      ${row("מצב", pill(STATUS[r.status]))}
+      ${row("דיווח", esc(r.reported_by))}
+      ${row("נפתחה", `${new Date(r.created_at).toLocaleString("he-IL")}${r.opened_by_name ? ` · ${esc(r.opened_by_name)}` : ""}`)}
+      ${row("נסגרה", r.closed_at ? new Date(r.closed_at).toLocaleString("he-IL") : "")}
+      ${row("על חשבון", esc(CHARGE[r.charge_to] || ""))}
+      ${r.estimated_cost !== undefined ? row("עלות משוערת", money(r.estimated_cost)) : ""}
+      ${row("Planfix", syncPills(f.sync.request, r.planfix_task_id))}
+    </tbody></table></section>
+    <section class="file-part"><h2>אישורים</h2>
+      ${
+        f.approvals.client.length || f.approvals.manager.length
+          ? `<ul class="timeline">${f.approvals.client
+              .map(
+                (c) => `<li>לקוח: ${c.amount != null ? `${money(c.amount)} כולל מע״מ · ` : ""}${esc(c.approver_name || "—")} · ${esc(APPROVAL_METHOD[c.method] || c.method || "")}: ${esc(c.reference || "")} · נרשם על ידי ${esc(c.recorded_by_name || "—")} <small>${new Date(c.recorded_at).toLocaleString("he-IL")}</small></li>`,
+              )
+              .join("")}${f.approvals.manager
+              .map(
+                (a) => `<li>מנהל: ${a.amount != null ? `${money(a.amount)} · ` : ""}${a.supplier_invoice_id ? "חשבונית" : "הערכת עלות"} · ${esc(MG[a.status])}${a.decided_by_name ? ` · ${esc(a.decided_by_name)}` : ""} · ${esc(a.reason)} <small>${new Date(a.decided_at || a.created_at).toLocaleString("he-IL")}</small></li>`,
+              )
+              .join("")}</ul>`
+          : `<p class="sub">לא נרשמו אישורים${r.charge_to === "client" ? ", והעבודה על חשבון הלקוח" : ""}.</p>`
+      }</section>
+    <section class="file-part"><h2>ספק</h2>${
+      f.supplier
+        ? `<table class="table kv"><tbody>
+          ${row("שם", `<a href="#/suppliers/${f.supplier.id}">${esc(f.supplier.name)}</a>`)}
+          ${row("ח.פ / ת.ז", esc(f.supplier.id_number))}
+          ${row("טלפון ואימייל", esc([f.supplier.phone, f.supplier.email].filter(Boolean).join(" · ")))}
+          ${row("תנאי תשלום", esc(f.supplier.payment_terms))}
+          ${row("בנק", esc([f.supplier.bank_name, f.supplier.bank_branch, f.supplier.bank_account].filter(Boolean).join(" · ")))}
+        </tbody></table>`
+        : `<p class="sub">לא נבחר ספק.</p>`
+    }</section>
+    <section class="file-part"><h2>ביצוע</h2>
+      <ul class="timeline">${f.execution.events
+        .map((e) => `<li>${esc(STATUS[e.to_status][0])}${e.note ? ` · ${esc(e.note)}` : ""} <small>${new Date(e.created_at).toLocaleString("he-IL")}</small></li>`)
+        .join("")}</ul>
+      ${f.execution.tasks.length ? `<h3>משימות</h3><ul class="timeline">${f.execution.tasks.map((t) => `<li>${esc(t.title)} · ${esc(t.assignee_name)} · ${esc(TASK_STATUS[t.status][0])}</li>`).join("")}</ul>` : ""}
+    </section>
+    <section class="file-part"><h2>חשבונית וסכומים</h2>${
+      inv
+        ? `<table class="table kv"><tbody>
+          ${row("מספר ותאריך", `${esc(inv.invoice_number)} · ${date(inv.invoice_date)}`)}
+          ${inv.amount_total !== undefined ? row("לפני מע״מ", money(inv.amount_net)) + row("מע״מ", money(inv.amount_vat)) + row("סה״כ", `<b>${money(inv.amount_total)}</b>`) : ""}
+          ${row("אישור החשבונית", inv.approval_state === "pending" ? pill(["ממתינה לאישור חריגה", "warn"]) : inv.approval_state === "approved" ? pill(["מאושרת", "good"]) : "נקלטה לפני בקרת האישורים")}
+          ${row("בדיקת אישורים", `<ul class="approval-lines">${inv.check.lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>`)}
+          ${row("חיוב ללקוח", inv.charged_as ? `חויבה ${planfixLink("task", inv.charged_as, `#${inv.charged_as}`)}` : r.charge_to === "client" ? pill(["עוד לא חויבה", "warn"]) : "לא לחיוב הלקוח")}
+          ${row("Planfix", syncPills(f.sync.invoice, inv.planfix_task_id))}
+        </tbody></table>`
+        : `<p class="sub">לא נקלטה חשבונית ספק.</p>`
+    }</section>
+    <section class="file-part"><h2>מסמכים מצורפים</h2>${
+      f.files.length
+        ? `<ul>${f.files.map((x) => `<li><a href="/files/${x.id}" target="_blank" rel="noopener">${esc(x.filename)}</a> · ${x.entity_type === "supplier_invoice" ? "חשבונית" : "קריאה"}</li>`).join("")}</ul>`
+        : `<p class="sub">אין מסמכים.</p>`
+    }</section>
+    ${f.partial ? `<p class="partial-foot">מסמך חלקי · ${esc(f.missing.join(" · "))}</p>` : ""}`;
+  view.querySelector("#print").onclick = () => window.print();
 }
 
 // The supplier's invoice against the approvals: what was approved, the new
@@ -835,7 +1444,8 @@ function invoiceApprovalCard(r) {
   const STATE = { approved: ["מאושרת להמשך חיוב", "good"], pending: ["ממתין לאישור חריגה", "warn"] };
   const state = inv.approval_state ? pill(STATE[inv.approval_state]) : pill(["נקלטה לפני בקרת האישורים", ""]);
   const c = inv.check;
-  return `<div class="card"><div class="grow"><b>חשבונית ספק ${esc(inv.invoice_number)}</b> ${state}
+  return `<div class="card" id="invoice-card" tabindex="-1"><div class="grow"><b>חשבונית ספק ${esc(inv.invoice_number)}</b> ${state}
+    ${r.sync?.invoice ? `<br>${syncPills(r.sync.invoice, inv.planfix_task_id)}` : ""}
     ${inv.charged_as ? pill([`חויבה ללקוח (#${inv.charged_as})`, "good"]) : ""}
     <ul class="approval-lines">${c.lines
       .map((l) => `<li class="${l.startsWith("חסר:") || l.startsWith("אי אפשר") ? "bad" : ""}">${esc(l)}</li>`)
@@ -1281,7 +1891,7 @@ async function ownersView(params) {
 async function ownerView(id) {
   const [c, { properties }] = await Promise.all([api("GET", `/contacts/${id}`), api("GET", `/owners/${id}`)]);
   view.innerHTML = `
-    <p><a href="#/owners">→ כל בעלי הדירות</a></p>
+    ${backLink("owners", "כל בעלי הדירות")}
     <h1>${esc(c.name)}</h1>
     <p class="sub">בעל דירה · ${cardPill(c.missing)}${c.planfix_id ? ` · איש קשר ${c.planfix_id} ב-Planfix` : ""}</p>
     ${contactSection(c)}
@@ -1320,7 +1930,7 @@ async function supplierView(id, params) {
   const month = /^\d{4}-\d{2}$/.test(params.get("month") || "") ? params.get("month") : today().slice(0, 7);
   const [s, c] = await Promise.all([api("GET", `/suppliers/${id}`), api("GET", `/contacts/${id}`)]);
   view.innerHTML = `
-    <p><a href="#/suppliers">→ כל הספקים</a></p>
+    ${backLink("suppliers", "כל הספקים")}
     <h1>${esc(s.name)}</h1>
     <p class="sub">ספק · ${cardPill(c.missing)}${s.planfix_id ? ` · איש קשר ${s.planfix_id} ב-Planfix` : ""}</p>
     <div class="facts">
@@ -1401,7 +2011,7 @@ async function invoiceDialog() {
         amountTotal: Math.round((net + vat) * 100) / 100,
         handling: v.handling,
       });
-      toast("החשבונית נקלטה ונשלחת ל-Planfix");
+      toast(`החשבונית נקלטה. ${SAVED_NOT_SYNCED}`);
       route();
     },
     "קליטה",
@@ -2036,7 +2646,7 @@ async function clientView(id) {
   const openReqs = c.requests.filter((r) => r.status !== "closed");
   const gaps = active.flatMap((e) => missingFor(e).map((g) => `${e.apartment_code}: ${g}`));
   view.innerHTML = `
-    <p><a href="#/clients">→ כל הלקוחות</a></p>
+    ${backLink("clients", "כל הלקוחות")}
     <div class="head"><div><h1>${esc(c.name)}</h1><p class="sub">לקוח · ${cardPill(details.missing)}${c.planfix_id ? ` · איש קשר ${c.planfix_id} ב-Planfix` : ""}</p></div>
     ${allowed("requests.manage") && active.length ? `<button class="btn primary" id="new-req">פתיחת קריאת שירות</button>` : ""}</div>
     ${c.partial ? `<div class="notice" role="note">מוצג חלק מהלקוח: רק הדירות שבתחום האחריות שלך. חיובים וחשבונות של הלקוח כולו פתוחים למי שהלקוח כולו בתחום שלו.</div>` : ""}
@@ -2712,7 +3322,7 @@ async function propertyView(id) {
   const current = p.engagements.find((e) => e.active) || p.engagements[0];
   const gaps = current ? missingFor(current) : ["התקשרות"];
   view.innerHTML = `
-    <p><a href="#/apartments">→ כל הדירות</a></p>
+    ${backLink("apartments", "כל הדירות")}
     <div class="head"><div><h1>${allowed("apartments.create") && !p.archived_at ? `<a href="#" id="edit-address" title="עריכת פרטים">${esc(p.address)}</a>` : esc(p.address)}</h1>
       <p class="sub">דירה ${p.base_number} · ${current ? activePill(current) : pill(["אין התקשרות", "warn"])}
       ${p.planfix_task_id ? ` · משימה ${p.planfix_task_id} ב-Planfix` : ""}</p></div>
@@ -2778,7 +3388,7 @@ function propertyEditDialog(p, e) {
           ...(v.monthlyRent !== undefined ? { monthlyRent: v.monthlyRent === "" ? null : Number(v.monthlyRent) } : {}),
         });
       }
-      toast("הפרטים נשמרו ויישלחו ל־Planfix");
+      toast(`הפרטים נשמרו. ${SAVED_NOT_SYNCED}`);
       route();
     },
   );
@@ -2907,8 +3517,13 @@ const contactActions = (archived) => [
 function clickableRows() {
   view.querySelectorAll("tr[data-href]").forEach((tr) => {
     const go = () => (location.hash = tr.dataset.href);
-    tr.onclick = (e) => !e.target.closest("a, button, input, select") && go();
-    tr.onkeydown = (e) => e.key === "Enter" && go();
+    tr.onclick = (e) => {
+      if (!e.target.closest("a, button, input, select")) go();
+    };
+    // Returning false would cancel every other key, Tab included.
+    tr.onkeydown = (e) => {
+      if (e.key === "Enter") go();
+    };
   });
 }
 
@@ -3439,6 +4054,7 @@ async function route() {
     else if (section === "clients" && id) await clientView(id);
     else if (section === "clients") await clientsView(params);
     else if (section === "properties" && id) await propertyView(id);
+    else if (section === "requests" && id && sub === "file") await serviceFileView(id);
     else if (section === "requests" && id) await requestView(id);
     else if (section === "requests") await requestsView();
     else if (section === "invoices") await invoicesView();
@@ -3465,6 +4081,7 @@ async function route() {
   // announces the new page; the first load keeps focus where the browser put it.
   const h1 = view.querySelector("h1");
   document.title = h1 ? `${h1.textContent} · MAGLARD OS` : "MAGLARD OS";
+  if (h1) noteTrail(location.hash || "#/", section ? h1.textContent.trim() : "מרכז העבודה");
   if (routed && !placed && h1) {
     h1.setAttribute("tabindex", "-1");
     h1.focus({ preventScroll: true });

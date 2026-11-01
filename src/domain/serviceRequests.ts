@@ -7,6 +7,7 @@ import { assertNotDuplicate } from "./invoices.js";
 import { notify, notifyPermission } from "./notifications.js";
 import { enqueue } from "./services.js";
 import { ALL, idsOf, type Scope } from "./scope.js";
+import { planfixState } from "./syncState.js";
 
 export { RuleError };
 
@@ -487,10 +488,13 @@ export async function closeRequest(db: Db, id: string) {
 
 export async function getRequest(db: Db, id: string) {
   const { rows } = await db.query(
-    `SELECT r.*, e.apartment_code, e.property_id, p.address, s.name AS supplier_name, ua.name AS client_approved_by_name
+    `SELECT r.*, e.apartment_code, e.property_id, p.address, s.name AS supplier_name, ua.name AS client_approved_by_name,
+            uo.name AS opened_by_name, e.client_id, c.name AS client_name, p.base_number
        FROM service_requests r
        LEFT JOIN users ua ON ua.id = r.client_approved_by
+       LEFT JOIN users uo ON uo.id = r.created_by
        JOIN engagements e ON e.id = r.engagement_id
+       JOIN contacts c ON c.id = e.client_id
        JOIN properties p ON p.id = e.property_id
        LEFT JOIN contacts s ON s.id = r.supplier_id
       WHERE r.id = $1`,
@@ -526,7 +530,7 @@ export async function getRequest(db: Db, id: string) {
     rows[0].supplier_invoice_id
       ? db.query(
           `SELECT i.id, i.invoice_number, to_char(i.invoice_date, 'YYYY-MM-DD') AS invoice_date, i.amount_net, i.amount_vat,
-                  i.amount_total, i.approval_state, ch.charge_task_id AS charged_as
+                  i.amount_total, i.approval_state, ch.charge_task_id AS charged_as, i.planfix_task_id
              FROM supplier_invoices i LEFT JOIN supplier_invoice_charges ch ON ch.invoice_ref = i.id::text
             WHERE i.id = $1`,
           [rows[0].supplier_invoice_id],
@@ -534,8 +538,20 @@ export async function getRequest(db: Db, id: string) {
       : Promise.resolve({ rows: [] as any[] }),
   ]);
   const inv = invoice.rows[0];
+  // Who works on it: the open tasks on the request and their assignees.
+  const tasks = await db.query(
+    `SELECT t.id, t.title, t.status, t.due_on, t.urgent, u.name AS assignee_name, (t.status <> 'done' AND t.due_on < current_date) AS overdue
+       FROM tasks t JOIN users u ON u.id = t.assignee_id WHERE t.service_request_id = $1 ORDER BY t.status = 'done', t.due_on NULLS LAST`,
+    [id],
+  );
   return {
     ...rows[0],
+    tasks: tasks.rows,
+    // Saved here is a given; Planfix is reported apart (domain/syncState.ts).
+    sync: {
+      request: await planfixState(db, id, rows[0].planfix_task_id),
+      invoice: inv ? await planfixState(db, inv.id, inv.planfix_task_id) : null,
+    },
     events: events.rows,
     approval: approval.rows[0] ?? null,
     approvals: approvals.rows,
