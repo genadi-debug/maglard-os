@@ -47,11 +47,14 @@ export async function listEngagements(db: Db, archived = false, scope: Scope = A
 export async function listServiceRequests(db: Db, scope: Scope = ALL) {
   const { rows } = await db.query(
     `SELECT r.id, r.subject, r.status, r.urgency, r.category, r.charge_to, r.client_approved_at, r.client_approved_amount, r.estimated_cost AS approval_estimate, r.reported_by,
-            r.estimated_cost, r.created_at, e.apartment_code, e.property_id, p.address, s.name AS supplier_name,
-            EXISTS (SELECT 1 FROM approvals a WHERE a.service_request_id = r.id AND a.status = 'pending') AS awaiting_approval
+            r.estimated_cost, r.created_at, r.created_by, e.apartment_code, e.property_id, e.client_id, c.name AS client_name, p.address, s.name AS supplier_name,
+            EXISTS (SELECT 1 FROM approvals a WHERE a.service_request_id = r.id AND a.status = 'pending') AS awaiting_approval,
+            EXISTS (SELECT 1 FROM supplier_invoices i WHERE i.id = r.supplier_invoice_id AND i.approval_state = 'pending') AS invoice_pending,
+            (SELECT max(created_at) FROM service_request_events WHERE service_request_id = r.id) AS last_move
        FROM service_requests r
        JOIN engagements e ON e.id = r.engagement_id
        JOIN properties p ON p.id = e.property_id
+       JOIN contacts c ON c.id = e.client_id
        LEFT JOIN contacts s ON s.id = r.supplier_id
       WHERE ($1::uuid[] IS NULL OR e.id = ANY($1))
       ORDER BY (r.status = 'closed'), ${URGENCY_ORDER}, r.created_at DESC`,
@@ -113,10 +116,24 @@ export async function workCenter(db: Db, actor: { id: string; role: Role }, scop
        CASE WHEN $2::uuid[] IS NULL THEN (SELECT count(*) FROM planfix_changes WHERE status = 'open')::int END AS planfix_conflicts`,
     [me, E],
   );
+  // The open requests this person opened, with what they wait for.
+  const myRequests = await db.query(
+    `SELECT r.id, r.subject, r.status, r.urgency, r.charge_to, r.client_approved_at, r.client_approved_amount, r.estimated_cost AS approval_estimate,
+            r.supplier_id, r.created_at, e.apartment_code, p.address,
+            EXISTS (SELECT 1 FROM approvals a WHERE a.service_request_id = r.id AND a.status = 'pending') AS awaiting_approval
+       FROM service_requests r
+       JOIN engagements e ON e.id = r.engagement_id
+       JOIN properties p ON p.id = e.property_id
+      WHERE r.status <> 'closed' AND r.created_by = $1 AND ($2::uuid[] IS NULL OR e.id = ANY($2))
+      ORDER BY ${URGENCY_ORDER}, r.created_at
+      LIMIT 20`,
+    [me, E],
+  );
   const result: Record<string, unknown> = {
     counts: counts.rows[0],
     requests: requests.rows,
     myTasks: myTasks.rows,
+    myRequests: myRequests.rows,
     syncFailures: [],
   };
   if (can(actor.role, "sync.view") && scope.all) {
@@ -153,6 +170,23 @@ export async function workCenter(db: Db, actor: { id: string; role: Role }, scop
     );
     result.workload = workload.rows;
     result.stuck = stuck.rows;
+    // What holds work up, by kind, within the scope.
+    const blockers = await db.query(
+      `SELECT
+         (SELECT count(*) FROM approvals a JOIN service_requests r ON r.id = a.service_request_id
+           WHERE a.status = 'pending' AND ($1::uuid[] IS NULL OR r.engagement_id = ANY($1)))::int AS awaiting_manager,
+         (SELECT count(*) FROM service_requests r
+           WHERE r.status = 'triage' AND r.charge_to = 'client' AND ($1::uuid[] IS NULL OR r.engagement_id = ANY($1))
+             AND (r.client_approved_at IS NULL OR r.client_approved_amount IS NULL OR r.client_approved_amount < r.estimated_cost))::int AS awaiting_client,
+         (SELECT count(*) FROM supplier_invoices i JOIN service_requests r ON r.supplier_invoice_id = i.id
+           WHERE i.approval_state = 'pending' AND r.status <> 'closed' AND ($1::uuid[] IS NULL OR r.engagement_id = ANY($1)))::int AS invoice_pending,
+         (SELECT count(*) FROM service_requests r WHERE r.status = 'new' AND r.created_at < now() - interval '1 day'
+             AND ($1::uuid[] IS NULL OR r.engagement_id = ANY($1)))::int AS unassigned,
+         (SELECT count(*) FROM tasks t WHERE t.status <> 'done' AND t.due_on < current_date
+             AND ($2::uuid[] IS NULL OR t.assignee_id = ANY($2)))::int AS overdue_tasks`,
+      [E, idsOf(scope, "team")],
+    );
+    result.blockers = { ...blockers.rows[0], stuck: stuck.rows.length };
   }
   if (can(actor.role, "dashboard.company")) {
     const company = await db.query(
