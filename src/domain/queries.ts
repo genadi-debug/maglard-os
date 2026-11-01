@@ -43,7 +43,7 @@ export async function listEngagements(db: Db, archived = false) {
 export async function listServiceRequests(db: Db) {
   const { rows } = await db.query(
     `SELECT r.id, r.subject, r.status, r.urgency, r.category, r.charge_to, r.client_approved_at, r.client_approved_amount, r.estimated_cost AS approval_estimate, r.reported_by,
-            r.estimated_cost, r.created_at, e.apartment_code, p.address, s.name AS supplier_name,
+            r.estimated_cost, r.created_at, e.apartment_code, e.property_id, p.address, s.name AS supplier_name,
             EXISTS (SELECT 1 FROM approvals a WHERE a.service_request_id = r.id AND a.status = 'pending') AS awaiting_approval
        FROM service_requests r
        JOIN engagements e ON e.id = r.engagement_id
