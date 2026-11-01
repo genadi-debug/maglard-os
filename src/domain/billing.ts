@@ -1,3 +1,5 @@
+import { hashOf, journaled } from "../sync/operations.js";
+import { TEMPLATE } from "../planfix/fields.js";
 import { z } from "zod";
 import { withTx, type Db } from "../db/pool.js";
 import type { CrmAdapter } from "../planfix/adapter.js";
@@ -210,26 +212,8 @@ export const missingVat = (source: VatRule["source"]) =>
       "הגדרת המע״מ של סוג החיוב בטבלה \"מגלארד — סוגי הוצאה ומע״מ\" ב־Planfix עוד לא סומנה כמאומתת, ולכן החיוב לא זמין עד שיסמנו \"הגדרת מע״מ אומתה\".",
   })[source];
 
-// A write to Planfix sent once per form: a second send with the same key (a
-// double click, a retry after a timeout) returns the first result instead of
-// opening the same charge or bill again.
-export async function once<T>(db: Db, key: string | undefined, write: () => Promise<T>): Promise<T> {
-  if (!key) return write();
-  const claimed = await db.query("INSERT INTO planfix_writes (key) VALUES ($1) ON CONFLICT DO NOTHING RETURNING key", [key]);
-  if (!claimed.rows[0]) {
-    const { rows } = await db.query("SELECT result FROM planfix_writes WHERE key = $1", [key]);
-    if (rows[0]?.result) return rows[0].result as T;
-    throw new RuleError("הפעולה כבר נשלחה ועדיין בטיפול. כדאי לרענן בעוד רגע ולבדוק לפני ששולחים שוב.");
-  }
-  try {
-    const result = await write();
-    await db.query("UPDATE planfix_writes SET result = $2 WHERE key = $1", [key, JSON.stringify(result)]);
-    return result;
-  } catch (err) {
-    await db.query("DELETE FROM planfix_writes WHERE key = $1", [key]);
-    throw err;
-  }
-}
+// A write to Planfix sent once per form key; see src/sync/operations.ts.
+export { once } from "../sync/operations.js";
 
 export const requestKey = z.string().uuid().optional();
 
@@ -276,6 +260,9 @@ export async function createCharge(
   clientId: string,
   input: z.infer<typeof chargeInput>,
   fixed?: { net: number; vat: number },
+  // The business action, when the caller has one (a supplier invoice is charged
+  // once); otherwise a charge with the same content is opened once.
+  businessKey?: string,
 ) {
   const client = await db.query("SELECT name, planfix_id FROM contacts WHERE id = $1 AND kind = 'client'", [clientId]);
   if (!client.rows[0]) throw new NotFoundError(`client ${clientId} not found`);
@@ -317,9 +304,8 @@ export async function createCharge(
   const kind = input.amountTotal < 0 ? `זיכוי ${input.chargeType}` : input.chargeType;
   const what = input.note ? `${kind} (${input.note})` : kind;
   const name = `${code} — ${what} — ${m}/${y} — ${clientName}`;
-  const planfixTaskId = await crm.createCharge({
+  const push = {
     name,
-    ref: `charge for client ${clientId}`,
     clientPlanfixId: clientPf,
     engagementTaskId: engagementPf,
     contractTaskId: contract.rows[0]?.planfix_task_id ?? null,
@@ -329,7 +315,21 @@ export async function createCharge(
     periodTo: input.periodTo,
     amountTotal: input.amountTotal,
     split,
-  });
+  };
+  const { requestKey: _, ...content } = input as typeof input & { requestKey?: string };
+  const planfixTaskId = await journaled(
+    db,
+    {
+      kind: "create_task",
+      entity: `client:${clientId}`,
+      businessKey: businessKey ?? `charge:${clientId}:${hashOf({ push, creditFor: content.creditFor, creditReason: content.creditReason })}`,
+      payload: push,
+      lookup: { template: TEMPLATE.charge, name },
+      actor: userId,
+      refuseDone: !businessKey,
+    },
+    (marker) => crm.createCharge({ ...push, ref: `charge for client ${clientId}; ${marker}` }),
+  );
   await db.query("INSERT INTO audit_log (user_id, action, entity_id, ok, detail) VALUES ($1, 'charge.created', $2, true, $3)", [
     userId,
     clientId,
@@ -380,14 +380,29 @@ export async function issueBill(
   }
   const [y, m] = input.periodTo.split("-");
   const name = `חשבון מצטבר — ${b.client.name} — ${m}/${y}`;
-  const planfixTaskId = await crm.createBill({
+  const push = {
     name,
-    ref: `bill for client ${clientId}`,
     clientPlanfixId: pf,
     periodFrom: input.periodFrom,
     periodTo: input.periodTo,
-    chargeTaskIds: [...new Set(input.charges)],
-  });
+    chargeTaskIds: [...new Set(input.charges)].sort((a, b) => a - b),
+  };
+  // The same charges over the same period go on one bill, unless an earlier
+  // bill was cancelled since.
+  const cancelled = await db.query("SELECT count(*)::int AS n FROM cancelled_bills WHERE client_id = $1", [clientId]);
+  const planfixTaskId = await journaled(
+    db,
+    {
+      kind: "create_task",
+      entity: `client:${clientId}`,
+      businessKey: `bill:${clientId}:${push.periodFrom}:${push.periodTo}:${push.chargeTaskIds.join(",")}:${cancelled.rows[0].n}`,
+      payload: push,
+      lookup: { template: TEMPLATE.bill, name },
+      actor: userId,
+      refuseDone: true,
+    },
+    (marker) => crm.createBill({ ...push, ref: `bill for client ${clientId}; ${marker}` }),
+  );
   await db.query("INSERT INTO audit_log (user_id, action, entity_id, ok, detail) VALUES ($1, 'bill.created', $2, true, $3)", [
     userId,
     clientId,
@@ -636,9 +651,8 @@ async function openRentPieces(
   for (const k of todo) {
     const [y, m] = (k.period_from as string).split("-");
     const name = `${k.apartment_code ?? "—"} — שכר דירה — ${m}/${y} — ${client.name}`;
-    const planfixTaskId = await crm.createCharge({
+    const push = {
       name,
-      ref: `rent for client ${clientId}`,
       clientPlanfixId: pf,
       engagementTaskId: k.engagement_task_id,
       contractTaskId: k.contract_task_id,
@@ -648,7 +662,19 @@ async function openRentPieces(
       periodTo: k.period_to,
       amountTotal: 0,
       split: null,
-    });
+    };
+    // One rent charge per contract and period, however many times it is asked for.
+    const planfixTaskId = await journaled(
+      db,
+      {
+        kind: "create_task",
+        entity: `client:${clientId}`,
+        businessKey: `rent:${k.contract_task_id}:${k.period_from}:${k.period_to}`,
+        payload: push,
+        lookup: { template: TEMPLATE.charge, name },
+      },
+      (marker) => crm.createCharge({ ...push, ref: `rent for client ${clientId}; ${marker}` }),
+    );
     const rent = await crm.readRentByDays(planfixTaskId);
     if (rent == null) {
       results.push({ planfixTaskId, apartment_code: k.apartment_code, period_from: k.period_from, period_to: k.period_to, amount: null, problem: "Planfix לא חישב שכ״ד לחיוב. יש להשלים את הסכום ב־Planfix." });

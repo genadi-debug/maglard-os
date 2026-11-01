@@ -112,7 +112,8 @@ export async function chargeExpense(
   ref: string,
   input: z.infer<typeof expenseChargeInput>,
 ) {
-  return once(db, input.requestKey, async () => {
+  const { requestKey: _, ...content } = input;
+  return once(db, input.requestKey, { ref, ...content }, async () => {
     const p = await expenseChargePreview(db, ref);
     if (p.chargedAs) throw new RuleError(`החשבונית כבר חויבה ללקוח (חיוב #${p.chargedAs} ב־Planfix).`);
     if (!p.amounts) throw new RuleError(p.problem!);
@@ -143,6 +144,8 @@ export async function chargeExpense(
         amountTotal: a.total,
       },
       { net: a.base, vat: a.vat },
+      // A supplier invoice is charged to the client once.
+      `expense_charge:${ref}`,
     );
     await db.query(
       `INSERT INTO supplier_invoice_charges

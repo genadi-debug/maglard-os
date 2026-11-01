@@ -1,4 +1,4 @@
-import { PlanfixClient } from "./client.js";
+import { createdId, PlanfixClient, PlanfixError } from "./client.js";
 import { CONTACT_KIND_BY_GROUP, CONTACT_TEMPLATE, EXPENSE_TYPES, FIELD, SERVICE_REQUEST_STATUS, TEMPLATE, type ContactKind } from "./fields.js";
 
 // What the rest of MAGLARD OS needs from the CRM. Planfix is the only
@@ -40,6 +40,10 @@ export interface CrmAdapter {
   // Cancels an accumulated bill: renamed "בוטל — ...", its charges list
   // (9920) emptied, and each charge's link back to it (9976) removed.
   cancelBill(c: BillCancel): Promise<void>;
+  // Tasks of a template whose name contains the text and whose description
+  // carries the marker MAGLARD OS wrote when it created them. For checking
+  // whether a create whose answer was lost did happen. Read only.
+  findTasksByMarker(templateId: number, nameContains: string, marker: string): Promise<number[]>;
 }
 
 export interface BillCancel {
@@ -307,6 +311,15 @@ export function readDate(v: unknown): string | null {
   return m ? `${m[3]}-${m[2]}-${m[1]}` : null;
 }
 
+// A list in a Planfix answer; an answer without it is not a valid answer.
+function listOf<K extends string, T>(res: { [k in K]: T[] }, key: K): T[] {
+  const list = (res as Record<string, unknown> | null)?.[key];
+  if (!Array.isArray(list)) {
+    throw new PlanfixError(`Planfix ענה בלי "${key}"`, 200, undefined, { kind: "invalid_response", outcome: "not_done" });
+  }
+  return list as T[];
+}
+
 const describe = (ref: string) => `Created by MAGLARD OS (${ref}).`;
 
 function engagementFields(e: EngagementPush): FieldValue[] {
@@ -340,12 +353,12 @@ export class PlanfixAdapter implements CrmAdapter {
   constructor(private readonly client: PlanfixClient) {}
 
   async createContact(input: { name: string; isCompany: boolean; kind: ContactKind }): Promise<number> {
-    const res = await this.client.request<{ id: number }>("POST", "contact/", {
+    const res = await this.client.request("POST", "contact/", {
       template: { id: CONTACT_TEMPLATE[input.kind] },
       name: input.name,
       isCompany: input.isCompany,
     });
-    return res.id;
+    return createdId(res);
   }
 
   createProperty(p: PropertyPush): Promise<number> {
@@ -379,8 +392,8 @@ export class PlanfixAdapter implements CrmAdapter {
       pageSize: 100,
       fields: "id,template",
       filters: [{ type: 73, operator: "equal", value: propertyTaskId }],
-    });
-    return res.tasks.filter((t) => t.template?.id === TEMPLATE.engagement).map((t) => t.id);
+    }, { read: true });
+    return listOf(res, "tasks").filter((t) => t.template?.id === TEMPLATE.engagement).map((t) => t.id);
   }
 
   // Same call as updateEngagement and updateServiceRequest (POST task/{id}),
@@ -488,9 +501,10 @@ export class PlanfixAdapter implements CrmAdapter {
         pageSize,
         offset,
         fields: "id,name,midname,lastname,isCompany,group,email,phones,address",
-      });
-      all.push(...res.contacts);
-      if (res.contacts.length < pageSize) break;
+      }, { read: true });
+      const page = listOf(res, "contacts");
+      all.push(...page);
+      if (page.length < pageSize) break;
     }
     const text = (v: string | undefined) => (v ?? "").trim() || null;
     return all.map((c) => ({
@@ -613,8 +627,8 @@ export class PlanfixAdapter implements CrmAdapter {
       offset: 0,
       pageSize: 100,
       fields: ["key", e.name, e.vatable, e.verified].join(","),
-    });
-    return res.directoryEntries.flatMap((d) => {
+    }, { read: true });
+    return listOf(res, "directoryEntries").flatMap((d) => {
       const value = (id: number) => d.customFieldData?.find((c) => c.field.id === id)?.value;
       const name = readText(value(e.name));
       return name ? [{ key: d.key, name, vatable: value(e.vatable) === true, verified: value(e.verified) === true }] : [];
@@ -714,10 +728,39 @@ export class PlanfixAdapter implements CrmAdapter {
         offset,
         fields: ["id", "parent", ...extra, ...fieldIds].join(","),
         filters: [{ type: 51, operator: "equal", value: templateId }],
-      });
-      all.push(...res.tasks);
-      if (res.tasks.length < pageSize) return all;
+      }, { read: true });
+      const page = listOf(res, "tasks");
+      all.push(...page);
+      if (page.length < pageSize) return all;
     }
+  }
+
+  // Filter types 51 (template) and 8 (task name contains, per the Planfix REST
+  // API "Complex task filters" page) together, verified read-only on
+  // maglardsand 2026-11-01: the description comes back with the list.
+  async findTasksByMarker(templateId: number, nameContains: string, marker: string): Promise<number[]> {
+    const pageSize = 100;
+    const found: number[] = [];
+    for (let offset = 0; offset < 1000; offset += pageSize) {
+      const res = await this.client.request<{ tasks: { id: number; description?: string }[] }>(
+        "POST",
+        "task/list",
+        {
+          pageSize,
+          offset,
+          fields: "id,name,description",
+          filters: [
+            { type: 51, operator: "equal", value: templateId },
+            { type: 8, operator: "equal", value: nameContains },
+          ],
+        },
+        { read: true },
+      );
+      const page = listOf(res, "tasks");
+      found.push(...page.filter((t) => typeof t.description === "string" && t.description.includes(marker)).map((t) => t.id));
+      if (page.length < pageSize) break;
+    }
+    return found;
   }
 
   private async createTask(body: {
@@ -727,7 +770,6 @@ export class PlanfixAdapter implements CrmAdapter {
     parent?: { id: number };
     customFieldData: FieldValue[];
   }): Promise<number> {
-    const res = await this.client.request<{ id: number }>("POST", "task/", body);
-    return res.id;
+    return createdId(await this.client.request("POST", "task/", body));
   }
 }

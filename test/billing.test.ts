@@ -1,3 +1,4 @@
+import { PlanfixError } from "../src/planfix/client.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildServer } from "../src/api/server.js";
 import { migrate } from "../src/db/migrate.js";
@@ -247,13 +248,13 @@ describe.skipIf(!url)("the client's billing, read from Planfix", () => {
     const [a, b] = [await send(), await send()];
     expect(b.json()).toEqual(a.json());
     expect(crm.calls.filter((c) => c.method === "createCharge").length).toBe(before + 1);
-    // A failed write can be sent again.
-    crm.failNext.createCharge = new Error("Planfix down");
+    // A write Planfix certainly did not carry out can be sent again.
+    crm.failNext.createCharge = new PlanfixError("Could not reach Planfix (ECONNREFUSED)", 0, undefined, { kind: "network", outcome: "not_done" });
     const failed = await call("POST", `/clients/${ids.client}/charges`, {
       engagementId: ids.engagement, chargeType: "דמי ניהול", periodFrom: "2026-11-01", periodTo: "2026-11-30", amountTotal: 5,
       requestKey: "6f1c2a52-6d0f-4a43-9a51-3c1d2e4f5a61",
     });
-    expect(failed.statusCode).toBe(500);
+    expect(failed.statusCode).toBe(502);
     const again = await call("POST", `/clients/${ids.client}/charges`, {
       engagementId: ids.engagement, chargeType: "דמי ניהול", periodFrom: "2026-11-01", periodTo: "2026-11-30", amountTotal: 5,
       requestKey: "6f1c2a52-6d0f-4a43-9a51-3c1d2e4f5a61",
