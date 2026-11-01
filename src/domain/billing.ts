@@ -364,12 +364,14 @@ export async function issueBill(
   crm: CrmAdapter,
   userId: string | null,
   clientId: string,
-  input: z.infer<typeof billInput>,
+  input: Omit<z.infer<typeof billInput>, "requestKey">,
+  // Charges opened just now, which Planfix's next read may not show yet.
+  fresh: Set<number> = new Set(),
 ) {
   const b = await clientBilling(db, clientId);
   const pf = b.client.planfix_id as number | null;
   if (!pf) throw new RuleError("הלקוח עוד לא נשלח ל־Planfix. אפשר להפיק חשבון אחרי הסנכרון.");
-  const open = new Set(b.unbilled.map((c) => c.planfix_task_id as number));
+  const open = new Set([...b.unbilled.map((c) => c.planfix_task_id as number), ...fresh]);
   const wrong = input.charges.filter((id) => !open.has(id));
   if (wrong.length) throw new RuleError(`חיובים שכבר בחשבון או שאינם של הלקוח: ${wrong.join(", ")}. כדאי לרענן מ־Planfix.`);
   const paidBack = b.unbilled.filter((c) => c.refunded && input.charges.includes(c.planfix_task_id));
@@ -574,7 +576,11 @@ export async function rentPlan(db: Db, clientId: string, range: { from: string; 
      SELECT p.planfix_task_id AS contract_task_id, p.name AS contract_name, p.engagement_task_id, p.monthly_price,
             coalesce(e.apartment_code, nullif(split_part(p.engagement_name, ' — ', 1), '')) AS apartment_code,
             to_char(p.p_from, 'YYYY-MM-DD') AS period_from, to_char(p.p_to, 'YYYY-MM-DD') AS period_to,
+            to_char(p.move_in_on, 'YYYY-MM-DD') AS move_in_on, to_char(p.move_out_on, 'YYYY-MM-DD') AS move_out_on,
             (p.p_to - p.p_from + 1) AS days, p.month_days,
+            (SELECT coalesce(array_agg(c.planfix_task_id ORDER BY c.planfix_task_id), '{}') FROM planfix_charges c
+              WHERE c.contract_task_id = p.planfix_task_id AND c.charge_type = 'שכר דירה'
+                AND c.period_from <= p.p_to AND c.period_to >= p.p_from) AS charge_task_ids,
             round(p.monthly_price * (p.p_to - p.p_from + 1) / p.month_days, 2) AS estimate,
             EXISTS (SELECT 1 FROM planfix_charges c
                      WHERE c.contract_task_id = p.planfix_task_id AND c.charge_type = 'שכר דירה'
@@ -598,17 +604,38 @@ export async function createRentCharges(
   range: { from: string; to: string },
 ) {
   const plan = await rentPlan(db, clientId, range);
-  const pf = plan.client.planfix_id as number | null;
-  if (!pf) throw new RuleError("הלקוח עוד לא נשלח ל־Planfix. אפשר לחייב אחרי הסנכרון.");
   const todo = plan.contracts.filter((k) => !k.charged);
   if (!todo.length) throw new RuleError("אין חוזים שעוד לא חויבו בשכ״ד בתקופה הזו");
+  const results = await openRentPieces(db, crm, clientId, plan.client, todo);
+  await db.query("INSERT INTO audit_log (user_id, action, entity_id, ok, detail) VALUES ($1, 'rent.charged', $2, true, $3)", [
+    userId,
+    clientId,
+    { from: range.from, to: range.to, charges: results },
+  ]);
+  await refreshPlanfixBilling(db, crm).catch(() => undefined);
+  return { ...range, created: results };
+}
+
+type RentPiece = Record<string, any>;
+type RentResult = { planfixTaskId: number; apartment_code: string | null; period_from: string; period_to: string; amount: number | null; problem: string | null };
+
+// One rent charge per piece, each at Planfix's rent by days.
+async function openRentPieces(
+  db: Db,
+  crm: CrmAdapter,
+  clientId: string,
+  client: { name: string; planfix_id: number | null },
+  todo: RentPiece[],
+): Promise<RentResult[]> {
+  const pf = client.planfix_id;
+  if (!pf) throw new RuleError("הלקוח עוד לא נשלח ל־Planfix. אפשר לחייב אחרי הסנכרון.");
   const [rules, rate] = await Promise.all([vatRules(db, clientId), vatRate(db)]);
   const rule = rules.get("שכר דירה")!;
   if (rule.vat === null) throw new RuleError(missingVat(rule.source));
-  const results = [];
+  const results: RentResult[] = [];
   for (const k of todo) {
     const [y, m] = (k.period_from as string).split("-");
-    const name = `${k.apartment_code ?? "—"} — שכר דירה — ${m}/${y} — ${plan.client.name}`;
+    const name = `${k.apartment_code ?? "—"} — שכר דירה — ${m}/${y} — ${client.name}`;
     const planfixTaskId = await crm.createCharge({
       name,
       ref: `rent for client ${clientId}`,
@@ -631,13 +658,74 @@ export async function createRentCharges(
     await crm.setChargeAmount(planfixTaskId, rent, split);
     results.push({ planfixTaskId, apartment_code: k.apartment_code, period_from: k.period_from, period_to: k.period_to, amount: rent, problem: null });
   }
+  return results;
+}
+
+export const rentBillInput = z.object({
+  month: MONTH,
+  // The pieces picked on the screen, by contract and start; all when left out.
+  pieces: z
+    .array(z.object({ contract: z.number().int().positive(), from: isoDate }))
+    .min(1, "צריך לבחור לפחות דירה אחת")
+    .optional(),
+  requestKey,
+});
+
+// The monthly rent bill, for month M:
+//   new       - apartments that moved in during M-1: from the move-in to the end of M-1;
+//   full      - a whole month of M;
+//   starting  - moving in during M: from the move-in;
+//   ending    - moving out during M: to the move-out.
+// Each piece is charged by days in Planfix (a whole month is the monthly price).
+export async function rentBillPlan(db: Db, clientId: string, month: string) {
+  MONTH.parse(month);
+  const [y, m] = month.split("-").map(Number);
+  const prev = new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7);
+  const first = `${month}-01`;
+  const last = new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
+  const plan = await rentPlan(db, clientId, { from: `${prev}-01`, to: last });
+  const inPrev = (d: string | null) => !!d && d.slice(0, 7) === prev;
+  const unbilled = new Set((await clientBilling(db, clientId)).unbilled.map((c) => c.planfix_task_id as number));
+  const pieces = plan.contracts
+    .filter((k) => k.period_from >= first || inPrev(k.move_in_on))
+    .map((k) => ({
+      ...k,
+      group:
+        k.period_from < first ? "new" : k.move_out_on && k.move_out_on <= last ? "ending" : k.move_in_on && k.move_in_on >= first ? "starting" : "full",
+      // The existing charges of the piece that can still go on the bill.
+      open_charges: (k.charge_task_ids as number[]).filter((id) => unbilled.has(id)),
+    }));
+  return { client: plan.client, month, from: pieces.length ? pieces.map((k) => k.period_from).sort()[0] : first, to: last, pieces };
+}
+
+// Opens the pieces not charged yet and issues one bill over all of them.
+export async function issueRentBill(
+  db: Db,
+  crm: CrmAdapter,
+  userId: string | null,
+  clientId: string,
+  month: string,
+  pick?: { contract: number; from: string }[],
+) {
+  const full = await rentBillPlan(db, clientId, month);
+  const picked = pick && new Set(pick.map((x) => `${x.contract}|${x.from}`));
+  const pieces = picked ? full.pieces.filter((k) => picked.has(`${k.contract_task_id}|${k.period_from}`)) : full.pieces;
+  if (picked && pieces.length !== picked.size) throw new RuleError("חלק מהדירות שנבחרו כבר לא בחשבון לחודש הזה. כדאי לפתוח שוב את החלון.");
+  const plan = { ...full, pieces, from: pieces.length ? pieces.map((k) => k.period_from).sort()[0] : full.from };
+  const todo = plan.pieces.filter((k) => !k.charged);
+  const opened = todo.length ? await openRentPieces(db, crm, clientId, plan.client, todo) : [];
+  const fresh = opened.filter((r) => r.amount != null).map((r) => r.planfixTaskId);
+  const existing = plan.pieces.flatMap((k) => k.open_charges as number[]);
+  const charges = [...new Set([...existing, ...fresh])];
   await db.query("INSERT INTO audit_log (user_id, action, entity_id, ok, detail) VALUES ($1, 'rent.charged', $2, true, $3)", [
     userId,
     clientId,
-    { from: range.from, to: range.to, charges: results },
+    { month, charges: opened },
   ]);
   await refreshPlanfixBilling(db, crm).catch(() => undefined);
-  return { ...range, created: results };
+  if (!charges.length) throw new RuleError("אין חיובי שכירות פתוחים לחודש הזה: כולם כבר בחשבון אחר.");
+  const bill = await issueBill(db, crm, userId, clientId, { periodFrom: plan.from, periodTo: plan.to, charges }, new Set(fresh));
+  return { ...bill, opened, charges: charges.length, problems: opened.filter((r) => r.problem) };
 }
 
 export const amountInput = z.object({

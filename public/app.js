@@ -1941,7 +1941,7 @@ async function billingSection(clientId) {
   const canCharge = allowed("billing.manage") && b.linked && b.apartments.length;
   const head = `<div class="head" style="align-items:end"><h2 style="margin:16px 0 0">חיובים וחשבונות</h2>
     <div class="actions" style="margin:0">${canCharge ? `<button class="btn primary" id="new-charge">חיוב חדש</button>` : ""}
-    ${allowed("billing.manage") && b.linked && b.contracts.length ? `<button class="btn" id="rent-charges">חיובי שכירות</button>` : ""}
+    ${allowed("billing.manage") && b.linked && b.contracts.length ? `<button class="btn primary" id="rent-bill">חשבון שכירות לחודש</button><button class="btn" id="rent-charges">חיובי שכירות</button>` : ""}
     ${allowed("billing.manage") && b.unbilled.length ? `<button class="btn primary" id="issue-bill">הפקת חשבון</button>` : ""}
     <button class="btn" id="billing-refresh">רענון מ־Planfix</button></div></div>
     <p class="sub">הסכומים מחושבים ונשמרים ב־Planfix. חיוב שעוד לא נכלל בחשבון אפשר לתקן כאן, ועל חיוב ששולם פותחים זיכוי.${
@@ -2103,18 +2103,24 @@ function billDialog(clientId) {
   const key = crypto.randomUUID();
   const now = today();
   const end = new Date(Date.UTC(Number(now.slice(0, 4)), Number(now.slice(5, 7)), 0)).toISOString().slice(0, 10);
+  const list = b.unbilled.filter((c) => !c.refunded);
+  const types = [...new Set(list.map((c) => c.charge_type || "אחר"))];
   const d = dialog(
     "הפקת חשבון מצטבר ב־Planfix",
     field("periodFrom", "תקופה מתאריך", `type="date" required value="${now.slice(0, 8)}01"`) +
       field("periodTo", "עד תאריך", `type="date" required value="${end}"`) +
-      `<div class="full"><b>חיובים שייכללו בחשבון</b>${b.unbilled
-        .filter((c) => !c.refunded)
+      `<label>סוג חיוב<select name="type"><option value="">כל הסוגים</option>${options(types.map((t) => [t, t]))}</select></label>` +
+      field("q", "חיפוש דירה", 'type="search" placeholder="קוד דירה"') +
+      `<label>מוצגים<select name="within"><option value="">כל החיובים הפתוחים</option><option value="1">רק חיובים שבתוך התקופה</option></select></label>` +
+      `<p class="actions" style="margin:0;align-self:end"><button type="button" class="btn" id="pick-shown">סימון כל המוצגים</button>
+        <button type="button" class="btn" id="unpick-shown">ניקוי המוצגים</button></p>` +
+      `<div class="full wrap"><table class="table"><thead><tr><th class="pick"></th><th>דירה</th><th>סוג</th><th>תקופה</th><th>סכום</th></tr></thead><tbody>${list
         .map(
-          (c) => `<label style="display:flex;flex-direction:row;gap:8px;align-items:center;font-weight:400;margin-top:6px"><input type="checkbox" style="width:auto" data-charge="${c.planfix_task_id}"
-            data-from="${c.period_from || ""}" data-total="${c.amount_total ?? 0}">
-            ${esc(c.apartment_code || "—")} · ${esc(c.charge_type || c.name)} · ${span(c.period_from, c.period_to)} · ${money(c.amount_total)}</label>`,
+          (c) => `<tr data-row data-type="${esc(c.charge_type || "אחר")}" data-code="${esc(c.apartment_code || "")}" data-from="${c.period_from || ""}" data-to="${c.period_to || ""}">
+            <td class="pick"><input type="checkbox" data-charge="${c.planfix_task_id}" data-from="${c.period_from || ""}" data-total="${c.amount_total ?? 0}" aria-label="בחירת חיוב"></td>
+            <td>${esc(c.apartment_code || "—")}</td><td>${esc(c.charge_type || c.name)}</td><td>${span(c.period_from, c.period_to)}</td><td>${money(c.amount_total)}</td></tr>`,
         )
-        .join("")}</div>
+        .join("")}</tbody></table></div>
       <p class="full sub" id="bill-total"></p>`,
     async (v) => {
       const charges = [...d.querySelectorAll("[data-charge]:checked")].map((x) => Number(x.dataset.charge));
@@ -2126,16 +2132,124 @@ function billDialog(clientId) {
   );
   const form = d.querySelector("form");
   const boxes = [...d.querySelectorAll("[data-charge]")];
+  const rows = [...d.querySelectorAll("tr[data-row]")];
   // Everything that starts by the end of the period is picked by default.
   const pick = () => boxes.forEach((x) => (x.checked = !x.dataset.from || x.dataset.from <= form.periodTo.value));
+  const filter = () => {
+    const q = form.q.value.trim();
+    for (const tr of rows) {
+      const inside = (!tr.dataset.from || tr.dataset.from >= form.periodFrom.value) && (!tr.dataset.to || tr.dataset.to <= form.periodTo.value);
+      tr.hidden = (form.type.value && tr.dataset.type !== form.type.value) || (q && !tr.dataset.code.includes(q)) || (form.within.value && !inside);
+    }
+  };
   const total = () => {
     const picked = boxes.filter((x) => x.checked);
-    d.querySelector("#bill-total").textContent = `${picked.length} חיובים · ${money(picked.reduce((t, x) => t + Number(x.dataset.total), 0))} (Planfix מחשב את הסכום הסופי)`;
+    const hidden = picked.filter((x) => x.closest("tr").hidden).length;
+    d.querySelector("#bill-total").textContent = `נבחרו ${picked.length} חיובים · ${money(picked.reduce((t, x) => t + Number(x.dataset.total), 0))}${
+      hidden ? ` (מתוכם ${hidden} מוסתרים בסינון)` : ""
+    } · Planfix מחשב את הסכום הסופי`;
+    d.querySelector(".primary").disabled = !picked.length;
   };
-  form.periodTo.addEventListener("change", () => (pick(), total()));
+  const shown = () => boxes.filter((x) => !x.closest("tr").hidden);
+  d.querySelector("#pick-shown").addEventListener("click", () => (shown().forEach((x) => (x.checked = true)), total()));
+  d.querySelector("#unpick-shown").addEventListener("click", () => (shown().forEach((x) => (x.checked = false)), total()));
+  form.periodTo.addEventListener("change", () => (pick(), filter(), total()));
+  form.periodFrom.addEventListener("change", () => (filter(), total()));
+  form.type.addEventListener("change", () => (filter(), total()));
+  form.within.addEventListener("change", () => (filter(), total()));
+  form.q.addEventListener("input", () => (filter(), total()));
   form.addEventListener("change", total);
   pick();
+  filter();
   total();
+}
+
+// The monthly rent bill: last month's new apartments by days, this month in
+// full, and the apartments that start or end this month by days. The pieces
+// not charged yet are opened in Planfix, and one bill gathers them all.
+const RENT_GROUPS = [
+  ["new", "דירות חדשות שנכנסו בחודש הקודם (יחסי)"],
+  ["full", "שכירות מלאה לחודש"],
+  ["starting", "דירות שנכנסות החודש (יחסי)"],
+  ["ending", "דירות שמסתיימות החודש (יחסי)"],
+];
+function rentBillDialog(clientId) {
+  const key = crypto.randomUUID();
+  let plan = null;
+  const d = dialog(
+    "חשבון שכירות לחודש",
+    field("month", "חודש החשבון", `type="month" required value="${today().slice(0, 7)}"`) +
+      `<label>סוג<select name="group"><option value="">הכל</option>${options(RENT_GROUPS)}</select></label>` +
+      field("q", "חיפוש דירה", 'type="search" placeholder="קוד דירה"') +
+      `<p class="full actions" style="margin:0"><button type="button" class="btn" id="pick-shown">סימון כל המוצגים</button>
+        <button type="button" class="btn" id="unpick-shown">ניקוי המוצגים</button></p>` +
+      `<div class="full" id="rent-bill-plan"></div><p class="full sub" id="rent-bill-sum"></p>`,
+    async (v) => {
+      const pieces = [...d.querySelectorAll("[data-piece]:checked")].map((x) => ({ contract: Number(x.dataset.contract), from: x.dataset.from }));
+      const r = await api("POST", `/clients/${clientId}/rent-bill`, { month: v.month, pieces, requestKey: key });
+      toast(`החשבון הופק ב־Planfix עם ${r.charges} חיובים${r.problems.length ? `, ${r.problems.length} חיובים צריכים השלמת סכום ב־Planfix` : ""}`);
+      location.hash = `#/clients/${clientId}/bills/${r.planfixTaskId}`;
+    },
+    "פתיחת החיובים והפקת החשבון",
+  );
+  const form = d.querySelector("form");
+  const box = d.querySelector("#rent-bill-plan");
+  const btn = d.querySelector(".primary");
+  // A piece can go on the bill unless its charge is on another bill already.
+  const goes = (k) => !k.charged || k.open_charges.length;
+  const boxes = () => [...d.querySelectorAll("[data-piece]")];
+  const shown = () => boxes().filter((x) => !x.closest("tr").hidden && !x.disabled);
+  const sum = () => {
+    const picked = boxes().filter((x) => x.checked);
+    const ks = picked.map((x) => plan.pieces[Number(x.dataset.piece)]);
+    d.querySelector("#rent-bill-sum").textContent = plan
+      ? `נבחרו ${ks.length} מתוך ${plan.pieces.filter(goes).length} · בערך ${money(ks.reduce((t, k) => t + Number(k.estimate), 0))}. ${ks.filter((k) => !k.charged).length} חיובים חדשים ייפתחו ב־Planfix, שמחשב כל אחד לפי ימים מתוך החוזה.`
+      : "";
+    btn.disabled = !ks.length;
+  };
+  const filter = () => {
+    const q = form.q.value.trim();
+    d.querySelectorAll("[data-group-row]").forEach((tr) => {
+      const k = plan.pieces[Number(tr.dataset.groupRow)];
+      tr.hidden = (form.group.value && k.group !== form.group.value) || (q && !String(k.apartment_code || "").includes(q));
+    });
+    d.querySelectorAll("[data-group]").forEach((sec) => (sec.hidden = ![...sec.querySelectorAll("tr[data-group-row]")].some((tr) => !tr.hidden)));
+  };
+  const load = async () => {
+    box.textContent = "בודק…";
+    btn.disabled = true;
+    try {
+      plan = await api("GET", `/clients/${clientId}/rent-bill?month=${form.month.value}`);
+      const row = (k) => {
+        const i = plan.pieces.indexOf(k);
+        return `<tr data-group-row="${i}"${goes(k) ? "" : ' class="muted"'}><td class="pick"><input type="checkbox" data-piece="${i}" data-contract="${k.contract_task_id}" data-from="${k.period_from}"
+            ${goes(k) ? "checked" : "disabled"} aria-label="בחירת ${esc(k.apartment_code || "")}"></td><td>${esc(k.apartment_code || "—")}</td><td>${span(k.period_from, k.period_to)}</td>
+            <td>${k.days} מתוך ${k.month_days}</td><td>${money(k.monthly_price)}</td><td>${money(k.estimate)}</td>
+            <td>${!k.charged ? pill(["ייפתח", "good"]) : k.open_charges.length ? pill(["כבר נפתח", ""]) : pill(["כבר בחשבון אחר", ""])}</td></tr>`;
+      };
+      box.innerHTML = plan.pieces.length
+        ? RENT_GROUPS.map(([g, title]) => {
+            const list = plan.pieces.filter((k) => k.group === g);
+            return list.length
+              ? `<section data-group="${g}"><h4 style="margin:12px 0 4px">${title} · ${list.length}</h4><div class="wrap"><table class="table"><thead><tr><th class="pick"></th><th>דירה</th><th>תקופה</th><th>ימים</th><th>מחיר חודשי</th><th>לפי ימים</th><th></th></tr></thead><tbody>${list
+                  .map(row)
+                  .join("")}</tbody></table></div></section>`
+              : "";
+          }).join("")
+        : `<p class="sub">אין חוזים עם מחיר חודשי לחודש הזה</p>`;
+      filter();
+      sum();
+    } catch (err) {
+      box.textContent = err.message;
+    }
+  };
+  form.month.addEventListener("change", load);
+  form.group.addEventListener("change", filter);
+  form.q.addEventListener("input", filter);
+  box.addEventListener("change", sum);
+  d.querySelector("#pick-shown").addEventListener("click", () => (shown().forEach((x) => (x.checked = true)), sum()));
+  d.querySelector("#unpick-shown").addEventListener("click", () => (shown().forEach((x) => (x.checked = false)), sum()));
+  load();
 }
 
 // Cancels a bill not submitted yet: its charges go back to the list of
@@ -2334,6 +2448,7 @@ function wireBilling(clientId) {
   view.querySelector("#new-charge")?.addEventListener("click", () => chargeDialog(clientId));
   view.querySelector("#issue-bill")?.addEventListener("click", () => billDialog(clientId));
   view.querySelector("#rent-charges")?.addEventListener("click", () => rentDialog(clientId));
+  view.querySelector("#rent-bill")?.addEventListener("click", () => rentBillDialog(clientId));
   view.querySelectorAll("[data-cancel-bill]").forEach((btn) =>
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
