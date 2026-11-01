@@ -49,6 +49,31 @@ const JOB = {
   "service_request.sync": "קריאת שירות",
   "engagement.repush": "עדכון התקשרות",
   "property.repush": "עדכון דירה",
+  "contact.push": "איש קשר",
+};
+// The state of a write to Planfix, in the words the sync screen uses.
+const SYNC_STATE = {
+  pending: ["ממתין", "warn"],
+  running: ["בטיפול", "warn"],
+  done: ["הצליח", "good"],
+  succeeded: ["הצליח", "good"],
+  failed: ["נכשל", "bad"],
+  unknown: ["תוצאה לא ידועה", "bad"],
+};
+const OP_KIND = { create_task: "יצירת משימה", create_contact: "יצירת איש קשר" };
+const OP_EVENT = {
+  sent: "נשלח",
+  succeeded: "Planfix אישר",
+  failed: "נכשל בוודאות (לא בוצע)",
+  unknown: "התשובה לא התקבלה",
+  lease_expired: "התהליך נעצר באמצע",
+  lookup: "חיפוש ב־Planfix",
+  lookup_failed: "החיפוש נכשל",
+  lookup_unavailable: "אין חיפוש מאומת לסוג הזה",
+  matched: "נמצא ב־Planfix (אוטומטית)",
+  decided_found: "סומן ידנית: נמצא ב־Planfix",
+  decided_not_created: "סומן ידנית: לא נוצר, מותר לשלוח שוב",
+  note: "הערה",
 };
 const FIELD_LABEL = {
   base_number: "מספר בסיס",
@@ -1623,7 +1648,7 @@ function importReport(r) {
   const skipped = r.skipped.length
     ? `<p><b>${r.skipped.length} לא ${r.dryRun ? "ייובאו" : "יובאו"}:</b></p><ul>${r.skipped
         .map(
-          (s) => `<li>משימה <a href="${PLANFIX_TASK}${s.planfixTaskId}" target="_blank" rel="noopener">${s.planfixTaskId}</a> (${
+          (s) => `<li>משימה ${planfixLink("task", s.planfixTaskId, s.planfixTaskId)} (${
             s.what === "property" ? "דירה" : "התקשרות"
           })${s.about ? ` <b>${esc(s.about)}</b>` : ""}<br>${esc(s.reason)}${s.fix ? ` <button class="btn" data-fix="${s.planfixTaskId}">תיקון</button>` : ""}</li>`,
         )
@@ -1631,7 +1656,7 @@ function importReport(r) {
     : "";
   const others = r.contactsSkipped?.length
     ? `<details><summary>${r.contactsSkipped.length} אנשי קשר ב־Planfix לא ${r.dryRun ? "ייובאו" : "יובאו"}, כי הם לא בקבוצה Customer, בעלי דירות או Provider</summary><ul>${r.contactsSkipped
-        .map((c) => `<li><a href="${PLANFIX_CONTACT}${c.planfixId}" target="_blank" rel="noopener">${esc(c.name || `איש קשר ${c.planfixId}`)}</a> (${esc(c.group || "בלי קבוצה")})</li>`)
+        .map((c) => `<li>${planfixLink("contact", c.planfixId, esc(c.name || `איש קשר ${c.planfixId}`))} (${esc(c.group || "בלי קבוצה")})</li>`)
         .join("")}</ul><small>כדי לייבא אותם: לשייך אותם לקבוצה ב־Planfix ולהריץ שוב.</small></details>`
     : "";
   return `<p><b>${r.dryRun ? "בדיקה, שום דבר לא נשמר:" : "הייבוא הסתיים:"}</b></p><ul>
@@ -1639,8 +1664,9 @@ function importReport(r) {
     ${r.dryRun ? `<button class="btn primary" id="import-run">ייבוא בפועל</button>` : ""}`;
 }
 
-const PLANFIX_TASK = "https://maglardsand.planfix.com/task/";
-const PLANFIX_CONTACT = "https://maglardsand.planfix.com/contact/";
+// Links to Planfix, from the server's own Planfix setting (none when it is not a Planfix address).
+const planfixLink = (kind, id, text) =>
+  me?.planfixUrl ? `<a href="${me.planfixUrl}/${kind}/${id}" target="_blank" rel="noopener">${text}</a>` : text;
 
 // Completes in Planfix an engagement the import skipped: only the fields that
 // changed are sent, then the check runs again.
@@ -1787,10 +1813,12 @@ function wireReadback() {
 }
 
 async function syncView() {
-  const [{ jobs }, rb] = await Promise.all([api("GET", "/sync/status"), api("GET", "/readback")]);
-  const tone = { done: ["הושלם", "good"], pending: ["ממתין", "warn"], running: ["רץ", "warn"], failed: ["נכשל", "bad"] };
+  const [{ jobs }, rb, operations] = await Promise.all([api("GET", "/sync/status"), api("GET", "/readback"), api("GET", "/sync/operations")]);
+  const tone = SYNC_STATE;
   view.innerHTML = `
-    <h1>סנכרון Planfix</h1><p class="sub">כל פעולה נשמרת קודם כאן ונשלחת ל-Planfix ברקע. פעולה שנכשלה אפשר לשלוח שוב.</p>
+    <h1>סנכרון Planfix</h1><p class="sub">כל פעולה נשמרת קודם כאן ונשלחת ל-Planfix ברקע. פעולה שנכשלה אפשר לשלוח שוב.
+      פעולה שתוצאתה לא ידועה (Planfix אולי ביצע אותה והתשובה לא הגיעה) לא נשלחת שוב עד שמבררים אותה, כדי לא ליצור כפילות.</p>
+    ${operationsSection(operations)}
     ${readbackSection(rb)}
     ${importCard()}
     ${sheetCard()}
@@ -1801,7 +1829,7 @@ async function syncView() {
             .map(
               (j) => `<tr><td>${esc(JOB[j.job_type] || j.job_type)}</td><td>${pill(tone[j.status])}</td><td>${j.attempts}</td>
               <td><small>${esc(j.last_error || "")}</small></td><td>${new Date(j.updated_at).toLocaleString("he-IL")}</td>
-              <td>${j.status === "failed" && allowed("sync.retry") ? `<button class="btn" data-retry="${j.id}">שליחה חוזרת</button>` : ""}</td></tr>`,
+              <td>${j.status === "failed" && allowed("sync.retry") ? `<button class="btn" data-retry="${j.id}">שליחה חוזרת</button>` : j.status === "unknown" ? `<small>ממתין לבירור למעלה</small>` : ""}</td></tr>`,
             )
             .join("")}</tbody></table></div>`
         : `<div class="empty">עדיין לא נשלח דבר ל-Planfix</div>`
@@ -1809,6 +1837,7 @@ async function syncView() {
   wireImport();
   wireSheet();
   wireReadback();
+  wireOperations(operations);
   view.querySelectorAll("[data-retry]").forEach((b) => {
     b.onclick = async () => {
       b.disabled = true;
@@ -1822,6 +1851,82 @@ async function syncView() {
       }
     };
   });
+}
+
+// Writes to Planfix: those waiting for a check first, each with its history.
+function operationsSection(list) {
+  const open = list.filter((o) => o.status === "unknown" || o.stale);
+  const rows = (items) =>
+    items
+      .map((o) => {
+        const state = o.stale ? ["בטיפול זמן רב: התהליך כנראה נעצר", "bad"] : SYNC_STATE[o.status];
+        const found = o.result?.id ? ` · ${planfixLink(o.kind === "create_contact" ? "contact" : "task", o.result.id, `#${o.result.id}`)}` : "";
+        const actions =
+          o.status === "unknown" && allowed("sync.resolve")
+            ? `${o.lookup ? `<button class="btn" data-op-lookup="${o.id}">חיפוש ב־Planfix</button>` : ""}
+               <button class="btn" data-op-found="${o.id}">נמצא ב־Planfix</button>
+               <button class="btn" data-op-none="${o.id}">לא נוצר</button>`
+            : "";
+        return `<tr><td>${esc(OP_KIND[o.kind] || o.kind)}<br><small>${esc(o.entity)}</small></td><td>${pill(state)}${found}</td>
+          <td>${o.attempts}</td><td><small>${esc(o.last_error || "")}</small>
+          ${o.lookup ? `<br><small>לחיפוש: תבנית ${o.lookup.template}, בשם "${esc(o.lookup.name)}", בתיאור "op ${o.id}"</small>` : ""}
+          <details><summary><small>יומן (${o.events.length})</small></summary><ul class="timeline">${o.events
+            .map((e) => `<li>${esc(OP_EVENT[e.action] || e.action)}${e.by ? ` · ${esc(e.by)}` : ""}${e.detail?.note ? `: ${esc(e.detail.note)}` : ""}${
+              e.detail?.found ? ` · נמצאו ${e.detail.found.length}` : ""
+            } <small>${new Date(e.at).toLocaleString("he-IL")}</small></li>`)
+            .join("")}</ul></details></td>
+          <td>${new Date(o.updated_at).toLocaleString("he-IL")}</td><td>${actions}</td></tr>`;
+      })
+      .join("");
+  const table = (items) => `<div class="wrap"><table class="table"><thead><tr><th>פעולה</th><th>מצב</th><th>ניסיונות</th><th>פרטים</th><th>עודכן</th><th></th></tr></thead>
+    <tbody>${rows(items)}</tbody></table></div>`;
+  return `<h2>פעולות לבירור ${open.length ? pill([String(open.length), "bad"]) : ""}</h2>
+    ${
+      open.length
+        ? `<p class="sub">לא ידוע אם Planfix ביצע את הפעולות האלה. המערכת מחפשת אותן ב־Planfix (קריאה בלבד). מה שלא נמצא אוטומטית מחכה להחלטה:
+            לבדוק ב־Planfix לפי השם והסימון שבתיאור, ואז לסמן "נמצא" עם מספר המשימה, או "לא נוצר" כדי לאפשר שליחה חוזרת.</p>${table(open)}`
+        : `<div class="empty">אין פעולות שממתינות לבירור</div>`
+    }
+    <details><summary>כל הכתיבות ל־Planfix (${list.length})</summary>${list.length ? table(list) : ""}</details>`;
+}
+
+function wireOperations(list) {
+  const done = (msg) => {
+    toast(msg);
+    route();
+  };
+  view.querySelectorAll("[data-op-lookup]").forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        const r = await api("POST", `/sync/operations/${b.dataset.opLookup}/lookup`);
+        done(r.status === "succeeded" ? "נמצא ב־Planfix. הפעולה סומנה כהצליחה." : r.found?.length > 1 ? `נמצאו ${r.found.length} משימות: צריך להחליט ידנית` : "לא נמצא ב־Planfix");
+      } catch (err) {
+        toast(err.message);
+        b.disabled = false;
+      }
+    };
+  });
+  const decide = (id, decision) =>
+    dialog(
+      decision === "found" ? "הפעולה נמצאה ב־Planfix" : "הפעולה לא נוצרה ב־Planfix",
+      (decision === "found" ? field("planfixId", "מספר המשימה ב־Planfix", 'type="number" min="1" required') : "") +
+        `<label class="full">מה נבדק (נשמר ביומן)<textarea name="note" rows="2" required></textarea></label>` +
+        (decision === "found"
+          ? ""
+          : `<p class="full sub">אחרי הסימון הפעולה תישלח שוב כשתבוקש. אם היא בכל זאת קיימת ב־Planfix, תיווצר כפילות: כדאי לחפש לפני הסימון.</p>`),
+      async (v) => {
+        await api("POST", `/sync/operations/${id}/decide`, {
+          decision,
+          note: v.note,
+          ...(decision === "found" ? { planfixId: Number(v.planfixId) } : {}),
+        });
+        done("ההחלטה נשמרה ביומן");
+      },
+      "שמירה",
+    );
+  view.querySelectorAll("[data-op-found]").forEach((b) => (b.onclick = () => decide(b.dataset.opFound, "found")));
+  view.querySelectorAll("[data-op-none]").forEach((b) => (b.onclick = () => decide(b.dataset.opNone, "not_created")));
 }
 
 // ---------- login ----------
@@ -2953,6 +3058,8 @@ const AUDIT_ACTION = {
   "POST /service-requests/:id/invoice-review": "בדיקה מחדש של חשבונית מול האישורים",
   "POST /supplier-invoices": "קליטת חשבונית ספק",
   "POST /sync/:id/retry": "שליחה חוזרת ל-Planfix",
+  "POST /sync/operations/:id/lookup": "חיפוש פעולה ב־Planfix",
+  "POST /sync/operations/:id/decide": "החלטה על פעולה שתוצאתה לא ידועה",
   "POST /users": "יצירת משתמש",
   "POST /users/:id": "עדכון משתמש",
   "POST /import/planfix": "ייבוא מ-Planfix",

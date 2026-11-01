@@ -1,7 +1,9 @@
 import { withTx, type Db } from "../db/pool.js";
 import type { CrmAdapter } from "../planfix/adapter.js";
-import { PlanfixError } from "../planfix/client.js";
+import { PlanfixError, redact } from "../planfix/client.js";
+import { TEMPLATE } from "../planfix/fields.js";
 import { CATEGORY, URGENCY } from "../domain/serviceRequests.js";
+import { journaled, lookUpDue, OperationBusyError, OperationUnknownError, type OpKind } from "./operations.js";
 
 export const MAX_ATTEMPTS = 5;
 
@@ -14,13 +16,14 @@ export const STALE_RUNNING_MINUTES = 10;
 
 type Job = { id: number; job_type: string; entity_id: string; attempts: number };
 
-// Each ensure* function pushes one record if it has no Planfix id yet. It locks
-// that row, creates it in Planfix and stores the id in its own short
-// transaction, so an id is never lost when a later step fails (which would
-// create a duplicate on retry), and two jobs never create the same record.
+// Each ensure* function pushes one record if it has no Planfix id yet. The
+// create goes through the operations journal under "create:<table>:<id>", so
+// two jobs never create the same record, and a create whose answer was lost
+// is not sent again until it is checked. No row lock is held while Planfix is
+// called; the id is stored only if none was stored meanwhile.
 // Upstream records are ensured first, so a job never waits on another job.
 
-type Push<Row> = (row: Row) => Promise<number>;
+type Push<Row> = (row: Row, marker: string) => Promise<number>;
 
 async function ensureRow<Row extends { planfix_id: number | null }>(
   db: Db,
@@ -28,17 +31,30 @@ async function ensureRow<Row extends { planfix_id: number | null }>(
   column: "planfix_id" | "planfix_task_id",
   id: string,
   push: Push<Row>,
+  lookup: ((row: Row) => { template: number; name: string }) | null,
 ): Promise<number> {
-  return withTx(db, async (tx) => {
-    const { rows } = await tx.query(`SELECT *, ${column} AS planfix_id FROM ${table} WHERE id = $1 FOR UPDATE`, [id]);
-    const row = rows[0] as Row | undefined;
-    if (!row) throw new Error(`${table} ${id} not found`);
-    if (row.planfix_id) return row.planfix_id;
-    const planfixId = await push(row);
-    await tx.query(`UPDATE ${table} SET ${column} = $2, updated_at = now() WHERE id = $1`, [id, planfixId]);
-    return planfixId;
-  });
+  const { rows } = await db.query(`SELECT *, ${column} AS planfix_id FROM ${table} WHERE id = $1`, [id]);
+  const row = rows[0] as Row | undefined;
+  if (!row) throw new Error(`${table} ${id} not found`);
+  if (row.planfix_id) return row.planfix_id;
+  const kind: OpKind = table === "contacts" ? "create_contact" : "create_task";
+  const { planfix_id: _, ...payload } = row as Record<string, unknown>;
+  const planfixId = await journaled(
+    db,
+    { kind, entity: `${table}:${id}`, businessKey: `create:${table}:${id}`, payload, lookup: lookup?.(row) ?? null, waitIfBusyMs: 15_000 },
+    (marker) => push(row, marker),
+  );
+  const stored = await db.query(
+    `UPDATE ${table} SET ${column} = $2, updated_at = now() WHERE id = $1 AND ${column} IS NULL RETURNING ${column} AS id`,
+    [id, planfixId],
+  );
+  if (stored.rows[0]) return planfixId;
+  const now = await db.query(`SELECT ${column} AS id FROM ${table} WHERE id = $1`, [id]);
+  return now.rows[0].id;
 }
+
+// The ref written in a record's description, with the operation's marker.
+const refOf = (what: string, marker: string) => `${what}; ${marker}`;
 
 async function one(db: Db, sql: string, id: string) {
   const { rows } = await db.query(sql, [id]);
@@ -47,9 +63,8 @@ async function one(db: Db, sql: string, id: string) {
 }
 
 function ensureContact(db: Db, crm: CrmAdapter, id: string): Promise<number> {
-  return ensureRow<any>(db, "contacts", "planfix_id", id, (c) =>
-    crm.createContact({ name: c.name, isCompany: c.is_company, kind: c.kind }),
-  );
+  // No verified Planfix search for contacts: an unknown outcome goes to a person.
+  return ensureRow<any>(db, "contacts", "planfix_id", id, (c) => crm.createContact({ name: c.name, isCompany: c.is_company, kind: c.kind }), null);
 }
 
 async function ensureProperty(db: Db, crm: CrmAdapter, engagementId: string): Promise<number> {
@@ -61,15 +76,21 @@ async function ensureProperty(db: Db, crm: CrmAdapter, engagementId: string): Pr
   );
   const ownerPf = await ensureContact(db, crm, e.owner_id);
   const clientPf = await ensureContact(db, crm, e.client_id);
-  return ensureRow<any>(db, "properties", "planfix_task_id", e.property_id, (p) =>
-    crm.createProperty({
-      ref: `property:${p.id}`,
-      baseNumber: p.base_number,
-      address: p.address,
-      ownerPlanfixId: ownerPf,
-      clientPlanfixId: clientPf,
-      clientName: e.client_name,
-    }),
+  return ensureRow<any>(
+    db,
+    "properties",
+    "planfix_task_id",
+    e.property_id,
+    (p, marker) =>
+      crm.createProperty({
+        ref: refOf(`property:${p.id}`, marker),
+        baseNumber: p.base_number,
+        address: p.address,
+        ownerPlanfixId: ownerPf,
+        clientPlanfixId: clientPf,
+        clientName: e.client_name,
+      }),
+    (p) => ({ template: TEMPLATE.property, name: `${p.base_number}.00 — ` }),
   );
 }
 
@@ -85,15 +106,22 @@ async function ensureEngagement(db: Db, crm: CrmAdapter, id: string): Promise<nu
   );
   if (ctx.planfix_task_id) return ctx.planfix_task_id;
   const propertyTask = await ensureProperty(db, crm, id);
-  return ensureRow<any>(db, "engagements", "planfix_task_id", id, async (e) => {
-    const push = await engagementPush(db, crm, e, ctx, propertyTask);
-    const autoTask = await findUnclaimedEngagementTask(db, crm, propertyTask);
-    if (autoTask) {
-      await crm.updateEngagement(autoTask, push);
-      return autoTask;
-    }
-    return crm.createEngagement(push);
-  });
+  return ensureRow<any>(
+    db,
+    "engagements",
+    "planfix_task_id",
+    id,
+    async (e, marker) => {
+      const push = await engagementPush(db, crm, e, ctx, propertyTask);
+      const autoTask = await findUnclaimedEngagementTask(db, crm, propertyTask);
+      if (autoTask) {
+        await crm.updateEngagement(autoTask, push);
+        return autoTask;
+      }
+      return crm.createEngagement({ ...push, ref: refOf(push.ref, marker) });
+    },
+    (e) => ({ template: TEMPLATE.engagement, name: e.apartment_code }),
+  );
 }
 
 async function engagementPush(db: Db, crm: CrmAdapter, e: any, ctx: { address: string; client_name: string }, propertyTask: number) {
@@ -171,9 +199,14 @@ async function ensureSupplierInvoice(db: Db, crm: CrmAdapter, id: string): Promi
   if (ctx.planfix_task_id) return ctx.planfix_task_id;
   const engagementTask = await ensureEngagement(db, crm, ctx.engagement_id);
   const supplierPf = await ensureContact(db, crm, ctx.supplier_id);
-  return ensureRow<any>(db, "supplier_invoices", "planfix_task_id", id, (i) =>
+  return ensureRow<any>(
+    db,
+    "supplier_invoices",
+    "planfix_task_id",
+    id,
+    (i, marker) =>
     crm.createSupplierInvoice({
-      ref: `supplier_invoice:${i.id}`,
+      ref: refOf(`supplier_invoice:${i.id}`, marker),
       apartmentCode: ctx.apartment_code,
       address: ctx.address,
       engagementTaskId: engagementTask,
@@ -186,6 +219,7 @@ async function ensureSupplierInvoice(db: Db, crm: CrmAdapter, id: string): Promi
       amountTotal: Number(i.amount_total),
       handling: i.handling,
     }),
+    (i) => ({ template: TEMPLATE.supplierInvoice, name: i.invoice_number }),
   );
 }
 
@@ -203,9 +237,14 @@ async function syncServiceRequest(db: Db, crm: CrmAdapter, id: string): Promise<
   );
   const engagementTask = await ensureEngagement(db, crm, ctx.engagement_id);
   const supplierPf = ctx.supplier_id ? await ensureContact(db, crm, ctx.supplier_id) : null;
-  const taskId = await ensureRow<any>(db, "service_requests", "planfix_task_id", id, (r) =>
+  const taskId = await ensureRow<any>(
+    db,
+    "service_requests",
+    "planfix_task_id",
+    id,
+    (r, marker) =>
     crm.createServiceRequest({
-      ref: `service_request:${r.id}`,
+      ref: refOf(`service_request:${r.id}`, marker),
       apartmentCode: ctx.apartment_code,
       address: ctx.address,
       engagementTaskId: engagementTask,
@@ -215,6 +254,7 @@ async function syncServiceRequest(db: Db, crm: CrmAdapter, id: string): Promise<
       urgency: URGENCY[r.urgency as keyof typeof URGENCY],
       category: CATEGORY[r.category as keyof typeof CATEGORY],
     }),
+    () => ({ template: TEMPLATE.serviceRequest, name: `${ctx.apartment_code} — ` }),
   );
   // Read the state after creating, so the update reflects the latest change.
   const r = await one(db, "SELECT status, charge_to FROM service_requests WHERE id = $1", id);
@@ -262,15 +302,36 @@ export async function runOnce(db: Db, crm: CrmAdapter): Promise<boolean> {
     );
     await log(db, job.id, job.job_type, true, { planfixId });
   } catch (err) {
+    const message = redact((err as Error).message).slice(0, 500);
+    // A write that may have been carried out waits for a check, not a retry.
+    if (err instanceof OperationUnknownError) {
+      await db.query("UPDATE outbox SET status = 'unknown', last_error = $2, updated_at = now() WHERE id = $1", [job.id, message]);
+      await log(db, job.id, job.job_type, false, { error: message, attempt: job.attempts, unknown: err.operationId });
+      return true;
+    }
+    // Another worker is on it: look again shortly, without using up an attempt.
+    if (err instanceof OperationBusyError) {
+      await db.query(
+        "UPDATE outbox SET status = 'pending', attempts = attempts - 1, run_after = now() + interval '30 seconds', updated_at = now() WHERE id = $1",
+        [job.id],
+      );
+      return true;
+    }
     const retryable = err instanceof PlanfixError ? err.retryable : false;
     const giveUp = !retryable || job.attempts >= MAX_ATTEMPTS;
+    const wait = Math.max(backoffSeconds(job.attempts), err instanceof PlanfixError && err.retryAfterMs ? Math.ceil(err.retryAfterMs / 1000) : 0);
     await db.query(
       `UPDATE outbox SET status = $2, last_error = $3,
               run_after = now() + make_interval(secs => $4), updated_at = now()
         WHERE id = $1`,
-      [job.id, giveUp ? "failed" : "pending", (err as Error).message, backoffSeconds(job.attempts)],
+      [job.id, giveUp ? "failed" : "pending", message, wait],
     );
-    await log(db, job.id, job.job_type, false, { error: (err as Error).message, attempt: job.attempts, giveUp });
+    await log(db, job.id, job.job_type, false, {
+      error: message,
+      kind: err instanceof PlanfixError ? err.kind : "error",
+      attempt: job.attempts,
+      giveUp,
+    });
   }
   return true;
 }
@@ -289,9 +350,11 @@ export function startWorker(db: Db, crm: CrmAdapter, pollMs: number): () => void
   const loop = async () => {
     while (!stopped) {
       const worked = await runOnce(db, crm).catch((err) => {
-        console.error("sync worker error", err);
+        console.error("sync worker error", redact(String(err)));
         return false;
       });
+      // Read-only lookups for creates whose answer was lost.
+      await lookUpDue(db, crm).catch((err) => console.error("sync lookup error", redact(String(err))));
       if (!worked) await new Promise((r) => setTimeout(r, pollMs));
     }
   };

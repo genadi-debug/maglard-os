@@ -27,6 +27,8 @@ import { importSheet, readSheet, sheetImportInput, type FetchText } from "../syn
 import { refreshPlanfixBilling } from "../sync/planfixBilling.js";
 import { refreshPlanfixInvoices } from "../sync/planfixInvoices.js";
 import * as readback from "../sync/readback.js";
+import * as ops from "../sync/operations.js";
+import { PlanfixError } from "../planfix/client.js";
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "public");
 const assets: Record<string, string> = {
@@ -84,6 +86,9 @@ const ROUTES: Record<string, Permission | null> = {
   "GET /clients/:id/bills/:billId": "billing.view",
   "POST /clients/:id/bills/:billId/cancel": "billing.manage",
   "GET /sync/status": "sync.view",
+  "GET /sync/operations": "sync.view",
+  "POST /sync/operations/:id/lookup": "sync.resolve",
+  "POST /sync/operations/:id/decide": "sync.resolve",
   "POST /sync/:id/retry": "sync.retry",
   "GET /users": "users.manage",
   "POST /users": "users.manage",
@@ -134,9 +139,21 @@ declare module "fastify" {
   }
 }
 
+const decideInput = z.discriminatedUnion("decision", [
+  z.object({ decision: z.literal("found"), planfixId: z.number().int().positive(), note: z.string().trim().min(2, "צריך לכתוב מה נבדק") }),
+  z.object({ decision: z.literal("not_created"), note: z.string().trim().min(2, "צריך לכתוב מה נבדק") }),
+]);
+
 export function buildServer(
   db: Db,
-  opts: { requireAuth?: boolean; secureCookie?: boolean; crm?: CrmAdapter; fetchSheet?: FetchText } = {},
+  opts: {
+    requireAuth?: boolean;
+    secureCookie?: boolean;
+    crm?: CrmAdapter;
+    fetchSheet?: FetchText;
+    // For links to Planfix, from the sync's own setting (see config.ts).
+    planfixWebUrl?: string | null;
+  } = {},
 ) {
   const app = Fastify({ logger: false });
   const requireAuth = opts.requireAuth ?? true;
@@ -207,7 +224,7 @@ export function buildServer(
 
   app.get("/auth/me", async (req) => {
     const user = req.user!;
-    return { ...user, roleLabel: ROLES[user.role], permissions: permissionsOf(user.role) };
+    return { ...user, roleLabel: ROLES[user.role], permissions: permissionsOf(user.role), planfixUrl: opts.planfixWebUrl ?? null };
   });
 
   app.setErrorHandler((err, _req, reply) => {
@@ -223,6 +240,19 @@ export function buildServer(
       return reply.status(415).send({ error: "סוג קובץ לא נתמך: תמונה, PDF, Word או Excel" });
     }
     if (err instanceof auth.AuthError) return reply.status(400).send({ error: err.message });
+    if (err instanceof PlanfixError) {
+      const text: Record<string, string> = {
+        auth: "Planfix סירב לגישה (הרשאה או מפתח). צריך לבדוק את הגדרות החיבור.",
+        rate_limit: "Planfix עמוס כרגע. כדאי לנסות שוב בעוד דקה.",
+        validation: `Planfix לא קיבל את הבקשה: ${err.message}`,
+      };
+      const message =
+        text[err.kind] ??
+        (err.outcome === "unknown"
+          ? "לא ידוע אם הפעולה בוצעה ב־Planfix. כדאי לבדוק במסך הסנכרון או ב־Planfix לפני ששולחים שוב."
+          : "אין חיבור ל־Planfix כרגע. שום דבר לא נשלח; אפשר לנסות שוב.");
+      return reply.status(502).send({ error: message, outcome: err.outcome });
+    }
     if ((err as { code?: string }).code === "23505") return reply.status(409).send({ error: "already exists" });
     reply.log.error(err);
     return reply.status(500).send({ error: "internal" });
@@ -371,7 +401,7 @@ export function buildServer(
     const crm = opts.crm;
     return reply
       .status(201)
-      .send(await billing.once(db, input.requestKey, () => billing.createCharge(db, crm, req.user?.id || null, req.params.id, input)));
+      .send(await billing.once(db, input.requestKey, { client: req.params.id, ...input }, () => billing.createCharge(db, crm, req.user?.id || null, req.params.id, input)));
   });
   // A supplier invoice charged on to the client, by the client's expense VAT basis.
   type RefParams = { Params: { ref: string } };
@@ -387,7 +417,7 @@ export function buildServer(
     const crm = opts.crm;
     return reply
       .status(201)
-      .send(await billing.once(db, input.requestKey, () => billing.issueBill(db, crm, req.user?.id || null, req.params.id, input)));
+      .send(await billing.once(db, input.requestKey, { client: req.params.id, ...input }, () => billing.issueBill(db, crm, req.user?.id || null, req.params.id, input)));
   });
   app.get<{ Params: { id: string; billId: string } }>("/clients/:id/bills/:billId", async (req) =>
     billing.getBill(db, req.params.id, Number(req.params.billId)),
@@ -404,7 +434,7 @@ export function buildServer(
     const crm = opts.crm;
     return reply
       .status(201)
-      .send(await billing.once(db, requestKey, () => billing.createRentCharges(db, crm, req.user?.id || null, req.params.id, { from, to })));
+      .send(await billing.once(db, requestKey, { client: req.params.id, from, to }, () => billing.createRentCharges(db, crm, req.user?.id || null, req.params.id, { from, to })));
   });
   app.get<{ Params: { id: string }; Querystring: { month?: string } }>("/clients/:id/rent-bill", async (req) =>
     billing.rentBillPlan(db, req.params.id, req.query.month ?? new Date().toISOString().slice(0, 7)),
@@ -415,7 +445,7 @@ export function buildServer(
     const crm = opts.crm;
     return reply
       .status(201)
-      .send(await billing.once(db, requestKey, () => billing.issueRentBill(db, crm, req.user?.id || null, req.params.id, month, pieces)));
+      .send(await billing.once(db, requestKey, { client: req.params.id, month, pieces }, () => billing.issueRentBill(db, crm, req.user?.id || null, req.params.id, month, pieces)));
   });
   // Completing or correcting an apartment from its card.
   app.post<IdParams>("/properties/:id", async (req) =>
@@ -428,7 +458,7 @@ export function buildServer(
     if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
     const input = billing.cancelBillInput.parse(req.body);
     const crm = opts.crm;
-    return billing.once(db, input.requestKey, () =>
+    return billing.once(db, input.requestKey, { client: req.params.id, bill: req.params.billId, ...input }, () =>
       billing.cancelBill(db, crm, req.user?.id || null, req.params.id, Number(req.params.billId), input),
     );
   });
@@ -446,7 +476,7 @@ export function buildServer(
     if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
     const input = billing.refundInput.parse(req.body);
     const crm = opts.crm;
-    const done = await billing.once(db, input.requestKey, () =>
+    const done = await billing.once(db, input.requestKey, { client: req.params.id, credit: req.params.creditId, ...input }, () =>
       billing.recordRefund(db, crm, req.user?.id || null, req.params.id, Number(req.params.creditId), input),
     );
     return reply.status(201).send(done);
@@ -494,6 +524,17 @@ export function buildServer(
     );
     if (!rowCount) return reply.status(404).send({ error: "no failed job with that id" });
     return { status: "pending" };
+  });
+
+  // Writes to Planfix and the ones whose outcome is unknown, with their history.
+  app.get("/sync/operations", async () => ops.listOperations(db));
+  app.post<IdParams>("/sync/operations/:id/lookup", async (req, reply) => {
+    if (!opts.crm) return reply.status(503).send({ error: "Planfix is not configured" });
+    return ops.lookUp(db, opts.crm, req.params.id, req.user?.id || null);
+  });
+  app.post<IdParams>("/sync/operations/:id/decide", async (req) => {
+    const input = decideInput.parse(req.body);
+    return ops.decide(db, req.params.id, req.user!.id, input);
   });
 
   app.get("/sync/status", async () => {

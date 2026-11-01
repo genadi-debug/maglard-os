@@ -129,15 +129,41 @@ is safe but wasteful.
 
 ## Sync rules
 
-- Each record is pushed once. Its Planfix id is stored in its own transaction
-  right after Planfix creates it, under a row lock. This way a later failure
-  never loses the id, and two jobs never create the same record.
-- Upstream records (contacts, property, engagement) are pushed by whichever job
-  needs them first.
-- Rate limits, network errors and 5xx responses retry with backoff (30s, 2m,
-  8m, 32m), up to 5 attempts. Planfix validation errors, such as a missing
-  required field, fail the job immediately.
-- Every attempt is written to `sync_log`.
+- Every write that creates a record in Planfix (contacts, properties,
+  engagements, supplier invoices, service requests, charges, bills, rent
+  charges) is recorded in `planfix_operations` before it is sent, under a key
+  for the business action (`create:<table>:<id>`, `expense_charge:<invoice>`,
+  `rent:<contract>:<from>:<to>`, a charge's or bill's content). The record
+  holds the operation id, kind, entity, a sha256 of the request, the status,
+  the attempts and the result. The same action is carried out once, whatever
+  sends it: a double click, two tabs, several workers, or a retry after a
+  restart. No row lock is held while Planfix is called.
+- Each failure is classified as one of two kinds:
+  - **Certainly not done.** Refused connection, 401/403, 400 validation,
+    429, or 503. The write may be sent again.
+  - **Unknown outcome.** A timeout after sending, a broken connection, a 5xx,
+    an answer without the created id, or a crash before the id was saved.
+    The write is **not** sent again. It is shown as "תוצאה לא ידועה" on the
+    sync screen. The worker looks it up read-only, up to 3 times: tasks of the
+    same template whose name contains a known text (filter types 51 and 8)
+    and whose description carries the `op <id>` marker. Exactly one match
+    settles it. Contacts have no verified search, so they always go to a
+    person. That person records "נמצא ב־Planfix" with the id, or "לא נוצר" to
+    allow a resend. The decision is kept in `planfix_operation_events`.
+- A form's `requestKey` with other content is refused. A form whose outcome
+  is unknown is refused until its operation is settled; after that, the same
+  form completes from the journal without a second create.
+- Each Planfix call is cancelled after `PLANFIX_TIMEOUT_MS` (default 20s).
+- Reads, and a 429 whose `Retry-After` is under 10s, are retried inline.
+- Queued jobs retry with backoff (30s, 2m, 8m, 32m, up to 5 attempts), or
+  later if `Retry-After` says so. Auth and validation errors fail at once.
+- An empty or malformed Planfix answer is never treated as a success.
+- Errors are stored with credentials redacted. Every attempt is written to
+  `sync_log`.
+- Links to Planfix tasks and contacts come from `PLANFIX_BASE_URL`, and only
+  when it is an `https://<account>.planfix.com/rest` address.
+- Writes stuck from before this journal: see `docs/sync-stuck-plan.md`. It is
+  not run automatically.
 
 ## Planfix behaviour to know
 
@@ -258,10 +284,13 @@ not imported yet.
 
 ## Known gaps
 
-- Suppose the process dies after Planfix created a task but before its id was
-  stored. The retry would then create a duplicate. The fix is to look up the
-  `MAGLARD OS (<ref>)` marker in the task description before creating, and it
-  waits on confirming a supported Planfix search filter.
+- Planfix offers no idempotency key, so a create whose answer was lost is
+  found afterwards by its marker. A contact (no verified search) and an
+  engagement filled into Planfix's own intake task (its description is not
+  ours) always need a person to check.
+- Updates (field writes to an existing task, cancelling a bill, refunds) are
+  not journaled. They write absolute values, so sending them again is
+  harmless. A refund still holds its per-credit lock while Planfix answers.
 - Only the value `לחיוב` of field 9978 is verified.
 - Supplier invoices and contacts' own details (phone, email) are not read
   back from Planfix yet.

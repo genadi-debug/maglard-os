@@ -8,7 +8,8 @@
     "migrate": "tsx src/db/migrate.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "create-user": "tsx src/createUser.ts"
+    "create-user": "tsx src/createUser.ts",
+    "sync:stuck": "tsx src/sync/stuckReport.ts"
   },
   "author": "",
   "license": "ISC",
