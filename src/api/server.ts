@@ -30,6 +30,7 @@ import * as readback from "../sync/readback.js";
 import * as ops from "../sync/operations.js";
 import { PlanfixError } from "../planfix/client.js";
 import * as access from "../domain/access.js";
+import { serviceFile } from "../domain/serviceFile.js";
 import { assertEntity, assertRecord, assertSees, idsOf, OUT_OF_SCOPE, scopeOf, type Scope } from "../domain/scope.js";
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "public");
@@ -62,6 +63,7 @@ export const ROUTES: Record<string, Permission | null> = {
   "POST /intakes": "apartments.create",
   "GET /service-requests": "requests.view",
   "GET /service-requests/:id": "requests.view",
+  "GET /service-requests/:id/file": "invoices.view",
   "POST /service-requests": "requests.manage",
   "POST /service-requests/:id/assign": "requests.manage",
   "POST /service-requests/:id/client-approval": "requests.manage",
@@ -185,6 +187,7 @@ export const SCOPE: Record<string, Guard> = {
   "POST /intakes": "body",
   "GET /service-requests": "filtered",
   "GET /service-requests/:id": byId("request"),
+  "GET /service-requests/:id/file": byId("request"),
   "POST /service-requests": "body",
   "POST /service-requests/:id/assign": byId("request"),
   "POST /service-requests/:id/client-approval": byId("request"),
@@ -672,6 +675,10 @@ export function buildServer(
     return reply.status(201).send(await sr.openRequest(db, req.user!, input));
   });
   app.get<IdParams>("/service-requests/:id", async (req) => sr.getRequest(db, req.params.id));
+  // The service file for finance, printable.
+  app.get<IdParams>("/service-requests/:id/file", async (req) =>
+    serviceFile(db, req.params.id, { bank: can(req.user!.role, "bank.view"), amounts: can(req.user!.role, "amounts.view") }),
+  );
   app.post<IdParams>("/service-requests/:id/assign", async (req) =>
     sr.assignSupplier(db, req.user!, req.params.id, sr.assignInput.parse(req.body)),
   );
